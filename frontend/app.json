@@ -1,8 +1,9 @@
 {
   "expo": {
     "name": "frontend",
-    "slug": "frontend",
+    "slug": "astran-gameh",
     "version": "1.0.0",
+    "owner": "js8sjsjs-team",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
