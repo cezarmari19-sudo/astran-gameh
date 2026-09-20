@@ -34,6 +34,11 @@ jobs:
       - name: Fix Expo dependency versions
         run: npx expo install --fix
 
+      - name: Init EAS project (creates if missing)
+        run: eas init --account js8sjsjs-team --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
       - name: Build APK with EAS
         run: eas build --platform android --profile preview --non-interactive --no-wait
         env:
