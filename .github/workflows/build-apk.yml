@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Add native 3D packages via expo install
+        run: npx expo install expo-gl expo-three three
+
       - name: Fix Expo dependency versions
         run: npx expo install --fix
 
