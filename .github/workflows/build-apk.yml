@@ -39,7 +39,23 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
-      - name: Build APK with EAS
-        run: eas build --platform android --profile preview --non-interactive --no-wait
+      - name: Build APK with EAS (wait for result)
+        run: eas build --platform android --profile preview --non-interactive --wait --json > build-result.json
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Extract APK download URL
+        id: extract
+        run: |
+          URL=$(cat build-result.json | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(Array.isArray(d)?d[0].artifacts.buildUrl:d.artifacts.buildUrl)")
+          echo "apk_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Download APK
+        run: curl -L "${{ steps.extract.outputs.apk_url }}" -o astran-game.apk
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: astran-game-apk
+          path: frontend/astran-game.apk
+          retention-days: 30
