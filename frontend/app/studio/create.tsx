@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, TextInput, Modal, Platform, Alert, ActivityIndicator, KeyboardAvoidingView } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, TextInput, Modal, Platform, ActivityIndicator, KeyboardAvoidingView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -8,6 +8,7 @@ import * as ImagePicker from "expo-image-picker";
 import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
+import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
@@ -46,6 +47,15 @@ export default function StudioEditor() {
   const meshMap = useRef<Record<string, THREE.Object3D>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const groundRef = useRef<THREE.Mesh | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+
+  // Camera orbit control state (manual, gesture-driven — no auto animation)
+  const cameraAngle = useRef(0.6);       // horizontal angle (radians)
+  const cameraPolar = useRef(0.85);      // vertical angle (radians), clamped
+  const cameraDistance = useRef(9);      // distance from origin
+  const lastAngle = useRef(0);
+  const lastPolar = useRef(0);
+  const lastDistance = useRef(9);
 
   useEffect(() => {
     if (!editingId) return;
@@ -119,6 +129,7 @@ export default function StudioEditor() {
     finally { setBusy(false); }
   }
 
+  // Sync three.js scene with our state on every scene change
   useEffect(() => {
     const s = sceneRef.current;
     if (!s) return;
@@ -149,6 +160,18 @@ export default function StudioEditor() {
     if (groundRef.current) (groundRef.current.material as THREE.MeshStandardMaterial).color = new THREE.Color(scene.ground);
   }, [scene]);
 
+  function updateCameraPosition() {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    const r = cameraDistance.current;
+    const theta = cameraAngle.current;
+    const phi = cameraPolar.current;
+    cam.position.x = r * Math.sin(phi) * Math.cos(theta);
+    cam.position.z = r * Math.sin(phi) * Math.sin(theta);
+    cam.position.y = r * Math.cos(phi);
+    cam.lookAt(0, 0, 0);
+  }
+
   const onContextCreate = async (gl: any) => {
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
@@ -157,8 +180,8 @@ export default function StudioEditor() {
     const s = new THREE.Scene();
     sceneRef.current = s;
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100);
-    camera.position.set(5, 5, 7);
-    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
+    updateCameraPosition();
     s.add(new THREE.AmbientLight(0xffffff, 0.5));
     const dir = new THREE.DirectionalLight(0xffffff, 1.1);
     dir.position.set(5, 8, 4);
@@ -171,18 +194,42 @@ export default function StudioEditor() {
     s.add(ground);
     groundRef.current = ground;
     Object.keys(meshMap.current).forEach(k => delete meshMap.current[k]);
-    let t0 = 0;
+
     const render = () => {
       requestAnimationFrame(render);
-      t0 += 0.006;
-      camera.position.x = Math.cos(t0) * 7;
-      camera.position.z = Math.sin(t0) * 7;
-      camera.position.y = 4;
-      camera.lookAt(0, 0, 0);
       renderer.render(s, camera);
       gl.endFrameEXP();
     };
     render();
+  };
+
+  // --- Gesture handlers: drag to orbit, pinch to zoom ---
+  const onPanGestureEvent = (e: any) => {
+    const { translationX, translationY } = e.nativeEvent;
+    cameraAngle.current = lastAngle.current - translationX * 0.008;
+    let newPolar = lastPolar.current - translationY * 0.008;
+    newPolar = Math.max(0.2, Math.min(Math.PI - 0.2, newPolar)); // clamp to avoid flipping
+    cameraPolar.current = newPolar;
+    updateCameraPosition();
+  };
+  const onPanHandlerStateChange = (e: any) => {
+    if (e.nativeEvent.oldState === State.ACTIVE) {
+      lastAngle.current = cameraAngle.current;
+      lastPolar.current = cameraPolar.current;
+    }
+  };
+
+  const onPinchGestureEvent = (e: any) => {
+    const scaleFactor = e.nativeEvent.scale;
+    let newDist = lastDistance.current / scaleFactor;
+    newDist = Math.max(3, Math.min(25, newDist)); // clamp zoom range
+    cameraDistance.current = newDist;
+    updateCameraPosition();
+  };
+  const onPinchHandlerStateChange = (e: any) => {
+    if (e.nativeEvent.oldState === State.ACTIVE) {
+      lastDistance.current = cameraDistance.current;
+    }
   };
 
   const sel = scene.objects.find(o => o.id === selId);
@@ -205,7 +252,17 @@ export default function StudioEditor() {
             <Text style={{ color: colors.onSurface, marginTop: 4, fontWeight: "700" }}>{scene.objects.length} objects</Text>
           </View>
         ) : (
-          <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+          <PinchGestureHandler onGestureEvent={onPinchGestureEvent} onHandlerStateChange={onPinchHandlerStateChange}>
+            <PanGestureHandler onGestureEvent={onPanGestureEvent} onHandlerStateChange={onPanHandlerStateChange} minPointers={1} maxPointers={1}>
+              <View style={StyleSheet.absoluteFillObject}>
+                <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+                <View style={styles.hintPill} pointerEvents="none">
+                  <MaterialCommunityIcons name="gesture-swipe" size={14} color={colors.onSurface3} />
+                  <Text style={styles.hintText}>Drag to rotate · Pinch to zoom</Text>
+                </View>
+              </View>
+            </PanGestureHandler>
+          </PinchGestureHandler>
         )}
       </View>
 
@@ -344,6 +401,8 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, gap: 10 },
   title: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "800" },
   canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, margin: spacing.md, overflow: "hidden" },
+  hintPill: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
+  hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
   toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
   toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
   toolBtn: { alignItems: "center", justifyContent: "center", width: 68, paddingVertical: 8, backgroundColor: colors.surface3, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, gap: 2 },
