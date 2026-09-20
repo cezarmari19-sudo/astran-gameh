@@ -41,6 +41,13 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("astran")
 
+# Sandbox-ul Luau este optional: daca lipseste sau da eroare la import, restul API-ului merge normal.
+try:
+    from astran_sandbox.routes import make_sandbox_router
+except Exception as exc:  # noqa: BLE001
+    make_sandbox_router = None
+    log.warning("Luau sandbox disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -122,6 +129,7 @@ class GameCreateBody(BaseModel):
     category: str = "adventure"
     allow_join_via_friends: bool = True
     scene: Optional[dict] = None
+    script: str = Field(default="", max_length=20000)
 
 
 class GameUpdateBody(BaseModel):
@@ -132,6 +140,7 @@ class GameUpdateBody(BaseModel):
     thumbnail_url: Optional[str] = None
     category: Optional[str] = None
     scene: Optional[dict] = None
+    script: Optional[str] = Field(default=None, max_length=20000)
 
 
 class GamePublic(BaseModel):
@@ -457,6 +466,7 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "status": "active",
         "allow_join_via_friends": body.allow_join_via_friends,
         "scene": body.scene or {"objects": [], "sky": "#0F1012", "ground": "#1A1D21"},
+        "script": body.script,
     }
     await db.games.insert_one(doc)
     return {"game": {k: v for k, v in doc.items() if k != "_id"}}
@@ -501,13 +511,13 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
         "popular": [("likes", -1), ("total_plays", -1)],
     }
     sort = sort_map.get(section, sort_map["for_you"])
-    cursor = db.games.find(q, {"_id": 0}).sort(sort).limit(30)
+    cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
     return {"section": section, "games": await cursor.to_list(30)}
 
 
 @api.get("/games/mine")
 async def my_games(current=Depends(get_current_user)):
-    cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0}).sort("created_at", -1)
+    cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0, "script": 0}).sort("created_at", -1)
     return {"games": await cursor.to_list(100)}
 
 
@@ -518,7 +528,7 @@ async def recently_played(current=Depends(get_current_user)):
     game_ids = [e["game_id"] for e in entries]
     if not game_ids:
         return {"games": []}
-    games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0}).to_list(50)
+    games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0, "script": 0}).to_list(50)
     idx = {g["game_id"]: g for g in games}
     return {"games": [idx[gid] for gid in game_ids if gid in idx]}
 
@@ -530,6 +540,9 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
+    # codul sursa al scriptului il vede doar proprietarul (sau adminul platformei)
+    if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+        g.pop("script", None)
     return {"game": g}
 
 
@@ -860,6 +873,10 @@ async def languages():
         ],
     }
 
+
+# Sandbox Luau: /api/sandbox/run si /api/sandbox/games/{game_id}/run
+if make_sandbox_router is not None:
+    api.include_router(make_sandbox_router(get_current_user, db))
 
 app.include_router(api)
 
