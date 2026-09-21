@@ -33,6 +33,9 @@ type Props = {
   files: ScriptFile[];
   onChange: (files: ScriptFile[]) => void;
   onClose: () => void;
+  onSave?: () => void;
+  saving?: boolean;
+  saved?: boolean;
 };
 
 const ENTRY = "main";
@@ -66,7 +69,7 @@ end
 return Utils
 `;
 
-export default function ScriptEditor({ visible, files, onChange, onClose }: Props) {
+export default function ScriptEditor({ visible, files, onChange, onClose, onSave, saving, saved }: Props) {
   const [active, setActive] = useState(0);
   const [dialog, setDialog] = useState<null | { mode: "new" | "rename"; value: string }>(null);
   const [dialogErr, setDialogErr] = useState("");
@@ -159,7 +162,7 @@ export default function ScriptEditor({ visible, files, onChange, onClose }: Prop
       <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
         <View style={styles.header}>
           <Pressable onPress={onClose} testID="script-close">
-            <MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} />
+            <MaterialCommunityIcons name="close" size={24} color={colors.onSurface} />
           </Pressable>
           <Text style={styles.title} numberOfLines={1}>Scripts</Text>
           <Pressable onPress={run} disabled={runBusy || files.length === 0} testID="script-run" style={[styles.runBtn, files.length === 0 && { opacity: 0.4 }]}>
@@ -170,6 +173,16 @@ export default function ScriptEditor({ visible, files, onChange, onClose }: Prop
             )}
             <Text style={styles.runText}>Run</Text>
           </Pressable>
+          {onSave ? (
+            <Pressable onPress={onSave} disabled={saving} testID="script-save" style={styles.saveBtn}>
+              {saving ? (
+                <ActivityIndicator size="small" color={colors.onBrand} />
+              ) : (
+                <MaterialCommunityIcons name={saved ? "check-all" : "content-save"} size={18} color={colors.onBrand} />
+              )}
+              <Text style={styles.saveText}>{saved ? "Saved" : "Save"}</Text>
+            </Pressable>
+          ) : null}
         </View>
 
         <View style={styles.tabsWrap}>
@@ -245,7 +258,7 @@ export default function ScriptEditor({ visible, files, onChange, onClose }: Prop
                 </Text>
               ) : (
                 <Text style={styles.hint}>
-                  Load another file with require("name"). Scripts are saved with the game: close this and tap the check button.
+                  Load another file with require("name"). Tap Save (top right) to save the game together with these scripts.
                 </Text>
               )}
 
@@ -310,6 +323,8 @@ const styles = StyleSheet.create({
   title: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "800" },
   runBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.brand },
   runText: { color: colors.brand, fontWeight: "800", fontSize: 13 },
+  saveBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.brand },
+  saveText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
   tabsWrap: { borderBottomWidth: 1, borderColor: colors.border },
   tabsRow: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm, gap: 8, alignItems: "center" },
   tab: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
