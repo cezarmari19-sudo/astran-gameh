@@ -1,16 +1,23 @@
-// Astran Luau sandbox host.
+// Astran Luau sandbox host (multi-fisier).
 //
-//   luau-sandbox --prelude prelude.luau [--timeout ms] [--mem MB] [file | -]
+//   luau-sandbox --prelude prelude.luau [--timeout ms] [--mem MB] [--entry main] [file | -]
 //
-// Citeste scriptul (Luau, ca in Roblox Studio) din fisier sau stdin si il
-// ruleaza izolat: fara io/require, cu limita de timp si de memorie.
+// Intrare (stdin sau fisier), unul din formate:
+//   1) un bundle de fisiere:   @@FILE <nume> <nr_octeti>\n<continut>\n ...
+//   2) cod Luau simplu (tratat ca un singur fisier numit "main")
+//
+// Fisierul "entry" (implicit "main") ruleaza primul; celelalte pot fi incarcate
+// din script cu require("nume"). Toate ruleaza izolat: fara io/os.execute,
+// cu limita de timp si de memorie.
+//
 // Scrie pe stdout cate un obiect JSON pe linie:
 //   {"type":"print","msg":"..."}    {"type":"warn","msg":"..."}
 //   {"type":"error","msg":"..."}    {"type":"ops","data":{...}}
 //
-// Exit code: 0 ok, 1 argumente/fisiere gresite, 2 eroare de compilare,
+// Exit code: 0 ok, 1 argumente/fisiere gresite, 2 eroare de compilare/intrare,
 //            3 eroare interna la rulare.
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +25,9 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <string>
+#include <vector>
 
 #include "lua.h"
 #include "luacode.h"
@@ -31,7 +40,15 @@ static size_t g_printBytes = 0;
 
 static const size_t kMaxPrintBytes = 256 * 1024;    // total text din print/warn
 static const size_t kMaxOpsBytes = 2 * 1024 * 1024; // rezultatul final
-static const size_t kMaxSourceBytes = 200 * 1024;   // dimensiunea scriptului
+static const size_t kMaxSourceBytes = 400 * 1024;   // toate fisierele la un loc
+static const size_t kMaxFiles = 32;
+static const size_t kMaxNameLen = 64;
+
+struct SourceFile
+{
+    std::string name;
+    std::string source;
+};
 
 // ---------- output JSON ----------
 
@@ -162,6 +179,121 @@ static void* allocator(void* ud, void* ptr, size_t osize, size_t nsize)
     return p;
 }
 
+// ---------- intrare: bundle de fisiere ----------
+
+static bool validName(const std::string& n)
+{
+    if (n.empty() || n.size() > kMaxNameLen)
+        return false;
+    if (n.front() == '/' || n.back() == '/')
+        return false;
+    for (size_t i = 0; i < n.size(); i++)
+    {
+        unsigned char c = (unsigned char)n[i];
+        bool ok = std::isalnum(c) != 0 || c == '_' || c == '-' || c == '/';
+        if (!ok)
+            return false;
+        if (c == '/' && i + 1 < n.size() && n[i + 1] == '/')
+            return false;
+    }
+    return true;
+}
+
+static bool parseBundle(const std::string& in, std::vector<SourceFile>& files, std::string& err)
+{
+    size_t pos = 0;
+    while (pos < in.size())
+    {
+        if (in[pos] == '\n')
+        {
+            pos++;
+            continue;
+        }
+
+        if (in.compare(pos, 7, "@@FILE ") != 0)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        size_t eol = in.find('\n', pos);
+        if (eol == std::string::npos)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        std::string header = in.substr(pos + 7, eol - (pos + 7));
+        size_t sp = header.rfind(' ');
+        if (sp == std::string::npos)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        std::string name = header.substr(0, sp);
+        unsigned long n = std::strtoul(header.c_str() + sp + 1, nullptr, 10);
+
+        pos = eol + 1;
+        if (n > in.size() - pos)
+        {
+            err = "truncated script bundle";
+            return false;
+        }
+
+        files.push_back({name, in.substr(pos, n)});
+        pos += n;
+    }
+    return true;
+}
+
+static bool parseInput(const std::string& in, std::vector<SourceFile>& files, std::string& err)
+{
+    if (in.compare(0, 7, "@@FILE ") == 0)
+    {
+        if (!parseBundle(in, files, err))
+            return false;
+    }
+    else
+    {
+        files.push_back({"main", in});
+    }
+
+    if (files.empty())
+    {
+        err = "no scripts";
+        return false;
+    }
+    if (files.size() > kMaxFiles)
+    {
+        err = "too many scripts";
+        return false;
+    }
+
+    std::set<std::string> seen;
+    size_t total = 0;
+    for (const SourceFile& f : files)
+    {
+        if (!validName(f.name))
+        {
+            err = "invalid script name: " + f.name;
+            return false;
+        }
+        if (!seen.insert(f.name).second)
+        {
+            err = "duplicate script name: " + f.name;
+            return false;
+        }
+        total += f.source.size();
+    }
+    if (total > kMaxSourceBytes)
+    {
+        err = "scripts too large";
+        return false;
+    }
+    return true;
+}
+
 // ---------- utilitare ----------
 
 static bool readFile(const std::string& path, std::string& out)
@@ -173,12 +305,13 @@ static bool readFile(const std::string& path, std::string& out)
     return true;
 }
 
-// Compileaza si incarca un chunk pe stiva lui T. La eroare pune mesajul in err.
-static bool loadChunk(lua_State* T, const std::string& src, const char* chunkName, std::string& err)
+// Compileaza si incarca un chunk pe stiva lui T. La eroare pune mesajul in err
+// si nu lasa nimic pe stiva.
+static bool loadChunk(lua_State* T, const std::string& src, const std::string& chunkName, std::string& err)
 {
     size_t bcSize = 0;
     char* bytecode = luau_compile(src.data(), src.size(), nullptr, &bcSize);
-    int rc = luau_load(T, chunkName, bytecode, bcSize, 0);
+    int rc = luau_load(T, chunkName.c_str(), bytecode, bcSize, 0);
     std::free(bytecode);
 
     if (rc != 0)
@@ -197,6 +330,7 @@ int main(int argc, char** argv)
     size_t memMB = 64;
     std::string path = "-";
     std::string preludePath;
+    std::string entry = "main";
 
     for (int i = 1; i < argc; i++)
     {
@@ -207,13 +341,15 @@ int main(int argc, char** argv)
             memMB = (size_t)std::atol(argv[++i]);
         else if (a == "--prelude" && i + 1 < argc)
             preludePath = argv[++i];
+        else if (a == "--entry" && i + 1 < argc)
+            entry = argv[++i];
         else
             path = a;
     }
 
     if (timeoutMs <= 0 || memMB == 0 || preludePath.empty())
     {
-        std::fprintf(stderr, "usage: luau-sandbox --prelude file [--timeout ms] [--mem MB] [file|-]\n");
+        std::fprintf(stderr, "usage: luau-sandbox --prelude file [--timeout ms] [--mem MB] [--entry name] [file|-]\n");
         return 1;
     }
 
@@ -224,20 +360,34 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::string source;
+    std::string input;
     if (path == "-")
     {
-        source.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+        input.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
     }
-    else if (!readFile(path, source))
+    else if (!readFile(path, input))
     {
         std::fprintf(stderr, "cannot read %s\n", path.c_str());
         return 1;
     }
 
-    if (source.size() > kMaxSourceBytes)
+    std::vector<SourceFile> files;
+    std::string err;
+    if (!parseInput(input, files, err))
     {
-        emit("error", "script too large");
+        emit("error", err);
+        return 2;
+    }
+
+    size_t entryIndex = files.size();
+    for (size_t i = 0; i < files.size(); i++)
+    {
+        if (files[i].name == entry)
+            entryIndex = i;
+    }
+    if (entryIndex == files.size())
+    {
+        emit("error", "missing entry script '" + entry + "'");
         return 2;
     }
 
@@ -266,17 +416,7 @@ int main(int argc, char** argv)
 
     lua_callbacks(L)->interrupt = onInterrupt;
 
-    std::string err;
-
-    // stiva lui T: [userFn]
-    if (!loadChunk(T, source, "=script", err))
-    {
-        emit("error", err);
-        lua_close(L);
-        return 2;
-    }
-
-    // stiva lui T: [userFn, preludeFn]
+    // stiva lui T: [preludeFn]
     if (!loadChunk(T, prelude, "=prelude", err))
     {
         emit("error", "prelude: " + err);
@@ -284,14 +424,43 @@ int main(int argc, char** argv)
         return 3;
     }
 
-    // apel: preludeFn(userFn, emit)
-    lua_pushvalue(T, -2);
+    bool failed = false;
+
+    // stiva lui T: [preludeFn, entryFn]
+    if (!loadChunk(T, files[entryIndex].source, "=" + files[entryIndex].name, err))
+    {
+        emit("error", err);
+        failed = true;
+    }
+
+    // stiva lui T: [preludeFn, entryFn, emit, modules]
     lua_pushcfunction(T, luaEmit, "emit");
+    lua_createtable(T, 0, (int)files.size());
+
+    // toate celelalte fisiere devin module pentru require("nume")
+    for (size_t i = 0; i < files.size(); i++)
+    {
+        if (i == entryIndex)
+            continue;
+        if (!loadChunk(T, files[i].source, "=" + files[i].name, err))
+        {
+            emit("error", err);
+            failed = true;
+            continue;
+        }
+        lua_setfield(T, -2, files[i].name.c_str());
+    }
+
+    if (failed)
+    {
+        lua_close(L);
+        return 2;
+    }
 
     g_deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
 
     int rc = 0;
-    if (lua_pcall(T, 2, 0, 0) != 0)
+    if (lua_pcall(T, 3, 0, 0) != 0)
     {
         const char* m = lua_tostring(T, -1);
         emit("error", m ? m : "runtime error");
