@@ -30,11 +30,25 @@ cmake -S "${SRC}" -B "${OUT}" \
 
 cmake --build "${OUT}" --target Luau.VM Luau.Compiler Luau.Ast -j "$(nproc 2>/dev/null || echo 2)"
 
+# In versiunile noi Luau e impartit in mai multe biblioteci (Bytecode, Common...).
+# Se leaga toate cele care exista, in orice ordine (grup), ca sa mearga cu orice versiune.
+LIBS=()
+for name in Compiler Ast Bytecode Common VM; do
+  lib="${OUT}/libLuau.${name}.a"
+  if [ -f "${lib}" ]; then
+    LIBS+=("${lib}")
+  fi
+done
+
+if [ ! -f "${OUT}/libLuau.VM.a" ] || [ ! -f "${OUT}/libLuau.Compiler.a" ]; then
+  echo "Nu am gasit bibliotecile Luau in ${OUT}:" >&2
+  ls "${OUT}" >&2 || true
+  exit 1
+fi
+
 g++ -std=c++17 -O2 "${HERE}/host.cpp" \
   -I"${SRC}/VM/include" -I"${SRC}/Compiler/include" \
-  -Wl,--start-group \
-  "${OUT}/libLuau.Compiler.a" "${OUT}/libLuau.Ast.a" "${OUT}/libLuau.VM.a" \
-  -Wl,--end-group -lm \
+  -Wl,--start-group "${LIBS[@]}" -Wl,--end-group -lm \
   -o "${BIN}/luau-sandbox"
 
 echo "Gata: ${BIN}/luau-sandbox"
