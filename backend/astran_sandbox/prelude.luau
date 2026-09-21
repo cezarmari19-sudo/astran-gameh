@@ -1,13 +1,14 @@
 -- Astran Luau prelude.
--- Rulat de host ca: prelude(userFn, emit)
---   userFn = scriptul utilizatorului (deja compilat)
---   emit   = functie a host-ului: emit("ops", json) / emit("error", text)
+-- Rulat de host ca: prelude(userFn, emit, modules)
+--   userFn  = scriptul "main" al utilizatorului (deja compilat)
+--   emit    = functie a host-ului: emit("ops", json) / emit("error", text)
+--   modules = tabel nume -> functie, cu celelalte fisiere (pentru require)
 --
 -- Scriptul ruleaza pe un ceas VIRTUAL: task.wait() nu asteapta cu adevarat,
 -- doar avanseaza timpul si inregistreaza operatiile (create/set/destroy) cu
 -- momentul la care s-au intamplat. Clientul le reda apoi in scena 3D.
 
-local userFn, emit = ...
+local userFn, emit, modules = ...
 
 -- ===== limite =====
 local MAX_OPS = 5000       -- operatii inregistrate
@@ -21,7 +22,7 @@ local MIN_WAIT = 1 / 60
 
 -- ===== functii de baza captate local (scriptul nu le poate schimba) =====
 local type, tostring, tonumber, pairs = type, tostring, tonumber, pairs
-local setmetatable, getmetatable, error, rawequal = setmetatable, getmetatable, error, rawequal
+local setmetatable, getmetatable, error, rawequal, pcall = setmetatable, getmetatable, error, rawequal, pcall
 local floor, abs, huge, sqrt = math.floor, math.abs, math.huge, math.sqrt
 local sformat, sgsub, sbyte, ssub, smatch = string.format, string.gsub, string.byte, string.sub, string.match
 local concat, tremove, tpack, tunpack = table.concat, table.remove, table.pack, table.unpack
@@ -554,6 +555,42 @@ end
 
 function time()
     return now
+end
+
+-- ===== require("nume") pentru celelalte fisiere ale jocului =====
+local loadedModules = {}
+local loadingModules = {}
+
+function require(name)
+    if type(name) ~= "string" then
+        error("require expects the name of a script, e.g. require(\"utils\")", 2)
+    end
+
+    local cached = loadedModules[name]
+    if cached ~= nil then
+        return cached.value
+    end
+
+    local fn = modules[name]
+    if fn == nil then
+        error("script '" .. name .. "' was not found (require uses the file name, e.g. require(\"utils\"))", 2)
+    end
+    if loadingModules[name] then
+        error("cyclic require: '" .. name .. "' is already loading", 2)
+    end
+
+    loadingModules[name] = true
+    local ok, result = pcall(fn)
+    loadingModules[name] = nil
+    if not ok then
+        error(result, 0)
+    end
+
+    if result == nil then
+        result = true
+    end
+    loadedModules[name] = { value = result }
+    return result
 end
 
 -- ===== globale vizibile scriptului =====
