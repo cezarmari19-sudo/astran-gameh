@@ -16,12 +16,28 @@ import { PrimaryButton } from "@/src/components/ui";
 
 type SceneObj = { id: string; type: "cube" | "sphere" | "cylinder" | "cone" | "tree"; x: number; y: number; z: number; color: string; scale: number };
 type Scene = { objects: SceneObj[]; sky: string; ground: string };
+type RunResult = { ok: boolean; output: { level: string; msg: string }[]; errors: string[]; ops: any[]; duration: number; truncated: boolean };
 
 const PALETTE = ["#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "#FF9500", "#B266FF", "#FFFFFF", "#666666"];
 const OBJ_TYPES: SceneObj["type"][] = ["cube", "sphere", "cylinder", "cone", "tree"];
 const OBJ_ICON: Record<SceneObj["type"], string> = {
   cube: "cube-outline", sphere: "circle-outline", cylinder: "cylinder", cone: "triangle-outline", tree: "pine-tree",
 };
+
+const EXAMPLE_SCRIPT = `-- Script Luau (ca in Roblox Studio)
+local part = Instance.new("Part")
+part.Shape = "Ball"
+part.Color = Color3.fromRGB(255, 80, 80)
+part.Position = Vector3.new(0, 6, 0)
+part.Parent = workspace
+
+print("salut din sandbox!")
+
+for i = 1, 20 do
+  task.wait(0.1)
+  part.Position = part.Position - Vector3.new(0, 0.25, 0)
+end
+`;
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -43,6 +59,13 @@ export default function StudioEditor() {
   const [showMeta, setShowMeta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Script Luau (rulat in sandbox pe server)
+  const [script, setScript] = useState("");
+  const scriptDirty = useRef(false); // scriptul se trimite la salvare doar daca a fost modificat (sau jocul e nou)
+  const [showScript, setShowScript] = useState(false);
+  const [runBusy, setRunBusy] = useState(false);
+  const [runRes, setRunRes] = useState<RunResult | null>(null);
 
   const meshMap = useRef<Record<string, THREE.Object3D>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -67,6 +90,7 @@ export default function StudioEditor() {
         setAgeCategory(g.age_category); setIsPublic(g.is_public);
         setThumbnail(g.thumbnail_url || null);
         setScene(g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" });
+        setScript(g.script || "");
       } catch (e: any) { setErr(e.message); }
       setLoading(false);
     })();
@@ -104,11 +128,27 @@ export default function StudioEditor() {
     } catch (e: any) { setErr(e.message); }
   }
 
+  function changeScript(v: string) {
+    scriptDirty.current = true;
+    setScript(v);
+  }
+
+  async function runScript() {
+    setRunBusy(true); setRunRes(null);
+    try {
+      const r = await api("/sandbox/run", { method: "POST", body: JSON.stringify({ source: script }) });
+      setRunRes(r);
+    } catch (e: any) {
+      setRunRes({ ok: false, output: [], errors: [e.message || "Run failed"], ops: [], duration: 0, truncated: false });
+    } finally { setRunBusy(false); }
+  }
+
   async function save() {
     if (!title || title.length < 2) { setErr("Title too short"); setShowMeta(true); return; }
     setBusy(true); setErr(null);
     try {
-      const body = { title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail, scene };
+      const body: any = { title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail, scene };
+      if (!editingId || scriptDirty.current) body.script = script;
       if (editingId) await api(`/games/${editingId}`, { method: "PATCH", body: JSON.stringify(body) });
       else await api("/games", { method: "POST", body: JSON.stringify(body) });
       if (router.canGoBack()) router.back();
@@ -269,6 +309,10 @@ export default function StudioEditor() {
       <View style={styles.toolbar}>
         <Text style={styles.toolLabel}>ADD</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
+          <Pressable testID="editor-script" onPress={() => setShowScript(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="code-braces" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>{script.trim() ? "script ✓" : "script"}</Text>
+          </Pressable>
           {OBJ_TYPES.map(k => (
             <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
               <MaterialCommunityIcons name={OBJ_ICON[k] as any} size={22} color={colors.brand} />
@@ -346,6 +390,60 @@ export default function StudioEditor() {
         </View>
       </View>
 
+      <Modal visible={showScript} animationType="slide" onRequestClose={() => setShowScript(false)}>
+        <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
+          <View style={styles.header}>
+            <Pressable onPress={() => setShowScript(false)} testID="script-close">
+              <MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} />
+            </Pressable>
+            <Text style={styles.title} numberOfLines={1}>Script (Luau)</Text>
+            <Pressable onPress={runScript} disabled={runBusy} testID="script-run" style={styles.runBtn}>
+              {runBusy ? (
+                <ActivityIndicator size="small" color={colors.brand} />
+              ) : (
+                <MaterialCommunityIcons name="play" size={18} color={colors.brand} />
+              )}
+              <Text style={styles.runText}>Run</Text>
+            </Pressable>
+          </View>
+          <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
+            <TextInput
+              testID="script-input"
+              value={script}
+              onChangeText={changeScript}
+              multiline
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              textAlignVertical="top"
+              placeholder="-- write Luau here"
+              placeholderTextColor={colors.onSurface3}
+              style={styles.codeInput}
+            />
+            {!script.trim() ? (
+              <Pressable testID="script-example" onPress={() => changeScript(EXAMPLE_SCRIPT)} style={styles.exampleBtn}>
+                <MaterialCommunityIcons name="text-box-plus-outline" size={16} color={colors.brand} />
+                <Text style={styles.exampleText}>Insert example</Text>
+              </Pressable>
+            ) : null}
+            <Text style={styles.scriptHint}>The script is saved with the game: go back and tap the check button.</Text>
+            {runRes ? (
+              <ScrollView style={styles.consoleBox} contentContainerStyle={{ padding: spacing.md, gap: 4 }}>
+                {runRes.output.map((o, i) => (
+                  <Text key={`o${i}`} style={[styles.consoleLine, o.level === "warn" && { color: colors.warning }]}>{o.msg}</Text>
+                ))}
+                {runRes.errors.map((e, i) => (
+                  <Text key={`e${i}`} style={[styles.consoleLine, { color: colors.error }]}>{e}</Text>
+                ))}
+                <Text style={styles.consoleMeta}>
+                  {runRes.ok ? "OK" : "Failed"} · {runRes.ops.length} scene changes · {runRes.duration.toFixed(1)}s{runRes.truncated ? " · stopped at the limit" : ""}
+                </Text>
+              </ScrollView>
+            ) : null}
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      </Modal>
+
       <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }} onPress={() => setShowMeta(false)} />
@@ -395,6 +493,8 @@ export default function StudioEditor() {
   );
 }
 
+const mono = Platform.OS === "ios" ? "Menlo" : "monospace";
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.surface },
   center: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
@@ -425,6 +525,15 @@ const styles = StyleSheet.create({
   footer: { flexDirection: "row", alignItems: "center", gap: 8, padding: spacing.md, borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   delBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.error, alignItems: "center", justifyContent: "center" },
   playBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  runBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.brand },
+  runText: { color: colors.brand, fontWeight: "800", fontSize: 13 },
+  codeInput: { flex: 1, marginHorizontal: spacing.md, padding: spacing.md, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, color: colors.onSurface, fontFamily: mono, fontSize: 13 },
+  exampleBtn: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start", marginHorizontal: spacing.md, marginTop: spacing.sm, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  exampleText: { color: colors.brand, fontWeight: "700", fontSize: 12 },
+  scriptHint: { color: colors.onSurface3, fontSize: 11, marginHorizontal: spacing.lg, marginTop: spacing.sm },
+  consoleBox: { maxHeight: 180, margin: spacing.md, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.borderStrong },
+  consoleLine: { color: colors.onSurface2, fontFamily: mono, fontSize: 12 },
+  consoleMeta: { color: colors.onSurface3, fontSize: 11, marginTop: 6 },
   sheet: { maxHeight: "88%", backgroundColor: colors.surface, padding: spacing.lg, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderTopWidth: 1, borderColor: colors.border },
   sheetTitle: { color: colors.onSurface, fontSize: 20, fontWeight: "900", marginBottom: 12 },
   thumbBox: { height: 140, borderRadius: radius.md, overflow: "hidden", marginBottom: 4, borderWidth: 1, borderColor: colors.border },
