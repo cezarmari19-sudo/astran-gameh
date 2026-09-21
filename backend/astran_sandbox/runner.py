@@ -1,4 +1,4 @@
-"""Ruleaza scripturi Luau in procesul izolat `luau-sandbox`.
+"""Ruleaza scripturi Luau (unul sau mai multe fisiere) in procesul izolat `luau-sandbox`.
 
 Nu depinde de FastAPI, doar de biblioteca standard.
 """
@@ -20,7 +20,11 @@ HERE = Path(__file__).parent
 PRELUDE = HERE / "prelude.luau"
 DEFAULT_BINARY = HERE / "bin" / "luau-sandbox"
 
-MAX_SOURCE_CHARS = 20000
+ENTRY_NAME = "main"          # fisierul care ruleaza primul
+MAX_FILES = 32
+MAX_NAME_CHARS = 64
+MAX_SOURCE_CHARS = 20000     # per fisier
+MAX_TOTAL_CHARS = 100000     # toate fisierele la un loc
 MAX_OPS = 5000
 MAX_LOG_LINES = 200
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
@@ -29,11 +33,75 @@ CACHE_SIZE = 128
 
 SHAPE_TYPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$")
 
 
 class SandboxUnavailable(RuntimeError):
     """Binarul luau-sandbox nu este instalat pe server."""
 
+
+# ---------- fisiere ----------
+
+def validate_files(files: Any) -> list[dict]:
+    """Verifica lista de fisiere {name, source} si intoarce o copie curata. Ridica ValueError."""
+    if not isinstance(files, list):
+        raise ValueError("files must be a list")
+    if len(files) > MAX_FILES:
+        raise ValueError(f"Too many scripts (max {MAX_FILES})")
+
+    clean: list[dict] = []
+    seen: set[str] = set()
+    total = 0
+    for f in files:
+        if not isinstance(f, dict):
+            raise ValueError("Invalid script entry")
+        name = f.get("name")
+        source = f.get("source", "")
+        if not isinstance(name, str) or not isinstance(source, str):
+            raise ValueError("Invalid script entry")
+        if len(name) > MAX_NAME_CHARS or not _NAME_RE.match(name):
+            raise ValueError(f"Invalid script name '{name[:40]}' (use letters, numbers, _ - and /)")
+        if name in seen:
+            raise ValueError(f"Duplicate script name '{name}'")
+        if len(source) > MAX_SOURCE_CHARS:
+            raise ValueError(f"Script '{name}' is too long (max {MAX_SOURCE_CHARS} characters)")
+        seen.add(name)
+        total += len(source)
+        clean.append({"name": name, "source": source})
+
+    if total > MAX_TOTAL_CHARS:
+        raise ValueError(f"Scripts are too long together (max {MAX_TOTAL_CHARS} characters)")
+    return clean
+
+
+def files_from_source(source: str) -> list[dict]:
+    """Un singur script (compatibilitate) = fisierul 'main'."""
+    return [{"name": ENTRY_NAME, "source": source}]
+
+
+def _bundle(files: list[dict]) -> bytes:
+    parts: list[bytes] = []
+    for f in files:
+        data = f["source"].encode("utf-8")
+        parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"\n")
+        parts.append(data)
+        parts.append(b"\n")
+    return b"".join(parts)
+
+
+def _cache_key(files: list[dict]) -> str:
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f["name"].encode("utf-8"))
+        h.update(b"\0")
+        data = f["source"].encode("utf-8")
+        h.update(str(len(data)).encode("ascii"))
+        h.update(b"\0")
+        h.update(data)
+    return h.hexdigest()
+
+
+# ---------- proces ----------
 
 def find_binary() -> Optional[str]:
     candidates = [os.environ.get("LUAU_SANDBOX_BIN"), str(DEFAULT_BINARY), shutil.which("luau-sandbox")]
@@ -78,6 +146,8 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
         except ProcessLookupError:
             pass
 
+
+# ---------- rezultat ----------
 
 def _number(v: Any) -> Optional[float]:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -174,6 +244,8 @@ def parse_output(stdout: bytes, returncode: Optional[int]) -> dict:
     return result
 
 
+# ---------- rulare ----------
+
 _semaphore: Optional[asyncio.Semaphore] = None
 
 
@@ -184,9 +256,10 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
-async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> dict:
-    if len(source) > MAX_SOURCE_CHARS:
-        raise ValueError(f"Script too long (max {MAX_SOURCE_CHARS} characters)")
+async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64) -> dict:
+    clean = validate_files(files)
+    if not any(f["name"] == ENTRY_NAME for f in clean):
+        raise ValueError(f"Missing the '{ENTRY_NAME}' script (it runs first)")
 
     binary = find_binary()
     if binary is None or not PRELUDE.is_file():
@@ -198,6 +271,7 @@ async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> d
             "--timeout", str(timeout_ms),
             "--mem", str(mem_mb),
             "--prelude", str(PRELUDE),
+            "--entry", ENTRY_NAME,
             "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -208,7 +282,7 @@ async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> d
         )
         try:
             stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(source.encode("utf-8")),
+                proc.communicate(_bundle(clean)),
                 timeout=timeout_ms / 1000 + 1.5,
             )
         except asyncio.TimeoutError:
@@ -222,18 +296,24 @@ async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> d
     return parse_output(stdout, proc.returncode)
 
 
+async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> dict:
+    """Compatibilitate: un singur script = fisierul 'main'."""
+    return await run_files(files_from_source(source), timeout_ms, mem_mb)
+
+
 _cache: "OrderedDict[str, dict]" = OrderedDict()
 
 
-async def run_cached(source: str) -> dict:
-    """Ca run_script, dar retine rezultatele recente (jocurile se ruleaza des, scriptul se schimba rar)."""
-    key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+async def run_cached_files(files: Any) -> dict:
+    """Ca run_files, dar retine rezultatele recente (jocurile se ruleaza des, scriptul se schimba rar)."""
+    clean = validate_files(files)
+    key = _cache_key(clean)
     hit = _cache.get(key)
     if hit is not None:
         _cache.move_to_end(key)
         return hit
 
-    result = await run_script(source)
+    result = await run_files(clean)
     if result["ok"]:
         _cache[key] = result
         while len(_cache) > CACHE_SIZE:
