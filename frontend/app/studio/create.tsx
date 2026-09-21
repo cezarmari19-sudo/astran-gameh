@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, TextInput, Modal, Platform, ActivityIndicator, KeyboardAvoidingView } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, TextInput, Modal, Platform, ActivityIndicator, KeyboardAvoidingView, Alert, BackHandler } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -50,6 +50,7 @@ export default function StudioEditor() {
   const scriptsDirty = useRef(false); // se trimit la salvare doar daca au fost modificate
   const [showScript, setShowScript] = useState(false);
   const createdId = useRef<string | null>(null); // id-ul jocului nou creat, ca sa nu se creeze de doua ori
+  const [saved, setSaved] = useState(false); // arata "Salvat" o clipa dupa salvare
 
   const meshMap = useRef<Record<string, THREE.Object3D>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -82,6 +83,23 @@ export default function StudioEditor() {
       setLoading(false);
     })();
   }, [editingId]);
+
+  // Ieșirea din editor: daca sunt scripturi nesalvate, intreaba inainte sa se piarda
+  function leave() {
+    if (!scriptsDirty.current) { router.back(); return; }
+    Alert.alert("Ieși fără să salvezi?", "Scripturile modificate nu au fost salvate și se vor pierde.", [
+      { text: "Rămâi", style: "cancel" },
+      { text: "Ieși", style: "destructive", onPress: () => router.back() },
+    ]);
+  }
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (scriptsDirty.current) { leave(); return true; }
+      return false;
+    });
+    return () => sub.remove();
+  }, []);
 
   function addObject(type: SceneObj["type"]) {
     const obj: SceneObj = { id: uid(), type, x: (Math.random() - 0.5) * 4, y: 0, z: (Math.random() - 0.5) * 4, color: PALETTE[Math.floor(Math.random() * PALETTE.length)], scale: 1 };
@@ -116,7 +134,7 @@ export default function StudioEditor() {
   }
 
   async function save() {
-    if (!title || title.length < 2) { setErr("Title too short"); setShowMeta(true); return; }
+    if (!title || title.length < 2) { setErr("Title too short"); setShowScript(false); setShowMeta(true); return; }
     setBusy(true); setErr(null);
     try {
       const body = { title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail, scene };
@@ -132,9 +150,13 @@ export default function StudioEditor() {
         await api(`/sandbox/games/${gameId}/files`, { method: "PUT", body: JSON.stringify({ files: scriptFiles }) });
         scriptsDirty.current = false;
       }
-      if (router.canGoBack()) router.back();
-      else router.replace("/(tabs)/studio");
-    } catch (e: any) { setErr(e.message); setShowMeta(true); }
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+      if (!editingId && gameId) {
+        // joc nou: trecem in modul de editare (apare ▶ si se reincarca de pe server ce s-a salvat)
+        router.replace({ pathname: "/studio/edit/[id]", params: { id: gameId } });
+      }
+    } catch (e: any) { setErr(e.message); setShowScript(false); setShowMeta(true); }
     finally { setBusy(false); }
   }
 
@@ -260,8 +282,8 @@ export default function StudioEditor() {
   return (
     <SafeAreaView style={styles.root} edges={["top"]}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} testID="editor-back"><MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} /></Pressable>
-        <Text style={styles.title} numberOfLines={1}>{title || t("create_game")}</Text>
+        <Pressable onPress={leave} testID="editor-back"><MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} /></Pressable>
+        <Text style={styles.title} numberOfLines={1}>{saved ? "Salvat ✓" : (title || t("create_game"))}</Text>
         <Pressable onPress={() => setShowMeta(true)} testID="editor-meta"><MaterialCommunityIcons name="cog" size={22} color={colors.onSurface} /></Pressable>
       </View>
 
@@ -374,8 +396,11 @@ export default function StudioEditor() {
       <ScriptEditor
         visible={showScript}
         files={scriptFiles}
-        onChange={files => { scriptsDirty.current = true; setScriptFiles(files); }}
+        onChange={files => { scriptsDirty.current = true; setSaved(false); setScriptFiles(files); }}
         onClose={() => setShowScript(false)}
+        onSave={save}
+        saving={busy}
+        saved={saved}
       />
 
       <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
