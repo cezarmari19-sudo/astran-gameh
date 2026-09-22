@@ -12,13 +12,38 @@ import { colors, radius, spacing } from "@/src/theme";
 
 type SceneObj = { id: string; type: string; x: number; y: number; z: number; color: string; scale: number };
 
+// Operatie produsa de scriptul Luau al jocului (vezi backend/astran_sandbox)
+type ScriptOp = {
+  t: number; // secunde de la startul jocului
+  op: "create" | "set" | "destroy";
+  id: string;
+  type?: string;
+  x?: number;
+  y?: number;
+  z?: number;
+  color?: string;
+  scale?: number;
+  name?: string;
+};
+
+type MeshState = { x: number; y: number; z: number; scale: number };
+
+type ScriptStatus =
+  | { kind: "none" }              // jocul nu are script
+  | { kind: "loading" }           // se ruleaza acum
+  | { kind: "ok"; count: number } // a rulat, cate operatii a produs
+  | { kind: "error"; message: string }; // sandbox-ul a raspuns cu o eroare
+
+function geometryFor(type: string): THREE.BufferGeometry {
+  if (type === "cube") return new THREE.BoxGeometry(1, 1, 1);
+  if (type === "sphere") return new THREE.SphereGeometry(0.6, 20, 16);
+  if (type === "cylinder") return new THREE.CylinderGeometry(0.5, 0.5, 1.2, 20);
+  if (type === "cone") return new THREE.ConeGeometry(0.6, 1.2, 20);
+  return new THREE.ConeGeometry(0.7, 1.6, 8);
+}
+
 function buildMesh(o: SceneObj): THREE.Mesh {
-  let geo: THREE.BufferGeometry;
-  if (o.type === "cube") geo = new THREE.BoxGeometry(1, 1, 1);
-  else if (o.type === "sphere") geo = new THREE.SphereGeometry(0.6, 20, 16);
-  else if (o.type === "cylinder") geo = new THREE.CylinderGeometry(0.5, 0.5, 1.2, 20);
-  else if (o.type === "cone") geo = new THREE.ConeGeometry(0.6, 1.2, 20);
-  else geo = new THREE.ConeGeometry(0.7, 1.6, 8);
+  const geo = geometryFor(o.type);
   const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(o.color), roughness: 0.5, metalness: 0.1 });
   const m = new THREE.Mesh(geo, mat);
   m.position.set(o.x, o.y + 0.5 * o.scale, o.z);
@@ -26,25 +51,109 @@ function buildMesh(o: SceneObj): THREE.Mesh {
   return m;
 }
 
+function placeMesh(m: THREE.Mesh) {
+  const s = m.userData as MeshState;
+  m.position.set(s.x, s.y + 0.5 * s.scale, s.z);
+  m.scale.setScalar(s.scale);
+}
+
+function disposeMesh(m: THREE.Mesh) {
+  m.geometry.dispose();
+  (m.material as THREE.Material).dispose();
+}
+
+// Aplica in scena o operatie venita din script
+function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, op: ScriptOp) {
+  if (op.op === "create") {
+    const old = meshes.get(op.id);
+    if (old) {
+      scene.remove(old);
+      disposeMesh(old);
+    }
+    const state: MeshState = { x: op.x ?? 0, y: op.y ?? 0, z: op.z ?? 0, scale: op.scale ?? 1 };
+    const m = buildMesh({ id: op.id, type: op.type || "cube", x: state.x, y: state.y, z: state.z, color: op.color || "#A3A3A3", scale: state.scale });
+    m.userData = state;
+    scene.add(m);
+    meshes.set(op.id, m);
+    return;
+  }
+
+  const m = meshes.get(op.id);
+  if (!m) return;
+
+  if (op.op === "destroy") {
+    scene.remove(m);
+    disposeMesh(m);
+    meshes.delete(op.id);
+    return;
+  }
+
+  // op.op === "set"
+  const s = m.userData as MeshState;
+  if (op.x !== undefined) s.x = op.x;
+  if (op.y !== undefined) s.y = op.y;
+  if (op.z !== undefined) s.z = op.z;
+  if (op.scale !== undefined) s.scale = op.scale;
+  if (op.color) (m.material as THREE.MeshStandardMaterial).color.set(op.color);
+  if (op.type) {
+    m.geometry.dispose();
+    m.geometry = geometryFor(op.type);
+  }
+  placeMesh(m);
+}
+
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { t } = useI18n();
   const [game, setGame] = useState<any>(null);
+  const [isOwner, setIsOwner] = useState(false);
+  const [scriptStatus, setScriptStatus] = useState<ScriptStatus>({ kind: "none" });
   const playerRef = useRef<THREE.Mesh | null>(null);
+  const scriptOpsRef = useRef<ScriptOp[]>([]);
   const initialPos = useRef({ x: 0, y: 0.5, z: 0 });
   const [resetKey, setResetKey] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
+      // 1) cine sunt eu si care e jocul — inainte de orice altceva, ca proprietarul sa vada mereu </>
+      let ownerNow = false;
       try {
-        const [g] = await Promise.all([
-          api(`/games/${id}`),
-          api(`/games/${id}/play`, { method: "POST" }),
-        ]);
+        const [g, me] = await Promise.all([api(`/games/${id}`), api("/auth/me")]);
+        if (cancelled) return;
         setGame(g.game);
-      } catch {}
+        ownerNow = !!me?.user?.user_id && me.user.user_id === g.game?.owner_id;
+        setIsOwner(ownerNow);
+      } catch (e: any) {
+        if (!cancelled) setScriptStatus({ kind: "error", message: e?.message || "Could not load the game" });
+        return;
+      }
+
+      // 2) marchez ca "s-a jucat" (nu blocheaza restul daca da eroare)
+      api(`/games/${id}/play`, { method: "POST" }).catch(() => {});
+
+      // 3) scriptul jocului, separat, ca o eroare aici sa nu ascunda restul scenei
+      setScriptStatus({ kind: "loading" });
+      try {
+        const run = await api(`/sandbox/games/${id}/run`, { method: "POST" });
+        if (cancelled) return;
+        const ops = Array.isArray(run?.ops) ? run.ops : [];
+        scriptOpsRef.current = ops;
+        if (Array.isArray(run?.errors) && run.errors.length > 0) {
+          setScriptStatus({ kind: "error", message: run.errors[0] });
+        } else if (ops.length === 0) {
+          setScriptStatus({ kind: "none" });
+        } else {
+          setScriptStatus({ kind: "ok", count: ops.length });
+        }
+      } catch (e: any) {
+        if (!cancelled) setScriptStatus({ kind: "error", message: e?.message || "Script did not run (sandbox unavailable?)" });
+      }
     })();
+
+    return () => { cancelled = true; };
   }, [id]);
 
   const onContextCreate = async (gl: any) => {
@@ -82,9 +191,22 @@ export default function PlayScreen() {
     playerRef.current = player;
     initialPos.current = { x: 0, y: 0.5, z: 0 };
 
+    // Redarea operatiilor din script, in ordinea si la momentul la care au aparut
+    const scriptOps = scriptOpsRef.current;
+    const scriptMeshes = new Map<string, THREE.Mesh>();
+    let nextOp = 0;
+    const startedAt = Date.now();
+
     let t0 = 0;
     const render = () => {
       requestAnimationFrame(render);
+
+      const elapsed = (Date.now() - startedAt) / 1000;
+      while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
+        applyOp(scene, scriptMeshes, scriptOps[nextOp]);
+        nextOp += 1;
+      }
+
       t0 += 0.008;
       if (playerRef.current) playerRef.current.rotation.y += 0.02;
       camera.position.x = Math.cos(t0 * 0.4) * 9;
@@ -124,8 +246,32 @@ export default function PlayScreen() {
         <View style={styles.titlePill}>
           <Text style={styles.titleText} numberOfLines={1}>{game?.title || "..."}</Text>
         </View>
-        <View style={{ width: 40 }} />
+        {isOwner ? (
+          <Pressable
+            testID="play-script-btn"
+            onPress={() => router.push(`/studio/edit/${id}` as any)}
+            style={styles.iconBtn}
+          >
+            <MaterialCommunityIcons name="code-braces" size={22} color={colors.onSurface} />
+          </Pressable>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </SafeAreaView>
+
+      {isOwner ? (
+        <View style={styles.statusPill} pointerEvents="none">
+          {scriptStatus.kind === "loading" ? (
+            <Text style={styles.statusText}>Script: running…</Text>
+          ) : scriptStatus.kind === "ok" ? (
+            <Text style={[styles.statusText, { color: colors.brand }]}>Script: {scriptStatus.count} changes</Text>
+          ) : scriptStatus.kind === "error" ? (
+            <Text style={[styles.statusText, { color: colors.error }]} numberOfLines={2}>Script error: {scriptStatus.message}</Text>
+          ) : (
+            <Text style={[styles.statusText, { color: colors.onSurface3 }]}>Script: none (workspace stays empty)</Text>
+          )}
+        </View>
+      ) : null}
 
       <SafeAreaView edges={["bottom"]} style={styles.leftControls} pointerEvents="box-none">
         <Pressable testID="play-reset-btn" onPress={doReset} style={styles.resetBtn}>
@@ -146,6 +292,8 @@ const styles = StyleSheet.create({
   iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center" },
   titlePill: { flex: 1, marginHorizontal: 10, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, alignItems: "center" },
   titleText: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
+  statusPill: { position: "absolute", top: 68, left: spacing.md, right: spacing.md, backgroundColor: "rgba(0,0,0,0.65)", paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.md },
+  statusText: { color: colors.onSurface2, fontSize: 12, fontWeight: "700" },
   leftControls: { position: "absolute", left: 0, bottom: 0, padding: spacing.lg },
   resetBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.brand, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.pill },
   resetText: { color: colors.onBrand, fontWeight: "900", fontSize: 13, letterSpacing: 1 },
