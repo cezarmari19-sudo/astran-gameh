@@ -35,7 +35,7 @@ jobs:
         run: npx expo install --fix
 
       - name: Init EAS project (creates if missing)
-        run: eas init --account js8sjsjs-team --non-interactive
+        run: eas init --non-interactive
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
