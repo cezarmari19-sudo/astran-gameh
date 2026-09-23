@@ -14,6 +14,7 @@ import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
+import AssetPicker from "@/src/components/AssetPicker";
 
 type SceneObj = { id: string; type: "cube" | "sphere" | "cylinder" | "cone" | "tree"; x: number; y: number; z: number; color: string; scale: number };
 type Scene = { objects: SceneObj[]; sky: string; ground: string };
@@ -52,6 +53,11 @@ export default function StudioEditor() {
   const createdId = useRef<string | null>(null); // id-ul jocului nou creat, ca sa nu se creeze de doua ori
   const [saved, setSaved] = useState(false); // arata "Salvat" o clipa dupa salvare
 
+  // Modele din Shop atasate jocului (folosite din script cu Assets.load("id"))
+  const [assetIds, setAssetIds] = useState<string[]>([]);
+  const assetsDirty = useRef(false);
+  const [showAssets, setShowAssets] = useState(false);
+
   const meshMap = useRef<Record<string, THREE.Object3D>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const groundRef = useRef<THREE.Mesh | null>(null);
@@ -79,6 +85,10 @@ export default function StudioEditor() {
           const sr = await api(`/sandbox/games/${editingId}/files`);
           setScriptFiles(Array.isArray(sr?.files) ? sr.files : []);
         } catch {}
+        try {
+          const ar = await api(`/sandbox/games/${editingId}/assets`);
+          setAssetIds(Array.isArray(ar?.asset_ids) ? ar.asset_ids : []);
+        } catch {}
       } catch (e: any) { setErr(e.message); }
       setLoading(false);
     })();
@@ -86,7 +96,7 @@ export default function StudioEditor() {
 
   // Ieșirea din editor: daca sunt scripturi nesalvate, intreaba inainte sa se piarda
   function leave() {
-    if (!scriptsDirty.current) { router.back(); return; }
+    if (!scriptsDirty.current && !assetsDirty.current) { router.back(); return; }
     Alert.alert("Ieși fără să salvezi?", "Scripturile modificate nu au fost salvate și se vor pierde.", [
       { text: "Rămâi", style: "cancel" },
       { text: "Ieși", style: "destructive", onPress: () => router.back() },
@@ -95,7 +105,7 @@ export default function StudioEditor() {
 
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (scriptsDirty.current) { leave(); return true; }
+      if (scriptsDirty.current || assetsDirty.current) { leave(); return true; }
       return false;
     });
     return () => sub.remove();
@@ -149,6 +159,10 @@ export default function StudioEditor() {
       if (gameId && scriptsDirty.current) {
         await api(`/sandbox/games/${gameId}/files`, { method: "PUT", body: JSON.stringify({ files: scriptFiles }) });
         scriptsDirty.current = false;
+      }
+      if (gameId && assetsDirty.current) {
+        await api(`/sandbox/games/${gameId}/assets`, { method: "PUT", body: JSON.stringify({ asset_ids: assetIds }) });
+        assetsDirty.current = false;
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -316,6 +330,10 @@ export default function StudioEditor() {
             <MaterialCommunityIcons name="code-braces" size={22} color={colors.brand} />
             <Text style={styles.toolBtnText}>{scriptFiles.length > 0 ? `scripts ${scriptFiles.length}` : "scripts"}</Text>
           </Pressable>
+          <Pressable testID="editor-assets" onPress={() => setShowAssets(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="storefront-outline" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>{assetIds.length > 0 ? `shop ${assetIds.length}` : "shop"}</Text>
+          </Pressable>
           {OBJ_TYPES.map(k => (
             <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
               <MaterialCommunityIcons name={OBJ_ICON[k] as any} size={22} color={colors.brand} />
@@ -401,6 +419,13 @@ export default function StudioEditor() {
         onSave={save}
         saving={busy}
         saved={saved}
+      />
+
+      <AssetPicker
+        visible={showAssets}
+        assetIds={assetIds}
+        onChange={ids => { assetsDirty.current = true; setSaved(false); setAssetIds(ids); }}
+        onClose={() => setShowAssets(false)}
       />
 
       <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
