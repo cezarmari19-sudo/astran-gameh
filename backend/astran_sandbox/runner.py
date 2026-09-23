@@ -79,9 +79,44 @@ def files_from_source(source: str) -> list[dict]:
     return [{"name": ENTRY_NAME, "source": source}]
 
 
-def _bundle(files: list[dict]) -> bytes:
+ASSETS_FILE_NAME = "@assets"  # numele rezervat citit de prelude.luau pentru Assets.load
+MAX_ASSETS = 200
+
+
+def assets_file(assets: list[dict]) -> Optional[dict]:
+    """Construieste fisierul special "@assets" din modelele cumparate de joc.
+
+    `assets` = [{"id": str, "name": str, "object": {"type", "color", "scale"}}, ...]
+    Datele sunt deja curatate de shop_routes.py inainte sa ajunga aici; tot facem
+    o verificare minima, ca sa nu trimitem catre Luau ceva neasteptat.
+    """
+    if not assets:
+        return None
+    clean = []
+    for a in assets[:MAX_ASSETS]:
+        if not isinstance(a, dict):
+            continue
+        aid, name, obj = a.get("id"), a.get("name"), a.get("object")
+        if not isinstance(aid, str) or not isinstance(obj, dict):
+            continue
+        clean.append({"id": aid, "name": name if isinstance(name, str) else "", "object": obj})
+    if not clean:
+        return None
+    # ensure_ascii=False: numele cu diacritice (ă, î, ș...) raman octeti UTF-8 direct in
+    # string, nu \uXXXX — decodorul JSON scris de mana in Luau (prelude.luau) nu reconstruieste
+    # UTF-8 din \uXXXX, doar il inlocuieste cu "?"; ca octeti bruti insa trec neschimbati.
+    payload = json.dumps(clean, ensure_ascii=False)
+    return {"name": ASSETS_FILE_NAME, "source": "return " + json.dumps(payload, ensure_ascii=False)}
+
+
+def _bundle(files: list[dict], assets: Optional[list[dict]] = None) -> bytes:
+    all_files = list(files)
+    extra = assets_file(assets) if assets else None
+    if extra is not None:
+        all_files.append(extra)
+
     parts: list[bytes] = []
-    for f in files:
+    for f in all_files:
         data = f["source"].encode("utf-8")
         parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"\n")
         parts.append(data)
@@ -89,7 +124,7 @@ def _bundle(files: list[dict]) -> bytes:
     return b"".join(parts)
 
 
-def _cache_key(files: list[dict]) -> str:
+def _cache_key(files: list[dict], assets: Optional[list[dict]] = None) -> str:
     h = hashlib.sha256()
     for f in files:
         h.update(f["name"].encode("utf-8"))
@@ -98,6 +133,10 @@ def _cache_key(files: list[dict]) -> str:
         h.update(str(len(data)).encode("ascii"))
         h.update(b"\0")
         h.update(data)
+    extra = assets_file(assets) if assets else None
+    if extra is not None:
+        h.update(b"\0@assets\0")
+        h.update(extra["source"].encode("utf-8"))
     return h.hexdigest()
 
 
@@ -256,7 +295,7 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
-async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64) -> dict:
+async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64, assets: Optional[list[dict]] = None) -> dict:
     clean = validate_files(files)
     if not any(f["name"] == ENTRY_NAME for f in clean):
         raise ValueError(f"Missing the '{ENTRY_NAME}' script (it runs first)")
@@ -282,7 +321,7 @@ async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64) -> dic
         )
         try:
             stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(_bundle(clean)),
+                proc.communicate(_bundle(clean, assets)),
                 timeout=timeout_ms / 1000 + 1.5,
             )
         except asyncio.TimeoutError:
@@ -304,16 +343,16 @@ async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> d
 _cache: "OrderedDict[str, dict]" = OrderedDict()
 
 
-async def run_cached_files(files: Any) -> dict:
+async def run_cached_files(files: Any, assets: Optional[list[dict]] = None) -> dict:
     """Ca run_files, dar retine rezultatele recente (jocurile se ruleaza des, scriptul se schimba rar)."""
     clean = validate_files(files)
-    key = _cache_key(clean)
+    key = _cache_key(clean, assets)
     hit = _cache.get(key)
     if hit is not None:
         _cache.move_to_end(key)
         return hit
 
-    result = await run_files(clean)
+    result = await run_files(clean, assets=assets)
     if result["ok"]:
         _cache[key] = result
         while len(_cache) > CACHE_SIZE:
