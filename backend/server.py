@@ -48,6 +48,13 @@ except Exception as exc:  # noqa: BLE001
     make_sandbox_router = None
     log.warning("Luau sandbox disabled: %s", exc)
 
+# Magazinul (Modele + Scripturi) e la fel de optional.
+try:
+    from astran_sandbox.shop_routes import make_shop_router
+except Exception as exc:  # noqa: BLE001
+    make_shop_router = None
+    log.warning("Shop disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -877,6 +884,10 @@ async def languages():
 # Sandbox Luau: /api/sandbox/run si /api/sandbox/games/{game_id}/run
 if make_sandbox_router is not None:
     api.include_router(make_sandbox_router(get_current_user, db))
+
+# Shop (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
+if make_shop_router is not None:
+    api.include_router(make_shop_router(get_current_user, db))
 
 app.include_router(api)
 
