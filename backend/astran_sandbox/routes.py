@@ -39,13 +39,21 @@ class ScriptFileBody(BaseModel):
     source: str = Field(default="", max_length=MAX_SOURCE_CHARS)
 
 
+MAX_GAME_ASSETS = 100
+
+
 class RunBody(BaseModel):
     files: Optional[List[ScriptFileBody]] = None
     source: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)  # compatibilitate: un singur script
+    asset_ids: Optional[List[str]] = None  # id-uri de modele din Shop, pentru testare cu Assets.load in editor
 
 
 class SaveFilesBody(BaseModel):
     files: List[ScriptFileBody] = Field(default_factory=list)
+
+
+class SaveAssetsBody(BaseModel):
+    asset_ids: List[str] = Field(default_factory=list, max_length=MAX_GAME_ASSETS)
 
 
 def _plain(files: List[ScriptFileBody]) -> list[dict]:
@@ -82,9 +90,39 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             return
         try:
             await db.game_scripts.create_index("game_id", unique=True)
+            await db.game_assets.create_index("game_id", unique=True)
         except Exception:  # noqa: BLE001
-            log.warning("could not create game_scripts index", exc_info=True)
+            log.warning("could not create game_scripts/game_assets index", exc_info=True)
         index_ready = True
+
+    async def resolve_assets(user_id: str, asset_ids: list[str]) -> list[dict]:
+        """Din id-uri de modele din Shop, intoarce doar cele pe care userul chiar le detine
+        (autor, cumparate, sau gratis+publice) — restul se ignora silentios, ca un id vechi
+        (sters sau devenit privat intre timp) sa nu strice rularea jocului."""
+        if not asset_ids:
+            return []
+        ids = list(dict.fromkeys(asset_ids))[:MAX_GAME_ASSETS]  # dedupe, pastrand ordinea
+        items = await db.shop_items.find({"item_id": {"$in": ids}, "kind": "model"}, {"_id": 0}).to_list(MAX_GAME_ASSETS)
+        by_id = {it["item_id"]: it for it in items}
+
+        purchased_ids: set[str] = set()
+        to_check = [i for i in ids if i in by_id and by_id[i]["owner_id"] != user_id and by_id[i]["price"] > 0]
+        if to_check:
+            purchases = await db.shop_purchases.find(
+                {"user_id": user_id, "item_id": {"$in": to_check}}, {"_id": 0}
+            ).to_list(len(to_check))
+            purchased_ids = {p["item_id"] for p in purchases}
+
+        resolved = []
+        for aid in ids:
+            it = by_id.get(aid)
+            if it is None:
+                continue
+            owned = it["owner_id"] == user_id or (it["price"] == 0 and it["is_public"]) or aid in purchased_ids
+            if not owned:
+                continue
+            resolved.append({"id": aid, "name": it.get("name", ""), "object": it.get("object", {})})
+        return resolved
 
     async def get_game(game_id: str) -> dict:
         g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
@@ -118,7 +156,8 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             if not any(f["source"].strip() for f in files):
                 validate_files(files)
                 return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False}
-            return await run_files(files)
+            assets = await resolve_assets(current["user_id"], body.asset_ids or [])
+            return await run_files(files, assets=assets)
         except Exception as exc:  # noqa: BLE001
             raise sandbox_error(exc)
 
@@ -149,35 +188,36 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         )
         return {"ok": True, "files": files}
 
+    @router.get("/games/{game_id}/assets")
+    async def get_game_assets(game_id: str, current=Depends(get_current_user)):
+        """Id-urile modelelor din Shop atasate unui joc (doar proprietarul)."""
+        g = await get_game(game_id)
+        if not is_owner(g, current):
+            raise HTTPException(status_code=403, detail="Not the owner")
+        await ensure_index()
+        doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
+        asset_ids = doc["asset_ids"] if doc and isinstance(doc.get("asset_ids"), list) else []
+        resolved = await resolve_assets(current["user_id"], asset_ids)
+        # pastram si id-urile care nu s-au putut rezolva (ex: itemul a fost sters), ca sa le poata scoate din lista
+        resolved_ids = {a["id"] for a in resolved}
+        missing = [aid for aid in asset_ids if aid not in resolved_ids]
+        return {"asset_ids": asset_ids, "assets": resolved, "missing_ids": missing}
+
+    @router.put("/games/{game_id}/assets")
+    async def save_game_assets(game_id: str, body: SaveAssetsBody, current=Depends(get_current_user)):
+        """Salveaza lista de modele din Shop atasate unui joc (inlocuieste lista veche)."""
+        g = await get_game(game_id)
+        if not is_owner(g, current):
+            raise HTTPException(status_code=403, detail="Not the owner")
+        asset_ids = list(dict.fromkeys(body.asset_ids))[:MAX_GAME_ASSETS]  # dedupe, pastreaza ordinea
+        await ensure_index()
+        await db.game_assets.update_one(
+            {"game_id": game_id},
+            {"$set": {"game_id": game_id, "asset_ids": asset_ids, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        return {"ok": True, "asset_ids": asset_ids}
+
     @router.post("/games/{game_id}/run")
     async def run_game_script(game_id: str, current=Depends(get_current_user)):
-        """Ruleaza scriptul unui joc si intoarce operatiile pe care clientul le reda in scena."""
-        g = await get_game(game_id)
-        if g.get("age_category") == "adult_18" and current.get("age_category") == "under_18":
-            raise HTTPException(status_code=403, detail="Age-restricted content")
-
-        owner = is_owner(g, current)
-        if not g.get("is_public", True) and not owner:
-            raise HTTPException(status_code=403, detail="Game is private")
-
-        files = await load_files(game_id, g)
-        if not any(isinstance(f, dict) and str(f.get("source", "")).strip() for f in files):
-            return {"ok": True, "ops": [], "duration": 0.0, "truncated": False}
-
-        check_rate_limit(current["user_id"])
-        try:
-            result = await run_cached_files(files)
-        except Exception as exc:  # noqa: BLE001
-            raise sandbox_error(exc)
-
-        if owner:
-            return result
-        # jucatorii primesc doar efectele, nu output-ul si erorile autorului
-        return {
-            "ok": result["ok"],
-            "ops": result["ops"],
-            "duration": result["duration"],
-            "truncated": result["truncated"],
-        }
-
-    return router
+        """Ruleaza scriptul unui joc si intoarce operatiile
