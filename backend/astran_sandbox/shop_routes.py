@@ -1,0 +1,332 @@
+"""Magazinul Astran: Modele (obiecte 3D, fara cod) si Scripturi (Luau).
+
+Se ataseaza din server.py:
+    api.include_router(make_shop_router(get_current_user, db))
+
+Colectii Mongo folosite:
+- shop_items: {item_id, kind ("model"|"script"), owner_id, owner_username, name,
+    description, price, is_public, created_at, updated_at, downloads,
+    (model) object: {type, color, scale}
+    (script) files: [{name, source}]}
+- shop_purchases: {user_id, item_id} unic — cine a cumparat ce (Astrans nu se cer de doua ori)
+
+Comisionul platformei e 5%: la un pret de 100 Astrans, autorul primeste 95.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import List, Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+log = logging.getLogger("astran.shop")
+
+PLATFORM_FEE_PERCENT = 5
+MAX_NAME_CHARS = 48
+MAX_DESC_CHARS = 500
+MAX_PRICE = 100000
+MODEL_SHAPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}{uuid.uuid4().hex[:16]}"
+
+
+def split_price(price: int) -> tuple[int, int]:
+    """Intoarce (comision_platforma, venit_autor) pentru un pret dat."""
+    fee = (price * PLATFORM_FEE_PERCENT) // 100
+    return fee, price - fee
+
+
+class ModelObjectBody(BaseModel):
+    type: Literal["cube", "sphere", "cylinder", "cone", "pyramid"]
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    scale: float = Field(default=1.0, gt=0, le=20)
+
+
+class ScriptFileBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    source: str = Field(default="", max_length=20000)
+
+
+class PublishModelBody(BaseModel):
+    name: str = Field(min_length=2, max_length=MAX_NAME_CHARS)
+    description: str = Field(default="", max_length=MAX_DESC_CHARS)
+    price: int = Field(default=0, ge=0, le=MAX_PRICE)
+    is_public: bool = True
+    object: ModelObjectBody
+
+
+class PublishScriptBody(BaseModel):
+    name: str = Field(min_length=2, max_length=MAX_NAME_CHARS)
+    description: str = Field(default="", max_length=MAX_DESC_CHARS)
+    price: int = Field(default=0, ge=0, le=MAX_PRICE)
+    is_public: bool = True
+    files: List[ScriptFileBody] = Field(min_length=1, max_length=32)
+
+
+class UpdateItemBody(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=MAX_NAME_CHARS)
+    description: Optional[str] = Field(default=None, max_length=MAX_DESC_CHARS)
+    price: Optional[int] = Field(default=None, ge=0, le=MAX_PRICE)
+    is_public: Optional[bool] = None
+    object: Optional[ModelObjectBody] = None
+    files: Optional[List[ScriptFileBody]] = Field(default=None, min_length=1, max_length=32)
+
+
+def _public_item(doc: dict, owned: bool) -> dict:
+    """Ce vede oricine in lista/cautare. Continutul (files/object) se da doar la detaliu, daca e gratis/detinut."""
+    return {
+        "item_id": doc["item_id"],
+        "kind": doc["kind"],
+        "owner_id": doc["owner_id"],
+        "owner_username": doc["owner_username"],
+        "name": doc["name"],
+        "description": doc.get("description", ""),
+        "price": doc["price"],
+        "is_public": doc["is_public"],
+        "downloads": doc.get("downloads", 0),
+        "created_at": doc["created_at"],
+        "owned": owned,
+        "preview": (doc.get("object") if doc["kind"] == "model" else {"file_count": len(doc.get("files", []))}),
+    }
+
+
+def make_shop_router(get_current_user, db) -> APIRouter:
+    router = APIRouter(prefix="/shop", tags=["shop"])
+    indexes_ready = False
+
+    async def ensure_indexes() -> None:
+        nonlocal indexes_ready
+        if indexes_ready:
+            return
+        try:
+            await db.shop_items.create_index("item_id", unique=True)
+            await db.shop_items.create_index([("kind", 1), ("is_public", 1), ("downloads", -1)])
+            await db.shop_items.create_index([("owner_id", 1), ("created_at", -1)])
+            await db.shop_items.create_index([("name", "text"), ("description", "text")])
+            await db.shop_purchases.create_index([("user_id", 1), ("item_id", 1)], unique=True)
+        except Exception:  # noqa: BLE001
+            log.warning("could not create shop indexes", exc_info=True)
+        indexes_ready = True
+
+    async def get_item(item_id: str) -> dict:
+        it = await db.shop_items.find_one({"item_id": item_id}, {"_id": 0})
+        if not it:
+            raise HTTPException(status_code=404, detail="Item not found")
+        return it
+
+    async def owns(user_id: str, item: dict) -> bool:
+        """Detine efectiv continutul: autorul, oricine daca e gratis SI public, sau cine l-a cumparat."""
+        if item["owner_id"] == user_id:
+            return True
+        if item["price"] == 0 and item["is_public"]:
+            return True
+        return await db.shop_purchases.find_one({"user_id": user_id, "item_id": item["item_id"]}, {"_id": 0}) is not None
+
+    def visible(item: dict, current: dict) -> bool:
+        """Poate vedea ca itemul exista (lista/cautare/detaliu), indiferent daca ii detine continutul."""
+        if item["is_public"]:
+            return True
+        return item["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
+
+    async def list_or_search(kind: str, q: Optional[str], mine: bool, current: dict) -> list[dict]:
+        await ensure_indexes()
+        query: dict = {"kind": kind}
+        if mine:
+            query["owner_id"] = current["user_id"]
+        else:
+            query["is_public"] = True
+        if q:
+            query["$text"] = {"$search": q}
+        cursor = db.shop_items.find(query, {"_id": 0}).sort(
+            [("score", {"$meta": "textScore"})] if q else [("downloads", -1), ("created_at", -1)]
+        ).limit(50)
+        docs = await cursor.to_list(50)
+        out = []
+        for d in docs:
+            is_owned = await owns(current["user_id"], d)
+            out.append(_public_item(d, is_owned))
+        return out
+
+    async def publish(kind: str, owner_id: str, owner_username: str, name: str, description: str, price: int, is_public: bool, extra: dict) -> dict:
+        await ensure_indexes()
+        doc = {
+            "item_id": new_id("shop_"),
+            "kind": kind,
+            "owner_id": owner_id,
+            "owner_username": owner_username,
+            "name": name,
+            "description": description,
+            "price": price,
+            "is_public": is_public,
+            "downloads": 0,
+            "created_at": now_utc(),
+            "updated_at": now_utc(),
+            **extra,
+        }
+        await db.shop_items.insert_one(doc)
+        return doc
+
+    # ---------- Modele ----------
+
+    @router.get("/models")
+    async def list_models(q: Optional[str] = None, mine: bool = False, current=Depends(get_current_user)):
+        return {"items": await list_or_search("model", q, mine, current)}
+
+    @router.post("/models")
+    async def publish_model(body: PublishModelBody, current=Depends(get_current_user)):
+        doc = await publish(
+            "model", current["user_id"], current["username"], body.name, body.description,
+            body.price, body.is_public, {"object": body.object.dict()},
+        )
+        return {"item": _public_item(doc, True)}
+
+    # ---------- Scripturi ----------
+
+    @router.get("/scripts")
+    async def list_scripts(q: Optional[str] = None, mine: bool = False, current=Depends(get_current_user)):
+        return {"items": await list_or_search("script", q, mine, current)}
+
+    @router.post("/scripts")
+    async def publish_script(body: PublishScriptBody, current=Depends(get_current_user)):
+        names = [f.name for f in body.files]
+        if len(set(names)) != len(names):
+            raise HTTPException(status_code=400, detail="Duplicate script names")
+        if "main" not in names:
+            raise HTTPException(status_code=400, detail="Missing the 'main' script (it runs first)")
+        doc = await publish(
+            "script", current["user_id"], current["username"], body.name, body.description,
+            body.price, body.is_public, {"files": [f.dict() for f in body.files]},
+        )
+        return {"item": _public_item(doc, True)}
+
+    # ---------- Comun: detaliu, editare, stergere, cumparare ----------
+
+    @router.get("/items/{item_id}")
+    async def get_item_detail(item_id: str, current=Depends(get_current_user)):
+        it = await get_item(item_id)
+        if not visible(it, current):
+            raise HTTPException(status_code=403, detail="This item is private")
+        is_owned = await owns(current["user_id"], it)
+        result = _public_item(it, is_owned)
+        if is_owned:
+            # continutul real (geometria sau fisierele) se da doar celor care detin itemul
+            if it["kind"] == "model":
+                result["object"] = it["object"]
+            else:
+                result["files"] = it["files"]
+        return {"item": result}
+
+    @router.patch("/items/{item_id}")
+    async def update_item(item_id: str, body: UpdateItemBody, current=Depends(get_current_user)):
+        it = await get_item(item_id)
+        if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+            raise HTTPException(status_code=403, detail="Not the owner")
+
+        updates: dict = {}
+        if body.name is not None:
+            updates["name"] = body.name
+        if body.description is not None:
+            updates["description"] = body.description
+        if body.price is not None:
+            updates["price"] = body.price
+        if body.is_public is not None:
+            updates["is_public"] = body.is_public
+        if body.object is not None:
+            if it["kind"] != "model":
+                raise HTTPException(status_code=400, detail="This item is not a model")
+            updates["object"] = body.object.dict()
+        if body.files is not None:
+            if it["kind"] != "script":
+                raise HTTPException(status_code=400, detail="This item is not a script")
+            names = [f.name for f in body.files]
+            if len(set(names)) != len(names):
+                raise HTTPException(status_code=400, detail="Duplicate script names")
+            if "main" not in names:
+                raise HTTPException(status_code=400, detail="Missing the 'main' script (it runs first)")
+            updates["files"] = [f.dict() for f in body.files]
+
+        if updates:
+            updates["updated_at"] = now_utc()
+            await db.shop_items.update_one({"item_id": item_id}, {"$set": updates})
+        it2 = await get_item(item_id)
+        return {"item": _public_item(it2, True) | {k: it2[k] for k in ("object", "files") if k in it2}}
+
+    @router.delete("/items/{item_id}")
+    async def delete_item(item_id: str, current=Depends(get_current_user)):
+        it = await get_item(item_id)
+        if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+            raise HTTPException(status_code=403, detail="Not the owner")
+        await db.shop_items.delete_one({"item_id": item_id})
+        return {"ok": True}
+
+    @router.post("/items/{item_id}/buy")
+    async def buy_item(item_id: str, current=Depends(get_current_user)):
+        it = await get_item(item_id)
+        if not visible(it, current):
+            raise HTTPException(status_code=403, detail="This item is private")
+        if it["owner_id"] == current["user_id"]:
+            raise HTTPException(status_code=400, detail="You already own this item")
+
+        already = await db.shop_purchases.find_one({"user_id": current["user_id"], "item_id": item_id}, {"_id": 0})
+        if already:
+            return {"ok": True, "already_owned": True}
+
+        price = it["price"]
+        if price > 0:
+            fee, author_share = split_price(price)
+            debit = await db.users.update_one(
+                {"user_id": current["user_id"], "astrans_balance": {"$gte": price}},
+                {"$inc": {"astrans_balance": -price}},
+            )
+            if debit.modified_count == 0:
+                raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
+
+            await db.users.update_one({"user_id": it["owner_id"]}, {"$inc": {"astrans_balance": author_share}})
+
+            tx_buyer = {
+                "tx_id": new_id("tx_"), "user_id": current["user_id"], "counterparty_id": it["owner_id"],
+                "type": "shop_purchase", "amount": price, "fee": fee, "net": price,
+                "status": "completed", "timestamp": now_utc(),
+                "reference": f"shop:{it['kind']}:{it['name']}",
+            }
+            tx_seller = {
+                "tx_id": new_id("tx_"), "user_id": it["owner_id"], "counterparty_id": current["user_id"],
+                "type": "shop_sale", "amount": author_share, "fee": fee, "net": author_share,
+                "status": "completed", "timestamp": now_utc(),
+                "reference": f"shop:{it['kind']}:{it['name']}",
+            }
+            await db.astran_ledger.insert_one(tx_buyer)
+            await db.astran_ledger.insert_one(tx_seller)
+
+        try:
+            await db.shop_purchases.insert_one({"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()})
+        except Exception:
+            pass  # cumparat deja intre timp (dublu-click) — nu e o eroare pentru cumparator
+        await db.shop_items.update_one({"item_id": item_id}, {"$inc": {"downloads": 1}})
+
+        return {"ok": True, "already_owned": False}
+
+    @router.get("/mine/purchases")
+    async def my_purchases(current=Depends(get_current_user)):
+        await ensure_indexes()
+        cursor = db.shop_purchases.find({"user_id": current["user_id"]}, {"_id": 0}).sort("purchased_at", -1).limit(200)
+        purchases = await cursor.to_list(200)
+        item_ids = [p["item_id"] for p in purchases]
+        if not item_ids:
+            return {"items": []}
+        docs = await db.shop_items.find({"item_id": {"$in": item_ids}}, {"_id": 0}).to_list(200)
+        idx = {d["item_id"]: d for d in docs}
+        return {"items": [_public_item(idx[i], True) for i in item_ids if i in idx]}
+
+    return router
