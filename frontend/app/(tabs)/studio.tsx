@@ -33,10 +33,15 @@ export default function StudioScreen() {
           <Text style={styles.title}>{t("studio")}</Text>
           <Text style={styles.sub}>{t("my_games")}</Text>
         </View>
-        <Pressable testID="studio-create-btn" onPress={() => router.push("/studio/create")} style={styles.newBtn}>
-          <MaterialCommunityIcons name="plus" size={20} color={colors.onBrand} />
-          <Text style={styles.newBtnText}>{t("create_game")}</Text>
-        </Pressable>
+        <View style={styles.headerBtns}>
+          <Pressable testID="studio-shop-btn" onPress={() => router.push("/shop" as any)} style={styles.shopBtn}>
+            <MaterialCommunityIcons name="storefront-outline" size={20} color={colors.brand} />
+          </Pressable>
+          <Pressable testID="studio-create-btn" onPress={() => router.push("/studio/create")} style={styles.newBtn}>
+            <MaterialCommunityIcons name="plus" size={20} color={colors.onBrand} />
+            <Text style={styles.newBtnText}>{t("create_game")}</Text>
+          </Pressable>
+        </View>
       </View>
 
       {loading ? (
@@ -89,6 +94,8 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.lg },
   title: { color: colors.onSurface, fontSize: 26, fontWeight: "900", letterSpacing: -0.3 },
   sub: { color: colors.brand, fontSize: 11, fontWeight: "800", letterSpacing: 2, marginTop: 2 },
+  headerBtns: { flexDirection: "row", alignItems: "center", gap: 8 },
+  shopBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   newBtn: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.brand, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.pill },
   newBtnText: { color: colors.onBrand, fontWeight: "800", fontSize: 13 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.lg, gap: 4 },
