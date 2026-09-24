@@ -36,6 +36,17 @@ export const PART_ICON: Record<PartType, string> = {
   cone: "triangle-outline", plane: "square-outline", torus: "circle-double",
 };
 
+// Dimensiunea reala (latime, inaltime, adancime) a formei la scala 1. Size = scala * aceste valori.
+export const BASE_SIZE: Record<PartType, [number, number, number]> = {
+  group: [1, 1, 1],
+  cube: [1, 1, 1],
+  sphere: [1, 1, 1],
+  cylinder: [1, 1, 1],
+  cone: [1, 1, 1],
+  plane: [1, 0, 1],
+  torus: [1, 1, 0.2],
+};
+
 const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;
 export const round3 = (v: number) => Math.round(v * 1000) / 1000;
@@ -135,6 +146,20 @@ export function topLevel(parts: Part[], ids: string[]): string[] {
   const by = byIdMap(parts);
   return ids.filter(id => {
     if (id === ROOT_ID) return false;
+    let cur = by.get(id)?.parent ?? null;
+    while (cur) {
+      if (set.has(cur)) return false;
+      cur = by.get(cur)?.parent ?? null;
+    }
+    return true;
+  });
+}
+
+// Ca topLevel, dar si radacina poate fi transformata (mutata / rotita / scalata) cu gizmo-ul
+export function outermost(parts: Part[], ids: string[]): string[] {
+  const set = new Set(ids);
+  const by = byIdMap(parts);
+  return ids.filter(id => {
     let cur = by.get(id)?.parent ?? null;
     while (cur) {
       if (set.has(cur)) return false;
