@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -10,12 +10,16 @@ import {
   ActivityIndicator,
   FlatList,
   Platform,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { Image } from "expo-image";
+import * as ImagePicker from "expo-image-picker";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
+import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 
 type Kind = "model" | "script";
 
@@ -30,13 +34,17 @@ type ShopItem = {
   is_public: boolean;
   downloads: number;
   owned: boolean;
-  preview: any; // {type,color,scale} pentru model, {file_count} pentru script
+  thumbnail_url?: string | null;
+  preview: any; // model: {type,color,scale,part_count}  ·  script: {file_count}
 };
 
 type ShopItemDetail = ShopItem & {
   object?: { type: string; color: string; scale: number };
-  files?: { name: string; source: string }[];
+  files?: ScriptFile[];
+  parts?: any[];
 };
+
+type StudioModel = { model_id: string; name: string; part_count: number };
 
 const SHAPE_ICON: Record<string, string> = {
   cube: "cube-outline",
@@ -46,12 +54,16 @@ const SHAPE_ICON: Record<string, string> = {
   pyramid: "triangle-outline",
 };
 
+const MAX_SOURCE_CHARS = 20000; // limita din backend, per fisier
+const FEE_PERCENT = 5;
+
 function priceLabel(price: number): string {
   return price === 0 ? "Free" : `${price} Astrans`;
 }
 
 export default function ShopScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ publish?: string }>();
   const [kind, setKind] = useState<Kind>("model");
   const [q, setQ] = useState("");
   const [mineOnly, setMineOnly] = useState(false);
@@ -59,17 +71,22 @@ export default function ShopScreen() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [myId, setMyId] = useState<string | null>(null);
+
   const [showPublish, setShowPublish] = useState(false);
+  const [presetModel, setPresetModel] = useState<string | null>(null);
+  const [editItem, setEditItem] = useState<ShopItemDetail | null>(null);
+  const handledParam = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
       const path = kind === "model" ? "/shop/models" : "/shop/scripts";
-      const params = new URLSearchParams();
-      if (q.trim()) params.set("q", q.trim());
-      if (mineOnly) params.set("mine", "true");
-      const qs = params.toString();
+      const qp = new URLSearchParams();
+      if (q.trim()) qp.set("q", q.trim());
+      if (mineOnly) qp.set("mine", "true");
+      const qs = qp.toString();
       const r = await api(`${path}${qs ? `?${qs}` : ""}`);
       setItems(Array.isArray(r?.items) ? r.items : []);
     } catch (e: any) {
@@ -83,6 +100,30 @@ export default function ShopScreen() {
     const t = setTimeout(load, q ? 300 : 0);
     return () => clearTimeout(t);
   }, [load]);
+
+  // cine sunt eu (ca sa stiu care iteme sunt ale mele)
+  useEffect(() => {
+    api("/auth/me").then(r => setMyId(r?.user?.user_id ?? null)).catch(() => {});
+  }, []);
+
+  // venim din Studio cu butonul "Publica": deschidem direct publicarea modelului ales
+  useEffect(() => {
+    const id = params.publish;
+    if (id && handledParam.current !== id) {
+      handledParam.current = id;
+      setKind("model");
+      setPresetModel(id);
+      setShowPublish(true);
+    }
+  }, [params.publish]);
+
+  function closePublish() {
+    setShowPublish(false);
+    setEditItem(null);
+    setPresetModel(null);
+    handledParam.current = null;
+    if (params.publish) router.setParams({ publish: "" } as any);
+  }
 
   return (
     <SafeAreaView style={styles.root} edges={["top"]}>
@@ -158,15 +199,22 @@ export default function ShopScreen() {
 
       <ItemDetailModal
         itemId={selected}
+        myId={myId}
         onClose={() => setSelected(null)}
         onChanged={load}
+        onEdit={it => {
+          setSelected(null);
+          setTimeout(() => setEditItem(it), 350); // lasam modalul de detalii sa se inchida
+        }}
       />
 
       <PublishModal
-        visible={showPublish}
+        visible={showPublish || editItem !== null}
         kind={kind}
-        onClose={() => setShowPublish(false)}
-        onPublished={() => { setShowPublish(false); load(); }}
+        editItem={editItem}
+        presetModelId={presetModel}
+        onClose={closePublish}
+        onDone={() => { closePublish(); load(); }}
       />
     </SafeAreaView>
   );
@@ -176,15 +224,21 @@ function ModelCard({ item, onPress }: { item: ShopItem; onPress: () => void }) {
   const p = item.preview || {};
   return (
     <Pressable testID={`shop-item-${item.item_id}`} onPress={onPress} style={styles.modelCard}>
-      <View style={[styles.modelSwatch, { backgroundColor: p.color || "#666" }]}>
-        <MaterialCommunityIcons name={(SHAPE_ICON[p.type] || "cube-outline") as any} size={28} color="rgba(0,0,0,0.35)" />
-      </View>
+      {item.thumbnail_url ? (
+        <Image source={{ uri: item.thumbnail_url }} style={styles.modelThumb} contentFit="cover" />
+      ) : (
+        <View style={[styles.modelSwatch, { backgroundColor: p.color || "#666" }]}>
+          <MaterialCommunityIcons name={(SHAPE_ICON[p.type] || "cube-outline") as any} size={28} color="rgba(0,0,0,0.35)" />
+        </View>
+      )}
       <Text style={styles.cardName} numberOfLines={1}>{item.name}</Text>
       <View style={styles.cardMetaRow}>
         <Text style={[styles.cardPrice, item.price === 0 && { color: colors.brand }]}>{priceLabel(item.price)}</Text>
         {item.owned ? <MaterialCommunityIcons name="check-circle" size={14} color={colors.brand} /> : null}
       </View>
-      <Text style={styles.cardAuthor} numberOfLines={1}>by {item.owner_username}</Text>
+      <Text style={styles.cardAuthor} numberOfLines={1}>
+        by {item.owner_username}{p.part_count ? ` · ${p.part_count} objects` : ""}
+      </Text>
     </Pressable>
   );
 }
@@ -210,14 +264,22 @@ function ScriptRow({ item, onPress }: { item: ShopItem; onPress: () => void }) {
   );
 }
 
-function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null; onClose: () => void; onChanged: () => void }) {
+function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
+  itemId: string | null;
+  myId: string | null;
+  onClose: () => void;
+  onChanged: () => void;
+  onEdit: (item: ShopItemDetail) => void;
+}) {
   const [item, setItem] = useState<ShopItemDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [showCode, setShowCode] = useState(false);
+  const [viewFiles, setViewFiles] = useState<ScriptFile[]>([]);
 
   useEffect(() => {
-    if (!itemId) { setItem(null); return; }
+    if (!itemId) { setItem(null); setShowCode(false); return; }
     setLoading(true);
     setErr(null);
     api(`/shop/items/${itemId}`)
@@ -225,6 +287,8 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
       .catch(e => setErr(e?.message || "Could not load item"))
       .finally(() => setLoading(false));
   }, [itemId]);
+
+  const isOwner = !!item && !!myId && item.owner_id === myId;
 
   async function buy() {
     if (!item) return;
@@ -242,6 +306,26 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
     }
   }
 
+  function confirmDelete() {
+    if (!item) return;
+    Alert.alert("Delete from the Shop?", `"${item.name}" will be removed for everyone.`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await api(`/shop/items/${item.item_id}`, { method: "DELETE" });
+            onChanged();
+            onClose();
+          } catch (e: any) {
+            setErr(e?.message || "Could not delete");
+          }
+        },
+      },
+    ]);
+  }
+
   return (
     <Modal visible={itemId !== null} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.detailBackdrop}>
@@ -249,17 +333,21 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
         <View style={styles.detailBox}>
           {loading || !item ? (
             <View style={{ padding: spacing.xl }}>
-              <ActivityIndicator color={colors.brand} />
+              {err ? <Text style={styles.errText}>{err}</Text> : <ActivityIndicator color={colors.brand} />}
             </View>
           ) : (
-            <>
+            <ScrollView contentContainerStyle={{ gap: spacing.sm }} keyboardShouldPersistTaps="handled">
               <View style={styles.detailHeader}>
                 {item.kind === "model" ? (
-                  <View style={[styles.detailSwatch, { backgroundColor: item.object?.color || "#666" }]}>
-                    <MaterialCommunityIcons name={(SHAPE_ICON[item.object?.type || ""] || "cube-outline") as any} size={36} color="rgba(0,0,0,0.35)" />
-                  </View>
+                  item.thumbnail_url ? (
+                    <Image source={{ uri: item.thumbnail_url }} style={styles.detailThumb} contentFit="cover" />
+                  ) : (
+                    <View style={[styles.detailSwatch, { backgroundColor: item.preview?.color || item.object?.color || "#666" }]}>
+                      <MaterialCommunityIcons name={(SHAPE_ICON[item.preview?.type || item.object?.type || ""] || "cube-outline") as any} size={36} color="rgba(0,0,0,0.35)" />
+                    </View>
+                  )
                 ) : (
-                  <View style={[styles.detailSwatch, { backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center" }]}>
+                  <View style={[styles.detailSwatch, { backgroundColor: colors.surface3 }]}>
                     <MaterialCommunityIcons name="code-braces" size={36} color={colors.brand} />
                   </View>
                 )}
@@ -273,10 +361,15 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
                 <Text style={styles.detailMetaText}>{item.downloads} downloads</Text>
                 <Text style={styles.detailMetaText}>·</Text>
                 <Text style={styles.detailMetaText}>{item.is_public ? "Public" : "Private"}</Text>
-                {item.kind === "script" && item.files ? (
+                {item.kind === "script" ? (
                   <>
                     <Text style={styles.detailMetaText}>·</Text>
-                    <Text style={styles.detailMetaText}>{item.files.length} files</Text>
+                    <Text style={styles.detailMetaText}>{item.files?.length ?? item.preview?.file_count ?? 0} files</Text>
+                  </>
+                ) : item.preview?.part_count ? (
+                  <>
+                    <Text style={styles.detailMetaText}>·</Text>
+                    <Text style={styles.detailMetaText}>{item.preview.part_count} objects</Text>
                   </>
                 ) : null}
               </View>
@@ -289,7 +382,9 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
                 <View style={styles.ownedPill}>
                   <MaterialCommunityIcons name="check-circle" size={16} color={colors.brand} />
                   <Text style={styles.ownedText}>
-                    {item.kind === "model" ? "You own this — use it from Studio or Assets.load(\"" + item.item_id + "\")" : "You own this script"}
+                    {item.kind === "model"
+                      ? "You own this - use it from Studio or Assets.load(\"" + item.item_id + "\")"
+                      : "You own this script"}
                   </Text>
                 </View>
               ) : (
@@ -302,52 +397,213 @@ function ItemDetailModal({ itemId, onClose, onChanged }: { itemId: string | null
                   )}
                 </Pressable>
               )}
-            </>
+
+              {item.kind === "script" && item.owned && item.files && item.files.length > 0 ? (
+                <Pressable
+                  testID="shop-view-code"
+                  onPress={() => { setViewFiles(item.files || []); setShowCode(true); }}
+                  style={styles.outlineBtn}
+                >
+                  <MaterialCommunityIcons name="code-braces" size={18} color={colors.brand} />
+                  <Text style={styles.outlineBtnText}>{isOwner ? "View code" : "View code (copy it into your game)"}</Text>
+                </Pressable>
+              ) : null}
+
+              {isOwner ? (
+                <View style={styles.actionRow}>
+                  <Pressable testID="shop-edit-btn" onPress={() => onEdit(item)} style={[styles.outlineBtn, { flex: 1 }]}>
+                    <MaterialCommunityIcons name="pencil-outline" size={18} color={colors.brand} />
+                    <Text style={styles.outlineBtnText}>Edit</Text>
+                  </Pressable>
+                  <Pressable testID="shop-delete-btn" onPress={confirmDelete} style={[styles.outlineBtn, { flex: 1, borderColor: colors.error }]}>
+                    <MaterialCommunityIcons name="trash-can-outline" size={18} color={colors.error} />
+                    <Text style={[styles.outlineBtnText, { color: colors.error }]}>Delete</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </ScrollView>
           )}
         </View>
+
+        {/* cod doar de citit/copiat (modificarile nu se salveaza nicaieri) */}
+        <ScriptEditor
+          visible={showCode}
+          files={viewFiles}
+          onChange={setViewFiles}
+          onClose={() => setShowCode(false)}
+        />
       </View>
     </Modal>
   );
 }
 
-function PublishModal({ visible, kind, onClose, onPublished }: { visible: boolean; kind: Kind; onClose: () => void; onPublished: () => void }) {
+function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClose, onDone }: {
+  visible: boolean;
+  kind: Kind;
+  editItem: ShopItemDetail | null;
+  presetModelId: string | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const router = useRouter();
+  const editing = !!editItem;
+  const kind: Kind = editItem ? editItem.kind : kindProp;
+
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [price, setPrice] = useState("0");
   const [isPublic, setIsPublic] = useState(true);
-  const [shape, setShape] = useState<"cube" | "sphere" | "cylinder" | "cone" | "pyramid">("cube");
-  const [color, setColor] = useState("#CCFF00");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // script
+  const [files, setFiles] = useState<ScriptFile[]>([]);
+  const [showEditor, setShowEditor] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [games, setGames] = useState<any[] | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+
+  // model
+  const [models, setModels] = useState<StudioModel[]>([]);
+  const [modelId, setModelId] = useState<string | null>(null);
+  const [thumbnail, setThumbnail] = useState<string | null | undefined>(undefined); // undefined = neschimbata, null = stearsa
+
   useEffect(() => {
-    if (visible) { setName(""); setDescription(""); setPrice("0"); setIsPublic(true); setErr(null); }
+    if (!visible) return;
+    setErr(null);
+    setShowEditor(false);
+    setShowImport(false);
+    setThumbnail(undefined);
+    if (editItem) {
+      setName(editItem.name);
+      setDescription(editItem.description || "");
+      setPrice(String(editItem.price));
+      setIsPublic(editItem.is_public);
+      setFiles(editItem.files ?? []);
+      setModelId(null);
+    } else {
+      setName("");
+      setDescription("");
+      setPrice("0");
+      setIsPublic(true);
+      setFiles([]);
+      setModelId(presetModelId ?? null);
+    }
   }, [visible]);
 
-  async function publish() {
-    if (!name || name.trim().length < 2) { setErr("Name too short"); return; }
-    const priceNum = Math.max(0, Math.floor(Number(price) || 0));
+  // modelele mele din Studio
+  useEffect(() => {
+    if (!visible || kind !== "model") return;
+    api("/studio/models")
+      .then(r => {
+        const list: StudioModel[] = Array.isArray(r?.models) ? r.models : [];
+        setModels(list);
+        if (presetModelId && !editItem) {
+          const m = list.find(x => x.model_id === presetModelId);
+          if (m) setName(prev => prev || m.name);
+        }
+      })
+      .catch(() => setModels([]));
+  }, [visible, kind]);
+
+  function pickModel(m: StudioModel) {
+    if (modelId === m.model_id && editing) { setModelId(null); return; }
+    setModelId(m.model_id);
+    setName(prev => prev.trim() ? prev : m.name);
+  }
+
+  async function pickThumb() {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { setErr("Photo permission denied"); return; }
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.3, base64: true, allowsEditing: true, aspect: [1, 1],
+      });
+      if (res.canceled) return;
+      const a = res.assets[0];
+      if (a.base64) setThumbnail(`data:image/jpeg;base64,${a.base64}`);
+    } catch (e: any) {
+      setErr(e?.message || "Could not pick the image");
+    }
+  }
+
+  async function toggleImport() {
+    const next = !showImport;
+    setShowImport(next);
+    if (next && games === null) {
+      try {
+        const r = await api("/games/mine");
+        setGames(Array.isArray(r?.games) ? r.games : []);
+      } catch {
+        setGames([]);
+      }
+    }
+  }
+
+  async function importFrom(game: any) {
+    const doImport = async () => {
+      setImportBusy(true);
+      try {
+        const r = await api(`/sandbox/games/${game.game_id}/files`);
+        const f: ScriptFile[] = Array.isArray(r?.files) ? r.files : [];
+        if (f.length === 0) setErr(`"${game.title}" has no scripts yet`);
+        else { setFiles(f); setShowImport(false); setErr(null); }
+      } catch (e: any) {
+        setErr(e?.message || "Could not load the scripts");
+      } finally {
+        setImportBusy(false);
+      }
+    };
+    if (files.some(f => f.source.trim())) {
+      Alert.alert("Replace your code?", `The code here will be replaced with the scripts from "${game.title}".`, [
+        { text: "Cancel", style: "cancel" },
+        { text: "Replace", style: "destructive", onPress: doImport },
+      ]);
+    } else {
+      await doImport();
+    }
+  }
+
+  async function submit() {
+    const nm = name.trim();
+    if (nm.length < 2) { setErr("Name too short"); return; }
+    const priceNum = Math.max(0, Math.min(100000, Math.floor(Number(price) || 0)));
+
+    if (kind === "script") {
+      const main = files.find(f => f.name === "main");
+      if (!main) { setErr('Write your code first - a script named "main" is required (it runs first)'); return; }
+      if (!main.source.trim()) { setErr('Your "main" script is empty'); return; }
+      const tooLong = files.find(f => f.source.length > MAX_SOURCE_CHARS);
+      if (tooLong) { setErr(`"${tooLong.name}" is too long (max ${MAX_SOURCE_CHARS} characters per script)`); return; }
+    } else if (!editing && !modelId) {
+      setErr("Pick a model from your Studio to publish");
+      return;
+    }
+
     setBusy(true);
     setErr(null);
     try {
-      if (kind === "model") {
-        await api("/shop/models", {
-          method: "POST",
-          body: JSON.stringify({
-            name: name.trim(), description, price: priceNum, is_public: isPublic,
-            object: { type: shape, color, scale: 1 },
-          }),
-        });
-      } else {
+      if (editing && editItem) {
+        const body: any = { name: nm, description, price: priceNum, is_public: isPublic };
+        if (kind === "script") body.files = files;
+        else {
+          if (modelId) body.model_id = modelId;
+          if (thumbnail === null) body.thumbnail_url = "";
+          else if (typeof thumbnail === "string") body.thumbnail_url = thumbnail;
+        }
+        await api(`/shop/items/${editItem.item_id}`, { method: "PATCH", body: JSON.stringify(body) });
+      } else if (kind === "script") {
         await api("/shop/scripts", {
           method: "POST",
-          body: JSON.stringify({
-            name: name.trim(), description, price: priceNum, is_public: isPublic,
-            files: [{ name: "main", source: "-- write your script here\n" }],
-          }),
+          body: JSON.stringify({ name: nm, description, price: priceNum, is_public: isPublic, files }),
         });
+      } else {
+        const body: any = { model_id: modelId, name: nm, description, price: priceNum, is_public: isPublic };
+        if (typeof thumbnail === "string") body.thumbnail_url = thumbnail;
+        await api("/shop/models", { method: "POST", body: JSON.stringify(body) });
       }
-      onPublished();
+      onDone();
     } catch (e: any) {
       setErr(e?.message || "Publish failed");
     } finally {
@@ -355,45 +611,126 @@ function PublishModal({ visible, kind, onClose, onPublished }: { visible: boolea
     }
   }
 
-  const PALETTE = ["#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "#FF9500", "#B266FF", "#FFFFFF", "#666666"];
-  const SHAPES: typeof shape[] = ["cube", "sphere", "cylinder", "cone", "pyramid"];
+  const priceNum = Math.max(0, Math.floor(Number(price) || 0));
+  const fee = Math.floor((priceNum * FEE_PERCENT) / 100);
+  const mainFile = files.find(f => f.name === "main");
+  const codePreview = (mainFile?.source || "").split("\n").slice(0, 6).join("\n");
+  const shownThumb = thumbnail === undefined ? editItem?.thumbnail_url ?? null : thumbnail;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={{ flex: 1, justifyContent: "flex-end" }}>
         <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }} onPress={onClose} />
         <ScrollView style={styles.publishSheet} contentContainerStyle={{ paddingBottom: 30 }} keyboardShouldPersistTaps="handled">
-          <Text style={styles.sheetTitle}>Publish {kind === "model" ? "a model" : "a script"}</Text>
+          <Text style={styles.sheetTitle}>
+            {editing ? "Edit" : "Publish"} {kind === "model" ? "a model" : "a script"}
+          </Text>
 
           <Text style={styles.lab}>Name</Text>
-          <TextInput testID="publish-name" value={name} onChangeText={setName} style={styles.input} placeholder="Oak Tree" placeholderTextColor={colors.onSurface3} />
+          <TextInput testID="publish-name" value={name} onChangeText={setName} maxLength={48} style={styles.input}
+            placeholder={kind === "model" ? "Oak Tree" : "Double jump"} placeholderTextColor={colors.onSurface3} />
 
           <Text style={styles.lab}>Description</Text>
-          <TextInput testID="publish-desc" value={description} onChangeText={setDescription} multiline style={[styles.input, { height: 70 }]} placeholder="..." placeholderTextColor={colors.onSurface3} />
+          <TextInput testID="publish-desc" value={description} onChangeText={setDescription} multiline maxLength={500}
+            style={[styles.input, { height: 70 }]} placeholder="..." placeholderTextColor={colors.onSurface3} />
 
-          <Text style={styles.lab}>Price (Astrans, 0 = free)</Text>
-          <TextInput testID="publish-price" value={price} onChangeText={setPrice} keyboardType="number-pad" style={styles.input} placeholder="0" placeholderTextColor={colors.onSurface3} />
-
-          {kind === "model" ? (
+          {kind === "script" ? (
             <>
-              <Text style={styles.lab}>Shape</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
-                {SHAPES.map(s => (
-                  <Pressable key={s} testID={`publish-shape-${s}`} onPress={() => setShape(s)} style={[styles.pill, shape === s && styles.pillActive]}>
-                    <Text style={[styles.pillText, shape === s && { color: colors.brand }]}>{s}</Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-              <Text style={styles.lab}>Color</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
-                {PALETTE.map(c => (
-                  <Pressable key={c} testID={`publish-color-${c}`} onPress={() => setColor(c)} style={[styles.swatch, { backgroundColor: c }, color === c && styles.swatchSel]} />
-                ))}
-              </ScrollView>
+              <Text style={styles.lab}>Code</Text>
+              <View style={styles.codeBox}>
+                {mainFile && mainFile.source.trim() ? (
+                  <Text style={styles.codeText} numberOfLines={6}>{codePreview}</Text>
+                ) : (
+                  <Text style={[styles.codeText, { color: colors.onSurface3 }]}>{"-- no code yet\n-- tap \"Write / edit code\" below"}</Text>
+                )}
+                <Text style={styles.codeMeta}>{files.length} file{files.length === 1 ? "" : "s"}</Text>
+              </View>
+              <View style={styles.actionRow}>
+                <Pressable testID="publish-write-code" onPress={() => setShowEditor(true)} style={[styles.outlineBtn, { flex: 1, marginTop: 8 }]}>
+                  <MaterialCommunityIcons name="code-braces" size={18} color={colors.brand} />
+                  <Text style={styles.outlineBtnText}>Write / edit code</Text>
+                </Pressable>
+                <Pressable testID="publish-import-code" onPress={toggleImport} style={[styles.outlineBtn, { flex: 1, marginTop: 8 }]}>
+                  <MaterialCommunityIcons name="download-outline" size={18} color={colors.brand} />
+                  <Text style={styles.outlineBtnText}>From my game</Text>
+                </Pressable>
+              </View>
+
+              {showImport ? (
+                <View style={styles.importBox}>
+                  {games === null || importBusy ? (
+                    <ActivityIndicator color={colors.brand} />
+                  ) : games.length === 0 ? (
+                    <Text style={styles.hintText}>You have no games yet.</Text>
+                  ) : (
+                    games.map(g => (
+                      <Pressable key={g.game_id} onPress={() => importFrom(g)} style={styles.gameRow}>
+                        <MaterialCommunityIcons name="gamepad-variant-outline" size={18} color={colors.brand} />
+                        <Text style={styles.gameRowText} numberOfLines={1}>{g.title}</Text>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+              ) : null}
             </>
           ) : (
-            <Text style={styles.hintText}>A starter "main" script is created; edit it afterwards from Studio, using the same script editor.</Text>
+            <>
+              <Text style={styles.lab}>{editing ? "Update content from Studio (optional)" : "Model from your Studio"}</Text>
+              {models.length === 0 ? (
+                <View style={styles.importBox}>
+                  <Text style={styles.hintText}>You have no models in Studio yet. Build one first, then publish it here.</Text>
+                  <Pressable onPress={() => { onClose(); router.push("/model-studio/new" as any); }} style={[styles.outlineBtn, { marginTop: 8 }]}>
+                    <MaterialCommunityIcons name="cube-scan" size={18} color={colors.brand} />
+                    <Text style={styles.outlineBtnText}>Open Studio</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <View style={{ gap: 6, marginTop: 6 }}>
+                  {models.map(m => (
+                    <Pressable key={m.model_id} testID={`publish-model-${m.model_id}`} onPress={() => pickModel(m)}
+                      style={[styles.modelPick, modelId === m.model_id && styles.modelPickActive]}>
+                      <MaterialCommunityIcons name="cube-scan" size={20} color={modelId === m.model_id ? colors.brand : colors.onSurface3} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.modelPickName} numberOfLines={1}>{m.name}</Text>
+                        <Text style={styles.cardAuthor}>{m.part_count} object{m.part_count === 1 ? "" : "s"}</Text>
+                      </View>
+                      {modelId === m.model_id ? <MaterialCommunityIcons name="check-circle" size={18} color={colors.brand} /> : null}
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+
+              <Text style={styles.lab}>Thumbnail</Text>
+              <View style={styles.thumbRow}>
+                {shownThumb ? (
+                  <Image source={{ uri: shownThumb }} style={styles.thumbPreview} contentFit="cover" />
+                ) : (
+                  <View style={[styles.thumbPreview, { backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" }]}>
+                    <MaterialCommunityIcons name="image-outline" size={26} color={colors.onSurface3} />
+                  </View>
+                )}
+                <View style={{ flex: 1, gap: 6 }}>
+                  <Pressable testID="publish-pick-thumb" onPress={pickThumb} style={styles.outlineBtn}>
+                    <MaterialCommunityIcons name="image-plus" size={18} color={colors.brand} />
+                    <Text style={styles.outlineBtnText}>{shownThumb ? "Change image" : "Pick an image"}</Text>
+                  </Pressable>
+                  {shownThumb ? (
+                    <Pressable onPress={() => setThumbnail(null)} style={styles.outlineBtn}>
+                      <MaterialCommunityIcons name="close" size={18} color={colors.onSurface3} />
+                      <Text style={[styles.outlineBtnText, { color: colors.onSurface3 }]}>Remove</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+            </>
           )}
+
+          <Text style={styles.lab}>Price (Astrans, 0 = free)</Text>
+          <TextInput testID="publish-price" value={price} onChangeText={setPrice} keyboardType="number-pad" style={styles.input}
+            placeholder="0" placeholderTextColor={colors.onSurface3} />
+          {priceNum > 0 ? (
+            <Text style={styles.hintText}>Shop fee {FEE_PERCENT}% - you receive {priceNum - fee} Astrans per sale.</Text>
+          ) : null}
 
           <Pressable onPress={() => setIsPublic(v => !v)} style={styles.toggle} testID="publish-toggle-public">
             <MaterialCommunityIcons name={isPublic ? "eye" : "eye-off"} size={20} color={isPublic ? colors.brand : colors.onSurface3} />
@@ -401,12 +738,21 @@ function PublishModal({ visible, kind, onClose, onPublished }: { visible: boolea
             <View style={[styles.switch, isPublic && styles.switchOn]}><View style={[styles.knob, isPublic && styles.knobOn]} /></View>
           </Pressable>
 
-          {err ? <Text style={styles.errText}>{err}</Text> : null}
+          {err ? <Text style={[styles.errText, { marginTop: 10 }]}>{err}</Text> : null}
 
-          <Pressable testID="publish-submit" onPress={publish} disabled={busy} style={styles.buyBtn}>
-            {busy ? <ActivityIndicator size="small" color={colors.onBrand} /> : <Text style={styles.buyText}>Publish</Text>}
+          <Pressable testID="publish-submit" onPress={submit} disabled={busy} style={styles.buyBtn}>
+            {busy ? <ActivityIndicator size="small" color={colors.onBrand} /> : <Text style={styles.buyText}>{editing ? "Save changes" : "Publish"}</Text>}
           </Pressable>
         </ScrollView>
+
+        {/* editorul de cod (acelasi ca in Studio): "Save" doar se intoarce la formular */}
+        <ScriptEditor
+          visible={showEditor}
+          files={files}
+          onChange={setFiles}
+          onClose={() => setShowEditor(false)}
+          onSave={() => setShowEditor(false)}
+        />
       </View>
     </Modal>
   );
@@ -432,6 +778,7 @@ const styles = StyleSheet.create({
   emptyText: { color: colors.onSurface3, fontSize: 13 },
   modelCard: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: spacing.sm, gap: 4 },
   modelSwatch: { height: 90, borderRadius: radius.sm, alignItems: "center", justifyContent: "center", marginBottom: 4 },
+  modelThumb: { height: 90, borderRadius: radius.sm, marginBottom: 4, backgroundColor: colors.surface3 },
   scriptRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: spacing.sm },
   scriptIcon: { width: 40, height: 40, borderRadius: radius.sm, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center" },
   cardName: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
@@ -439,9 +786,10 @@ const styles = StyleSheet.create({
   cardPrice: { color: colors.onSurface2, fontSize: 12, fontWeight: "700" },
   cardAuthor: { color: colors.onSurface3, fontSize: 11 },
   detailBackdrop: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
-  detailBox: { width: "100%", maxWidth: 400, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg, gap: spacing.sm },
+  detailBox: { width: "100%", maxWidth: 400, maxHeight: "88%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   detailHeader: { alignItems: "center", gap: 4, marginBottom: 4 },
   detailSwatch: { width: 84, height: 84, borderRadius: radius.md, alignItems: "center", justifyContent: "center", marginBottom: 6 },
+  detailThumb: { width: 84, height: 84, borderRadius: radius.md, marginBottom: 6, backgroundColor: colors.surface3 },
   detailName: { color: colors.onSurface, fontSize: 18, fontWeight: "900", textAlign: "center" },
   detailAuthor: { color: colors.onSurface3, fontSize: 12 },
   detailDesc: { color: colors.onSurface2, fontSize: 13, textAlign: "center" },
@@ -452,16 +800,25 @@ const styles = StyleSheet.create({
   ownedText: { color: colors.onSurface2, fontSize: 12, flex: 1 },
   buyBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 13, marginTop: 8 },
   buyText: { color: colors.onBrand, fontWeight: "900", fontSize: 14 },
-  publishSheet: { maxHeight: "88%", backgroundColor: colors.surface, padding: spacing.lg, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderTopWidth: 1, borderColor: colors.border },
+  outlineBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, borderWidth: 1, borderColor: colors.brand, borderRadius: radius.pill, paddingVertical: 11, paddingHorizontal: 12 },
+  outlineBtnText: { color: colors.brand, fontWeight: "800", fontSize: 13 },
+  actionRow: { flexDirection: "row", gap: 8 },
+  publishSheet: { maxHeight: "90%", backgroundColor: colors.surface, padding: spacing.lg, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderTopWidth: 1, borderColor: colors.border },
   sheetTitle: { color: colors.onSurface, fontSize: 20, fontWeight: "900", marginBottom: 12 },
   lab: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14 },
   input: { marginTop: 6, backgroundColor: colors.surface2, color: colors.onSurface, fontSize: 15, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: colors.border },
   hintText: { color: colors.onSurface3, fontSize: 12, marginTop: 8 },
-  pill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
-  pillActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
-  pillText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
-  swatch: { width: 32, height: 32, borderRadius: 16, borderWidth: 2, borderColor: colors.border },
-  swatchSel: { borderColor: colors.onSurface },
+  codeBox: { marginTop: 6, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: 12 },
+  codeText: { color: colors.onSurface2, fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+  codeMeta: { color: colors.onSurface3, fontSize: 11, marginTop: 8, fontWeight: "700" },
+  importBox: { marginTop: 8, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: 10, gap: 4 },
+  gameRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10 },
+  gameRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "600", flex: 1 },
+  modelPick: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  modelPickActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  modelPickName: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
+  thumbRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 6 },
+  thumbPreview: { width: 84, height: 84, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   switch: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.surface3, padding: 3 },
   switchOn: { backgroundColor: colors.brand },
