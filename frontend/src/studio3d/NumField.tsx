@@ -1,5 +1,5 @@
 // frontend/src/studio3d/NumField.tsx
-// Camp numeric: butoane -/+ si posibilitatea de a scrie valoarea direct.
+// Camp numeric pentru telefon: butoane -/+ mari si posibilitatea de a scrie valoarea direct.
 import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, StyleSheet, Platform } from "react-native";
 import { colors, radius } from "@/src/theme";
@@ -12,10 +12,11 @@ type Props = {
   max: number;
   decimals: number;
   onChange: (v: number) => void;
+  disabled?: boolean;
   testID?: string;
 };
 
-export default function NumField({ label, value, step, min, max, decimals, onChange, testID }: Props) {
+export default function NumField({ label, value, step, min, max, decimals, onChange, disabled, testID }: Props) {
   const [text, setText] = useState(value.toFixed(decimals));
   const [focused, setFocused] = useState(false);
 
@@ -39,15 +40,16 @@ export default function NumField({ label, value, step, min, max, decimals, onCha
   };
 
   return (
-    <View style={styles.field}>
+    <View style={[styles.field, disabled && { opacity: 0.4 }]}>
       <Text style={styles.label}>{label}</Text>
       <View style={styles.row}>
-        <Pressable onPress={() => bump(-1)} style={styles.btn} hitSlop={6}>
+        <Pressable onPress={() => bump(-1)} disabled={disabled} style={styles.btn} hitSlop={4}>
           <Text style={styles.btnText}>-</Text>
         </Pressable>
         <TextInput
           testID={testID}
           value={text}
+          editable={!disabled}
           onChangeText={setText}
           onFocus={() => setFocused(true)}
           onBlur={commit}
@@ -56,7 +58,7 @@ export default function NumField({ label, value, step, min, max, decimals, onCha
           selectTextOnFocus
           style={styles.input}
         />
-        <Pressable onPress={() => bump(1)} style={styles.btn} hitSlop={6}>
+        <Pressable onPress={() => bump(1)} disabled={disabled} style={styles.btn} hitSlop={4}>
           <Text style={styles.btnText}>+</Text>
         </Pressable>
       </View>
@@ -68,7 +70,7 @@ const styles = StyleSheet.create({
   field: { flex: 1, padding: 6, backgroundColor: colors.surface3, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border },
   label: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", marginBottom: 4 },
   row: { flexDirection: "row", alignItems: "center", gap: 2 },
-  btn: { width: 22, height: 26, borderRadius: 13, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
-  btnText: { color: colors.onBrand, fontWeight: "900", fontSize: 14, lineHeight: 16 },
-  input: { flex: 1, minWidth: 0, color: colors.onSurface, fontWeight: "700", fontSize: 12, textAlign: "center", paddingVertical: 2, paddingHorizontal: 0 },
+  btn: { width: 30, height: 34, borderRadius: 15, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
+  btnText: { color: colors.onBrand, fontWeight: "900", fontSize: 16, lineHeight: 18 },
+  input: { flex: 1, minWidth: 0, color: colors.onSurface, fontWeight: "700", fontSize: 12, textAlign: "center", paddingVertical: 4, paddingHorizontal: 0 },
 });
