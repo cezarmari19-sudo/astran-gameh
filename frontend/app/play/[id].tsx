@@ -9,8 +9,7 @@ import * as THREE from "three";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
-
-type SceneObj = { id: string; type: string; x: number; y: number; z: number; color: string; scale: number };
+import { SceneObj, buildMesh, geometryFor } from "@/src/studio/sceneShared";
 
 // Operatie produsa de scriptul Luau al jocului (vezi backend/astran_sandbox)
 type ScriptOp = {
@@ -33,23 +32,6 @@ type ScriptStatus =
   | { kind: "loading" }           // se ruleaza acum
   | { kind: "ok"; count: number } // a rulat, cate operatii a produs
   | { kind: "error"; message: string }; // sandbox-ul a raspuns cu o eroare
-
-function geometryFor(type: string): THREE.BufferGeometry {
-  if (type === "cube") return new THREE.BoxGeometry(1, 1, 1);
-  if (type === "sphere") return new THREE.SphereGeometry(0.6, 20, 16);
-  if (type === "cylinder") return new THREE.CylinderGeometry(0.5, 0.5, 1.2, 20);
-  if (type === "cone") return new THREE.ConeGeometry(0.6, 1.2, 20);
-  return new THREE.ConeGeometry(0.7, 1.6, 8);
-}
-
-function buildMesh(o: SceneObj): THREE.Mesh {
-  const geo = geometryFor(o.type);
-  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(o.color), roughness: 0.5, metalness: 0.1 });
-  const m = new THREE.Mesh(geo, mat);
-  m.position.set(o.x, o.y + 0.5 * o.scale, o.z);
-  m.scale.setScalar(o.scale);
-  return m;
-}
 
 function placeMesh(m: THREE.Mesh) {
   const s = m.userData as MeshState;
@@ -180,6 +162,7 @@ export default function PlayScreen() {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
+    // obiectele facute in editor (cu pozitie, rotatie si scala pe axe)
     (game.scene?.objects || []).forEach((o: SceneObj) => scene.add(buildMesh(o)));
 
     const player = new THREE.Mesh(
