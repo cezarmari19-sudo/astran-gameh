@@ -8,22 +8,15 @@ import * as ImagePicker from "expo-image-picker";
 import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
-import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
+import { PanGestureHandler, PinchGestureHandler, TapGestureHandler, State } from "react-native-gesture-handler";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 import AssetPicker from "@/src/components/AssetPicker";
-
-type SceneObj = { id: string; type: "cube" | "sphere" | "cylinder" | "cone" | "tree"; x: number; y: number; z: number; color: string; scale: number };
-type Scene = { objects: SceneObj[]; sky: string; ground: string };
-
-const PALETTE = ["#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "#FF9500", "#B266FF", "#FFFFFF", "#666666"];
-const OBJ_TYPES: SceneObj["type"][] = ["cube", "sphere", "cylinder", "cone", "tree"];
-const OBJ_ICON: Record<SceneObj["type"], string> = {
-  cube: "cube-outline", sphere: "circle-outline", cylinder: "cylinder", cone: "triangle-outline", tree: "pine-tree",
-};
+import Inspector from "@/src/studio/Inspector";
+import { ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, iconFor, buildMesh, applyTransform } from "@/src/studio/sceneShared";
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -45,6 +38,7 @@ export default function StudioEditor() {
   const [showMeta, setShowMeta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [glReady, setGlReady] = useState(false); // devine true cand scena 3D e creata (ca sa sincronizam obiectele)
 
   // Scripturi Luau (mai multe fisiere), rulate in sandbox pe server
   const [scriptFiles, setScriptFiles] = useState<ScriptFile[]>([]);
@@ -58,18 +52,31 @@ export default function StudioEditor() {
   const assetsDirty = useRef(false);
   const [showAssets, setShowAssets] = useState(false);
 
-  const meshMap = useRef<Record<string, THREE.Object3D>>({});
+  const meshMap = useRef<Record<string, THREE.Mesh>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const groundRef = useRef<THREE.Mesh | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const selBoxRef = useRef<THREE.BoxHelper | null>(null); // conturul obiectului selectat
+  const rafId = useRef<number | null>(null);
+  const alive = useRef(true);
+  const canvasSize = useRef({ w: 1, h: 1 });
 
   // Camera orbit control state (manual, gesture-driven — no auto animation)
+  const cameraTarget = useRef(new THREE.Vector3(0, 0, 0)); // punctul in jurul caruia se roteste camera
   const cameraAngle = useRef(0.6);       // horizontal angle (radians)
   const cameraPolar = useRef(0.85);      // vertical angle (radians), clamped
-  const cameraDistance = useRef(9);      // distance from origin
-  const lastAngle = useRef(0);
-  const lastPolar = useRef(0);
+  const cameraDistance = useRef(9);      // distance from target
+  const lastAngle = useRef(0.6);
+  const lastPolar = useRef(0.85);
   const lastDistance = useRef(9);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!editingId) return;
@@ -111,8 +118,18 @@ export default function StudioEditor() {
     return () => sub.remove();
   }, []);
 
-  function addObject(type: SceneObj["type"]) {
-    const obj: SceneObj = { id: uid(), type, x: (Math.random() - 0.5) * 4, y: 0, z: (Math.random() - 0.5) * 4, color: PALETTE[Math.floor(Math.random() * PALETTE.length)], scale: 1 };
+  function addObject(type: ObjType) {
+    const tg = cameraTarget.current;
+    const snap = (v: number) => Math.round(v * 2) / 2;
+    const obj: SceneObj = {
+      id: uid(),
+      type,
+      x: snap(tg.x + (Math.random() - 0.5) * 4),
+      y: 0,
+      z: snap(tg.z + (Math.random() - 0.5) * 4),
+      color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
+      scale: 1,
+    };
     setScene(s => ({ ...s, objects: [...s.objects, obj] }));
     setSelId(obj.id);
   }
@@ -126,6 +143,14 @@ export default function StudioEditor() {
     if (!selId) return;
     setScene(s => ({ ...s, objects: s.objects.filter(o => o.id !== selId) }));
     setSelId(null);
+  }
+
+  function duplicateSel() {
+    const src = scene.objects.find(o => o.id === selId);
+    if (!src) return;
+    const copy: SceneObj = { ...src, id: uid(), x: src.x + 1, z: src.z + 1 };
+    setScene(s => ({ ...s, objects: [...s.objects, copy] }));
+    setSelId(copy.id);
   }
 
   async function pickThumb() {
@@ -186,36 +211,51 @@ export default function StudioEditor() {
     finally { setBusy(false); }
   }
 
-  // Sync three.js scene with our state on every scene change
+  // Sync three.js scene with our state on every scene / selection change
   useEffect(() => {
     const s = sceneRef.current;
     if (!s) return;
+
+    // scoate obiectele sterse
     Object.keys(meshMap.current).forEach(id => {
       if (!scene.objects.find(o => o.id === id)) {
-        s.remove(meshMap.current[id]);
+        const old = meshMap.current[id];
+        s.remove(old);
+        old.geometry.dispose();
+        (old.material as THREE.Material).dispose();
         delete meshMap.current[id];
       }
     });
+
+    // adauga / actualizeaza obiectele
     scene.objects.forEach(o => {
-      let m = meshMap.current[o.id] as THREE.Mesh | undefined;
+      let m = meshMap.current[o.id];
       if (!m) {
-        let geo: THREE.BufferGeometry;
-        if (o.type === "cube") geo = new THREE.BoxGeometry(1, 1, 1);
-        else if (o.type === "sphere") geo = new THREE.SphereGeometry(0.6, 20, 16);
-        else if (o.type === "cylinder") geo = new THREE.CylinderGeometry(0.5, 0.5, 1.2, 20);
-        else if (o.type === "cone") geo = new THREE.ConeGeometry(0.6, 1.2, 20);
-        else geo = new THREE.ConeGeometry(0.7, 1.6, 8);
-        const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(o.color), roughness: 0.5, metalness: 0.1 });
-        m = new THREE.Mesh(geo, mat);
+        m = buildMesh(o);
+        m.userData.objId = o.id;
         meshMap.current[o.id] = m;
         s.add(m);
+      } else {
+        applyTransform(m, o);
+        (m.material as THREE.MeshStandardMaterial).color.set(o.color);
       }
-      m.position.set(o.x, o.y + 0.5 * o.scale, o.z);
-      m.scale.setScalar(o.scale);
-      (m.material as THREE.MeshStandardMaterial).color = new THREE.Color(o.color);
     });
+
     if (groundRef.current) (groundRef.current.material as THREE.MeshStandardMaterial).color = new THREE.Color(scene.ground);
-  }, [scene]);
+
+    // conturul obiectului selectat
+    if (selBoxRef.current) {
+      s.remove(selBoxRef.current);
+      selBoxRef.current.geometry.dispose();
+      selBoxRef.current = null;
+    }
+    const selMesh = selId ? meshMap.current[selId] : undefined;
+    if (selMesh) {
+      const box = new THREE.BoxHelper(selMesh, 0xCCFF00);
+      s.add(box);
+      selBoxRef.current = box;
+    }
+  }, [scene, selId, glReady]);
 
   function updateCameraPosition() {
     const cam = cameraRef.current;
@@ -223,10 +263,23 @@ export default function StudioEditor() {
     const r = cameraDistance.current;
     const theta = cameraAngle.current;
     const phi = cameraPolar.current;
-    cam.position.x = r * Math.sin(phi) * Math.cos(theta);
-    cam.position.z = r * Math.sin(phi) * Math.sin(theta);
-    cam.position.y = r * Math.cos(phi);
-    cam.lookAt(0, 0, 0);
+    const tg = cameraTarget.current;
+    cam.position.x = tg.x + r * Math.sin(phi) * Math.cos(theta);
+    cam.position.z = tg.z + r * Math.sin(phi) * Math.sin(theta);
+    cam.position.y = tg.y + r * Math.cos(phi);
+    cam.lookAt(tg);
+  }
+
+  function focusSel() {
+    const o = scene.objects.find(x => x.id === selId);
+    if (!o) return;
+    cameraTarget.current.set(o.x, o.y + 0.5 * o.scale * (o.sy ?? 1), o.z);
+    updateCameraPosition();
+  }
+
+  function resetView() {
+    cameraTarget.current.set(0, 0, 0);
+    updateCameraPosition();
   }
 
   const onContextCreate = async (gl: any) => {
@@ -251,13 +304,34 @@ export default function StudioEditor() {
     s.add(ground);
     groundRef.current = ground;
     Object.keys(meshMap.current).forEach(k => delete meshMap.current[k]);
+    selBoxRef.current = null;
 
     const render = () => {
-      requestAnimationFrame(render);
+      if (!alive.current) return;
+      rafId.current = requestAnimationFrame(render);
       renderer.render(s, camera);
       gl.endFrameEXP();
     };
     render();
+
+    // scena 3D exista acum: sincronizam obiectele deja incarcate (jocuri existente)
+    setGlReady(true);
+  };
+
+  // --- Selectie: atingi un obiect in scena ca sa-l alegi ---
+  function pickAt(px: number, py: number) {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    const { w, h } = canvasSize.current;
+    const ndc = new THREE.Vector2((px / w) * 2 - 1, -(py / h) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, cam);
+    const hits = ray.intersectObjects(Object.values(meshMap.current), false);
+    setSelId(hits.length > 0 ? (hits[0].object.userData.objId as string) : null);
+  }
+
+  const onTapStateChange = (e: any) => {
+    if (e.nativeEvent.state === State.ACTIVE) pickAt(e.nativeEvent.x, e.nativeEvent.y);
   };
 
   // --- Gesture handlers: drag to orbit, pinch to zoom ---
@@ -309,17 +383,27 @@ export default function StudioEditor() {
             <Text style={{ color: colors.onSurface, marginTop: 4, fontWeight: "700" }}>{scene.objects.length} objects</Text>
           </View>
         ) : (
-          <PinchGestureHandler onGestureEvent={onPinchGestureEvent} onHandlerStateChange={onPinchHandlerStateChange}>
-            <PanGestureHandler onGestureEvent={onPanGestureEvent} onHandlerStateChange={onPanHandlerStateChange} minPointers={1} maxPointers={1}>
-              <View style={StyleSheet.absoluteFillObject}>
-                <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
-                <View style={styles.hintPill} pointerEvents="none">
-                  <MaterialCommunityIcons name="gesture-swipe" size={14} color={colors.onSurface3} />
-                  <Text style={styles.hintText}>Drag to rotate · Pinch to zoom</Text>
-                </View>
-              </View>
-            </PanGestureHandler>
-          </PinchGestureHandler>
+          <>
+            <PinchGestureHandler onGestureEvent={onPinchGestureEvent} onHandlerStateChange={onPinchHandlerStateChange}>
+              <PanGestureHandler onGestureEvent={onPanGestureEvent} onHandlerStateChange={onPanHandlerStateChange} minPointers={1} maxPointers={1}>
+                <TapGestureHandler maxDist={10} onHandlerStateChange={onTapStateChange}>
+                  <View
+                    style={StyleSheet.absoluteFillObject}
+                    onLayout={e => { canvasSize.current = { w: e.nativeEvent.layout.width || 1, h: e.nativeEvent.layout.height || 1 }; }}
+                  >
+                    <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+                    <View style={styles.hintPill} pointerEvents="none">
+                      <MaterialCommunityIcons name="gesture-swipe" size={14} color={colors.onSurface3} />
+                      <Text style={styles.hintText}>Tap to select · Drag to rotate · Pinch to zoom</Text>
+                    </View>
+                  </View>
+                </TapGestureHandler>
+              </PanGestureHandler>
+            </PinchGestureHandler>
+            <Pressable testID="editor-reset-view" onPress={resetView} style={styles.viewBtn}>
+              <MaterialCommunityIcons name="home-outline" size={20} color={colors.onSurface} />
+            </Pressable>
+          </>
         )}
       </View>
 
@@ -336,7 +420,7 @@ export default function StudioEditor() {
           </Pressable>
           {OBJ_TYPES.map(k => (
             <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
-              <MaterialCommunityIcons name={OBJ_ICON[k] as any} size={22} color={colors.brand} />
+              <MaterialCommunityIcons name={iconFor(k) as any} size={22} color={colors.brand} />
               <Text style={styles.toolBtnText}>{k}</Text>
             </Pressable>
           ))}
@@ -348,46 +432,21 @@ export default function StudioEditor() {
       </View>
 
       {sel ? (
-        <View style={styles.inspector}>
-          <View style={styles.inspHead}>
-            <MaterialCommunityIcons name={OBJ_ICON[sel.type] as any} size={18} color={colors.brand} />
-            <Text style={styles.inspTitle}>{sel.type}</Text>
-            <View style={{ flex: 1 }} />
-            <Pressable onPress={removeSel} testID="editor-delete-obj"><MaterialCommunityIcons name="trash-can-outline" size={20} color={colors.error} /></Pressable>
-          </View>
-          <View style={styles.axisRow}>
-            {(["x", "y", "z"] as const).map(axis => (
-              <View key={axis} style={styles.axisBox}>
-                <Text style={styles.axisLabel}>{axis.toUpperCase()}</Text>
-                <View style={{ flexDirection: "row", gap: 4 }}>
-                  <Pressable onPress={() => updateSel({ [axis]: sel[axis] - 0.5 } as any)} style={styles.axisBtn}><Text style={styles.axisBtnText}>-</Text></Pressable>
-                  <Text style={styles.axisVal}>{sel[axis].toFixed(1)}</Text>
-                  <Pressable onPress={() => updateSel({ [axis]: sel[axis] + 0.5 } as any)} style={styles.axisBtn}><Text style={styles.axisBtnText}>+</Text></Pressable>
-                </View>
-              </View>
-            ))}
-            <View style={styles.axisBox}>
-              <Text style={styles.axisLabel}>SCALE</Text>
-              <View style={{ flexDirection: "row", gap: 4 }}>
-                <Pressable onPress={() => updateSel({ scale: Math.max(0.2, sel.scale - 0.2) })} style={styles.axisBtn}><Text style={styles.axisBtnText}>-</Text></Pressable>
-                <Text style={styles.axisVal}>{sel.scale.toFixed(1)}</Text>
-                <Pressable onPress={() => updateSel({ scale: Math.min(4, sel.scale + 0.2) })} style={styles.axisBtn}><Text style={styles.axisBtnText}>+</Text></Pressable>
-              </View>
-            </View>
-          </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 8 }}>
-            {PALETTE.map(c => (
-              <Pressable key={c} testID={`editor-color-${c}`} onPress={() => updateSel({ color: c })} style={[styles.swatch, { backgroundColor: c }, sel.color === c && styles.swatchSel]} />
-            ))}
-          </ScrollView>
-        </View>
+        <Inspector
+          obj={sel}
+          onChange={updateSel}
+          onDelete={removeSel}
+          onDuplicate={duplicateSel}
+          onFocus={focusSel}
+          onClose={() => setSelId(null)}
+        />
       ) : (
         <View style={styles.objList}>
           <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingBottom: 8 }}>
             {scene.objects.map(o => (
               <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelId(o.id)} style={[styles.objChip, { borderColor: o.color }]}>
-                <MaterialCommunityIcons name={OBJ_ICON[o.type] as any} size={14} color={o.color} />
+                <MaterialCommunityIcons name={iconFor(o.type) as any} size={14} color={o.color} />
                 <Text style={styles.objChipText}>{o.type}</Text>
               </Pressable>
             ))}
@@ -485,21 +544,11 @@ const styles = StyleSheet.create({
   canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, margin: spacing.md, overflow: "hidden" },
   hintPill: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
   hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
+  viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
   toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
   toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
   toolBtn: { alignItems: "center", justifyContent: "center", width: 68, paddingVertical: 8, backgroundColor: colors.surface3, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, gap: 2 },
   toolBtnText: { color: colors.onSurface, fontSize: 10, fontWeight: "700" },
-  inspector: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, padding: 12 },
-  inspHead: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
-  inspTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 14, textTransform: "capitalize" },
-  axisRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  axisBox: { flexBasis: "48%", padding: 8, backgroundColor: colors.surface3, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.border },
-  axisLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", marginBottom: 4 },
-  axisBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
-  axisBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 14 },
-  axisVal: { flex: 1, color: colors.onSurface, fontWeight: "700", textAlign: "center", alignSelf: "center", fontSize: 13 },
-  swatch: { width: 32, height: 32, borderRadius: 16, borderWidth: 2, borderColor: colors.border },
-  swatchSel: { borderColor: colors.onSurface },
   objList: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8 },
   objListTitle: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1.5, paddingHorizontal: 14, marginBottom: 6 },
   objChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface3, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
