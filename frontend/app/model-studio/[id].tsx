@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Modal, Platform, ActivityIndicator, Alert, BackHandler } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, Modal, Platform, ActivityIndicator, Alert, BackHandler, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -13,8 +13,12 @@ import { useHistory } from "@/src/studio3d/useHistory";
 import Outliner from "@/src/studio3d/Outliner";
 import PropertiesPanel from "@/src/studio3d/PropertiesPanel";
 import {
+  Gizmo, GizmoMode, HandleInfo, Axis, UP,
+  createGizmo, updateGizmo, pickHandle, axisVector, closestParamOnAxis, planeHit, planeAngle, wrapPi, eulerNear,
+} from "@/src/studio3d/gizmo";
+import {
   Part, PartType, ROOT_ID, SHAPES, PART_ICON, PART_LABEL,
-  newRootPart, newPart, uniqueName, normalizeParts, countShapes, byIdMap, descendantIds, topLevel, flatten,
+  newRootPart, newPart, uniqueName, normalizeParts, countShapes, byIdMap, descendantIds, topLevel, outermost, flatten,
   reparent, groupParts, ungroup, duplicateParts, deleteParts,
   createObject, disposeObject, applyLocalTransform, applyMaterial, isVisibleDeep, round3,
 } from "@/src/studio3d/modelTypes";
@@ -24,6 +28,36 @@ type Dock = "add" | "tree" | "props" | null;
 const DELTA_KEYS = ["x", "y", "z", "rx", "ry", "rz"];
 const RATIO_KEYS = ["sx", "sy", "sz"];
 const LOOK_KEYS = ["color", "material", "opacity"];
+const RAD = 180 / Math.PI;
+
+const MOVE_SNAP = 0.25;
+const ROT_SNAP = Math.PI / 12; // 15 grade
+
+const MODES: { key: GizmoMode; icon: string }[] = [
+  { key: "move", icon: "cursor-move" },
+  { key: "rotate", icon: "rotate-3d-variant" },
+  { key: "scale", icon: "resize" },
+];
+
+// ---------- tipuri pentru gesturile de transformare ----------
+type DragItem = {
+  id: string;
+  part: Part; // starea de la inceputul gestului
+  parentInv: THREE.Matrix4;
+  parentQInv: THREE.Quaternion;
+  worldPos: THREE.Vector3;
+  worldQ: THREE.Quaternion;
+  rot: { rx: number; ry: number; rz: number }; // ultima rotatie scrisa (pentru continuitate)
+};
+type ManipBase = { items: DragItem[]; pivot: THREE.Vector3 };
+type Manip =
+  | (ManipBase & { kind: "axis-move"; dir: THREE.Vector3; t0: number })
+  | (ManipBase & { kind: "plane-move"; p0: THREE.Vector3 })
+  | (ManipBase & { kind: "rotate"; dir: THREE.Vector3; angPrev: number; angAcc: number })
+  | (ManipBase & { kind: "axis-scale"; axis: Axis; dir: THREE.Vector3; t0: number })
+  | (ManipBase & { kind: "uniform-scale"; y0: number });
+type Drag = { kind: "camera" } | Manip;
+type Pending = { type: "handle"; handle: HandleInfo } | { type: "ground" } | { type: "camera" };
 
 function Action({ icon, label, onPress, disabled, active, danger }: {
   icon: string; label: string; onPress: () => void; disabled?: boolean; active?: boolean; danger?: boolean;
@@ -40,6 +74,7 @@ export default function ModelStudio() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const routeId = params.id && params.id !== "new" ? params.id : null;
+  const { height: winH } = useWindowDimensions();
 
   // ---------- modelul (cu Undo/Redo) ----------
   const initialParts = useRef<Part[]>([newRootPart("Model")]).current;
@@ -59,17 +94,28 @@ export default function ModelStudio() {
   const [err, setErr] = useState<string | null>(null);
   const [glReady, setGlReady] = useState(false);
   const [showMove, setShowMove] = useState(false);
+  const [mode, setMode] = useState<GizmoMode>("move");
+  const [snap, setSnap] = useState(false);
 
   const selParts = selIds.map(id => byId.get(id)).filter((p): p is Part => !!p);
   const primary = selParts[selParts.length - 1];
   const operable = topLevel(parts, selIds); // selectia fara radacina si fara copii ai unor selectati
   const rootName = byId.get(ROOT_ID)?.name ?? "Model";
+  const dockHeight = dock === "add" ? 168 : Math.max(240, Math.min(380, Math.round(winH * 0.4)));
 
-  // referinte catre valorile curente, pentru butonul Back si dialoguri
+  // referinte catre valorile curente (folosite de bucla de desenare, de gesturi si de dialoguri)
   const dirtyRef = useRef(false);
   const saveRef = useRef<() => Promise<boolean>>(async () => false);
   const leaveRef = useRef<() => void>(() => {});
+  const partsRef = useRef<Part[]>(parts);
+  const selIdsRef = useRef<string[]>([]);
+  const modeRef = useRef<GizmoMode>("move");
+  const snapRef = useRef(false);
   dirtyRef.current = dirty;
+  partsRef.current = parts;
+  selIdsRef.current = selIds;
+  modeRef.current = mode;
+  snapRef.current = snap;
 
   // ---------- incarcare ----------
   useEffect(() => {
@@ -242,12 +288,18 @@ export default function ModelStudio() {
   // ---------- scena 3D ----------
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const gizmoRef = useRef<Gizmo | null>(null);
   const objMap = useRef<Record<string, THREE.Object3D>>({});
   const helpers = useRef<THREE.BoxHelper[]>([]);
   const rafId = useRef<number | null>(null);
   const alive = useRef(true);
   const framed = useRef(false);
   const canvasSize = useRef({ w: 1, h: 1 });
+  const draggingRef = useRef(false);
+  const drag = useRef<Drag | null>(null);
+  const pending = useRef<Pending | null>(null);
+  const pinchRef = useRef<any>(null);
+  const pan2Ref = useRef<any>(null);
 
   const camTarget = useRef(new THREE.Vector3(0, 0.5, 0));
   const camAngle = useRef(0.7);
@@ -262,6 +314,7 @@ export default function ModelStudio() {
     return () => {
       alive.current = false;
       if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+      gizmoRef.current?.dispose();
     };
   }, []);
 
@@ -318,12 +371,33 @@ export default function ModelStudio() {
     s.add(fill);
     s.add(new THREE.GridHelper(20, 20, 0x555555, 0x2c2c2c));
 
+    gizmoRef.current?.dispose();
+    const gizmo = createGizmo();
+    s.add(gizmo.root);
+    gizmoRef.current = gizmo;
+
     objMap.current = {};
     helpers.current = [];
+
+    const tmpPos = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
 
     const render = () => {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
+
+      // gizmo-ul urmareste obiectul selectat (ultimul din selectie)
+      const ids = selIdsRef.current;
+      const o = ids.length ? objMap.current[ids[ids.length - 1]] : undefined;
+      if (o) {
+        o.updateWorldMatrix(true, false);
+        o.getWorldPosition(tmpPos);
+        o.getWorldQuaternion(tmpQuat);
+        updateGizmo(gizmo, modeRef.current, tmpPos, tmpQuat, camera);
+      } else {
+        updateGizmo(gizmo, modeRef.current, null, tmpQuat, camera);
+      }
+
       renderer.render(s, camera);
       gl.endFrameEXP();
     };
@@ -336,6 +410,7 @@ export default function ModelStudio() {
     const s = sceneRef.current;
     if (!s) return;
     const map = objMap.current;
+    const fast = draggingRef.current; // in timpul unui gest actualizam doar transformarile
 
     for (const id of Object.keys(map)) {
       if (!byId.has(id)) {
@@ -358,10 +433,17 @@ export default function ModelStudio() {
       if (o.parent !== target) target.add(o);
       applyLocalTransform(o, p);
       o.visible = p.visible;
-      const mesh = o as THREE.Mesh;
-      if (mesh.isMesh) applyMaterial(mesh.material as THREE.MeshStandardMaterial, p);
+      if (!fast) {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) applyMaterial(mesh.material as THREE.MeshStandardMaterial, p);
+      }
     }
     s.updateMatrixWorld(true);
+
+    if (fast && helpers.current.length === selIds.length) {
+      helpers.current.forEach(h => h.update());
+      return;
+    }
 
     helpers.current.forEach(h => {
       s.remove(h);
@@ -385,38 +467,266 @@ export default function ModelStudio() {
     frameAll();
   }, [glReady, loading]);
 
-  // ---------- gesturi: atingi = selectezi, tragi = rotesti, ciupesti = zoom ----------
-  function pickAt(px: number, py: number) {
-    const cam = cameraRef.current;
-    if (!cam) return;
+  // ---------- gesturi ----------
+  function rcAt(x: number, y: number): THREE.Raycaster {
+    const cam = cameraRef.current!;
+    cam.updateMatrixWorld();
     const { w, h } = canvasSize.current;
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2((px / w) * 2 - 1, -(py / h) * 2 + 1), cam);
+    const rc = new THREE.Raycaster();
+    rc.setFromCamera(new THREE.Vector2((x / w) * 2 - 1, -(y / h) * 2 + 1), cam);
+    return rc;
+  }
+
+  function firstMeshHit(rc: THREE.Raycaster): string | null {
     const meshes = Object.values(objMap.current).filter(o => (o as THREE.Mesh).isMesh && isVisibleDeep(o));
-    const hits = ray.intersectObjects(meshes, false);
-    if (hits.length === 0) {
+    const hits = rc.intersectObjects(meshes, false);
+    return hits.length > 0 ? (hits[0].object.userData.partId as string) : null;
+  }
+
+  // atingerea (tap): selecteaza; atingerea unui mâner de gizmo nu schimba selectia
+  function pickAt(x: number, y: number) {
+    if (!cameraRef.current) return;
+    const rc = rcAt(x, y);
+    const g = gizmoRef.current;
+    if (g && selIdsRef.current.length > 0 && pickHandle(g, modeRef.current, rc)) return;
+    const id = firstMeshHit(rc);
+    if (!id) {
       if (!multi) setSelIds([]);
       return;
     }
-    selectPart(hits[0].object.userData.partId as string);
+    selectPart(id);
   }
 
   const onTapStateChange = (e: any) => {
     if (e.nativeEvent.state === State.ACTIVE) pickAt(e.nativeEvent.x, e.nativeEvent.y);
   };
 
-  const onPanEvent = (e: any) => {
+  // e obiectul (sau un descendent al unui grup) din selectie?
+  function isInSelection(partId: string): boolean {
+    const by = byIdMap(partsRef.current);
+    const sel = new Set(selIdsRef.current);
+    let cur: string | null = partId;
+    while (cur) {
+      if (sel.has(cur)) return true;
+      cur = by.get(cur)?.parent ?? null;
+    }
+    return false;
+  }
+
+  // Ce face degetul care a atins ecranul: trage un mâner, muta obiectul selectat, sau invarte camera
+  function beginTouch(x: number, y: number) {
+    pending.current = { type: "camera" };
+    if (!cameraRef.current) return;
+    const rc = rcAt(x, y);
+    const hasSel = selIdsRef.current.length > 0;
+    const g = gizmoRef.current;
+    if (g && hasSel) {
+      const h = pickHandle(g, modeRef.current, rc);
+      if (h) { pending.current = { type: "handle", handle: h }; return; }
+    }
+    if (hasSel && modeRef.current === "move") {
+      const id = firstMeshHit(rc);
+      if (id && isInSelection(id)) pending.current = { type: "ground" };
+    }
+  }
+
+  function startManip(p: Pending, x: number, y: number): Manip | null {
+    if (p.type === "camera") return null;
+    const ids = selIdsRef.current;
+    const ps = partsRef.current;
+    const primaryObj = ids.length ? objMap.current[ids[ids.length - 1]] : undefined;
+    if (!primaryObj) return null;
+    primaryObj.updateWorldMatrix(true, false);
+    const pivot = primaryObj.getWorldPosition(new THREE.Vector3());
+    const primaryQ = primaryObj.getWorldQuaternion(new THREE.Quaternion());
+
+    const by = byIdMap(ps);
+    const items: DragItem[] = [];
+    for (const id of outermost(ps, ids)) {
+      const obj = objMap.current[id];
+      const part = by.get(id);
+      if (!obj || !part || !obj.parent) continue;
+      obj.parent.updateWorldMatrix(true, false);
+      items.push({
+        id, part,
+        parentInv: obj.parent.matrixWorld.clone().invert(),
+        parentQInv: obj.parent.getWorldQuaternion(new THREE.Quaternion()).invert(),
+        worldPos: obj.getWorldPosition(new THREE.Vector3()),
+        worldQ: obj.getWorldQuaternion(new THREE.Quaternion()),
+        rot: { rx: part.rx, ry: part.ry, rz: part.rz },
+      });
+    }
+    if (items.length === 0) return null;
+
+    const rc = rcAt(x, y);
+    const base: ManipBase = { items, pivot };
+
+    if (p.type === "ground" || (modeRef.current === "move" && p.handle.kind === "center")) {
+      const p0 = planeHit(pivot, UP, rc.ray);
+      return p0 ? { ...base, kind: "plane-move", p0 } : null;
+    }
+    const h = p.handle;
+    const gscale = gizmoRef.current ? gizmoRef.current.root.scale.x : 1;
+
+    if (modeRef.current === "move" && h.kind === "axis" && h.axis) {
+      const dir = axisVector(h.axis);
+      const t0 = closestParamOnAxis(pivot, dir, rc.ray);
+      return t0 === null ? null : { ...base, kind: "axis-move", dir, t0 };
+    }
+    if (modeRef.current === "rotate" && h.kind === "ring" && h.axis) {
+      const dir = axisVector(h.axis);
+      const a0 = planeAngle(pivot, dir, rc.ray);
+      return a0 === null ? null : { ...base, kind: "rotate", dir, angPrev: a0, angAcc: 0 };
+    }
+    if (modeRef.current === "scale") {
+      if (h.kind === "center") return { ...base, kind: "uniform-scale", y0: y };
+      if (h.kind === "axis" && h.axis) {
+        const dir = axisVector(h.axis).applyQuaternion(primaryQ); // axa locala a obiectului, in lume
+        let t0 = closestParamOnAxis(pivot, dir, rc.ray);
+        if (t0 === null) return null;
+        if (Math.abs(t0) < 0.15 * gscale) t0 = gscale; // mânerul sta la ~1 unitate de gizmo
+        return { ...base, kind: "axis-scale", axis: h.axis, dir, t0 };
+      }
+    }
+    return null;
+  }
+
+  function commitPatches(patches: Map<string, Partial<Part>>) {
+    hist.set(cur => cur.map(p => {
+      const pt = patches.get(p.id);
+      return pt ? { ...p, ...pt } : p;
+    }));
+  }
+
+  const clampNum = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+  function updateManip(d: Manip, x: number, y: number) {
+    const rc = rcAt(x, y);
+    const patches = new Map<string, Partial<Part>>();
+    const worldToLocal = (it: DragItem, wp: THREE.Vector3) => {
+      const l = wp.clone().applyMatrix4(it.parentInv);
+      return { x: round3(l.x), y: round3(l.y), z: round3(l.z) };
+    };
+
+    if (d.kind === "axis-move") {
+      const t = closestParamOnAxis(d.pivot, d.dir, rc.ray);
+      if (t === null) return;
+      let dt = t - d.t0;
+      if (snapRef.current) dt = Math.round(dt / MOVE_SNAP) * MOVE_SNAP;
+      dt = clampNum(dt, -100, 100);
+      const delta = d.dir.clone().multiplyScalar(dt);
+      d.items.forEach(it => patches.set(it.id, worldToLocal(it, it.worldPos.clone().add(delta))));
+    } else if (d.kind === "plane-move") {
+      const hit = planeHit(d.pivot, UP, rc.ray);
+      if (!hit) return;
+      const delta = hit.sub(d.p0);
+      delta.y = 0;
+      if (snapRef.current) {
+        delta.x = Math.round(delta.x / MOVE_SNAP) * MOVE_SNAP;
+        delta.z = Math.round(delta.z / MOVE_SNAP) * MOVE_SNAP;
+      }
+      delta.x = clampNum(delta.x, -100, 100);
+      delta.z = clampNum(delta.z, -100, 100);
+      d.items.forEach(it => patches.set(it.id, worldToLocal(it, it.worldPos.clone().add(delta))));
+    } else if (d.kind === "rotate") {
+      const a = planeAngle(d.pivot, d.dir, rc.ray);
+      if (a === null) return;
+      d.angAcc += wrapPi(a - d.angPrev);
+      d.angPrev = a;
+      let theta = d.angAcc;
+      if (snapRef.current) theta = Math.round(theta / ROT_SNAP) * ROT_SNAP;
+      const qd = new THREE.Quaternion().setFromAxisAngle(d.dir, theta);
+      d.items.forEach(it => {
+        const newWorld = qd.clone().multiply(it.worldQ);
+        const local = it.parentQInv.clone().multiply(newWorld);
+        const r = eulerNear(local, it.rot);
+        it.rot = r;
+        patches.set(it.id, r);
+      });
+    } else if (d.kind === "axis-scale") {
+      const t = closestParamOnAxis(d.pivot, d.dir, rc.ray);
+      if (t === null) return;
+      let f = clampNum(t / d.t0, 0.02, 50);
+      if (snapRef.current) f = Math.max(0.1, Math.round(f * 10) / 10);
+      const key = (d.axis === "x" ? "sx" : d.axis === "y" ? "sy" : "sz") as "sx" | "sy" | "sz";
+      d.items.forEach(it => patches.set(it.id, { [key]: Math.max(0.01, round3(it.part[key] * f)) } as Partial<Part>));
+    } else if (d.kind === "uniform-scale") {
+      let f = clampNum(Math.exp((d.y0 - y) * 0.008), 0.02, 50); // in sus = mai mare
+      if (snapRef.current) f = Math.max(0.1, Math.round(f * 10) / 10);
+      d.items.forEach(it => patches.set(it.id, {
+        sx: Math.max(0.01, round3(it.part.sx * f)),
+        sy: Math.max(0.01, round3(it.part.sy * f)),
+        sz: Math.max(0.01, round3(it.part.sz * f)),
+      }));
+    }
+    if (patches.size > 0) commitPatches(patches);
+  }
+
+  // un deget: mâner de gizmo / mutare obiect / orbita (pe fundal)
+  const onDragState = (e: any) => {
+    const { state, oldState, x, y } = e.nativeEvent;
+    if (state === State.BEGAN) {
+      beginTouch(x, y);
+      return;
+    }
+    if (state === State.ACTIVE && !drag.current) {
+      const p = pending.current;
+      if (p && p.type !== "camera") {
+        const m = startManip(p, x, y);
+        if (m) {
+          drag.current = m;
+          draggingRef.current = true;
+          hist.begin();
+          return;
+        }
+      }
+      drag.current = { kind: "camera" };
+      return;
+    }
+    if (oldState === State.ACTIVE || state === State.CANCELLED || state === State.FAILED || state === State.END) {
+      const d = drag.current;
+      if (d) {
+        if (d.kind === "camera") {
+          lastAngle.current = camAngle.current;
+          lastPolar.current = camPolar.current;
+        } else {
+          draggingRef.current = false;
+          hist.end();
+        }
+      }
+      drag.current = null;
+      pending.current = null;
+    }
+  };
+
+  const onDragEvent = (e: any) => {
+    const d = drag.current;
+    if (!d) return;
+    if (d.kind === "camera") {
+      const { translationX, translationY } = e.nativeEvent;
+      camAngle.current = lastAngle.current - translationX * 0.008;
+      camPolar.current = Math.max(0.15, Math.min(Math.PI - 0.15, lastPolar.current - translationY * 0.008));
+      updateCamera();
+      return;
+    }
+    updateManip(d, e.nativeEvent.x, e.nativeEvent.y);
+  };
+
+  // doua degete: orbita camerei
+  const onPan2Event = (e: any) => {
     const { translationX, translationY } = e.nativeEvent;
     camAngle.current = lastAngle.current - translationX * 0.008;
     camPolar.current = Math.max(0.15, Math.min(Math.PI - 0.15, lastPolar.current - translationY * 0.008));
     updateCamera();
   };
-  const onPanState = (e: any) => {
+  const onPan2State = (e: any) => {
     if (e.nativeEvent.oldState === State.ACTIVE) {
       lastAngle.current = camAngle.current;
       lastPolar.current = camPolar.current;
     }
   };
+
+  // ciupit: zoom
   const onPinchEvent = (e: any) => {
     camDist.current = Math.max(1.5, Math.min(60, lastDist.current / e.nativeEvent.scale));
     updateCamera();
@@ -468,28 +778,42 @@ export default function ModelStudio() {
           </View>
         ) : (
           <>
-            <PinchGestureHandler onGestureEvent={onPinchEvent} onHandlerStateChange={onPinchState}>
-              <PanGestureHandler onGestureEvent={onPanEvent} onHandlerStateChange={onPanState} minPointers={1} maxPointers={1}>
-                <TapGestureHandler maxDist={10} onHandlerStateChange={onTapStateChange}>
-                  <View
-                    style={StyleSheet.absoluteFillObject}
-                    onLayout={e => { canvasSize.current = { w: e.nativeEvent.layout.width || 1, h: e.nativeEvent.layout.height || 1 }; }}
-                  >
-                    <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
-                    {countShapes(parts) === 0 ? (
-                      <View style={styles.emptyHint} pointerEvents="none">
-                        <Text style={styles.emptyHintText}>Add objects from the ADD tab</Text>
+            <PinchGestureHandler ref={pinchRef} simultaneousHandlers={pan2Ref} onGestureEvent={onPinchEvent} onHandlerStateChange={onPinchState}>
+              <PanGestureHandler ref={pan2Ref} simultaneousHandlers={pinchRef} minPointers={2} maxPointers={2} onGestureEvent={onPan2Event} onHandlerStateChange={onPan2State}>
+                <PanGestureHandler minPointers={1} maxPointers={1} onGestureEvent={onDragEvent} onHandlerStateChange={onDragState}>
+                  <TapGestureHandler maxDist={10} onHandlerStateChange={onTapStateChange}>
+                    <View
+                      style={StyleSheet.absoluteFillObject}
+                      onLayout={e => { canvasSize.current = { w: e.nativeEvent.layout.width || 1, h: e.nativeEvent.layout.height || 1 }; }}
+                    >
+                      <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+                      {countShapes(parts) === 0 ? (
+                        <View style={styles.emptyHint} pointerEvents="none">
+                          <Text style={styles.emptyHintText}>Add objects from the ADD tab</Text>
+                        </View>
+                      ) : null}
+                      <View style={styles.hintPill} pointerEvents="none">
+                        <Text style={styles.hintText}>Tap select · Drag handles · 2 fingers orbit · Pinch zoom</Text>
                       </View>
-                    ) : null}
-                    <View style={styles.hintPill} pointerEvents="none">
-                      <Text style={styles.hintText}>Tap select · Drag orbit · Pinch zoom</Text>
                     </View>
-                  </View>
-                </TapGestureHandler>
+                  </TapGestureHandler>
+                </PanGestureHandler>
               </PanGestureHandler>
             </PinchGestureHandler>
+
+            <View style={styles.modeCol} pointerEvents="box-none">
+              {MODES.map(m => (
+                <Pressable key={m.key} testID={`ms-mode-${m.key}`} onPress={() => setMode(m.key)} style={[styles.modeBtn, mode === m.key && styles.modeBtnActive]}>
+                  <MaterialCommunityIcons name={m.icon as any} size={24} color={mode === m.key ? colors.brand : colors.onSurface} />
+                </Pressable>
+              ))}
+              <Pressable testID="ms-snap" onPress={() => setSnap(v => !v)} style={[styles.modeBtn, snap && styles.modeBtnActive]}>
+                <MaterialCommunityIcons name="magnet" size={22} color={snap ? colors.brand : colors.onSurface} />
+              </Pressable>
+            </View>
+
             <Pressable testID="ms-frame" onPress={frameAll} style={styles.viewBtn}>
-              <MaterialCommunityIcons name="fit-to-screen-outline" size={20} color={colors.onSurface} />
+              <MaterialCommunityIcons name="fit-to-screen-outline" size={22} color={colors.onSurface} />
             </Pressable>
           </>
         )}
@@ -516,17 +840,17 @@ export default function ModelStudio() {
       </View>
 
       {dock ? (
-        <View style={[styles.dock, { height: dock === "add" ? 168 : 250 }]}>
+        <View style={[styles.dock, { height: dockHeight }]}>
           {dock === "add" ? (
             <ScrollView contentContainerStyle={styles.addGrid}>
               {SHAPES.map(t => (
                 <Pressable key={t} testID={`ms-add-${t}`} onPress={() => addPart(t)} style={styles.addBtn}>
-                  <MaterialCommunityIcons name={PART_ICON[t] as any} size={24} color={colors.brand} />
+                  <MaterialCommunityIcons name={PART_ICON[t] as any} size={26} color={colors.brand} />
                   <Text style={styles.addBtnText}>{PART_LABEL[t]}</Text>
                 </Pressable>
               ))}
               <Pressable testID="ms-add-group" onPress={() => addPart("group")} style={[styles.addBtn, { borderColor: colors.brand }]}>
-                <MaterialCommunityIcons name="folder-outline" size={24} color={colors.brand} />
+                <MaterialCommunityIcons name="folder-outline" size={26} color={colors.brand} />
                 <Text style={styles.addBtnText}>Group</Text>
               </Pressable>
               <Text style={styles.addHint}>New objects go inside the selected group (or the model root).</Text>
@@ -580,24 +904,27 @@ const styles = StyleSheet.create({
   center: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
   header: { flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.md, paddingVertical: 8, gap: 6 },
   title: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "800" },
-  hBtn: { width: 34, height: 34, alignItems: "center", justifyContent: "center" },
+  hBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
   canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, marginHorizontal: spacing.md, marginBottom: 8, overflow: "hidden" },
   hintPill: { position: "absolute", bottom: 8, alignSelf: "center", backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 5, borderRadius: radius.pill },
   hintText: { color: colors.onSurface3, fontSize: 10, fontWeight: "600" },
   emptyHint: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0, alignItems: "center", justifyContent: "center" },
   emptyHintText: { color: colors.onSurface3, fontSize: 13, fontWeight: "700" },
-  viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
+  modeCol: { position: "absolute", left: 10, top: 10, gap: 8 },
+  modeBtn: { width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", alignItems: "center", justifyContent: "center" },
+  modeBtnActive: { borderColor: colors.brand, backgroundColor: "rgba(204,255,0,0.16)" },
+  viewBtn: { position: "absolute", top: 10, right: 10, width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", alignItems: "center", justifyContent: "center" },
   actions: { flexGrow: 0, marginBottom: 8 },
-  action: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  action: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   actionActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   actionText: { color: colors.onSurface, fontSize: 12, fontWeight: "700" },
   dockTabs: { flexDirection: "row", borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2 },
-  dockTab: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderBottomWidth: 2, borderColor: "transparent" },
+  dockTab: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 13, borderBottomWidth: 2, borderColor: "transparent" },
   dockTabActive: { borderColor: colors.brand },
   dockTabText: { color: colors.onSurface2, fontSize: 12, fontWeight: "800" },
   dock: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border },
   addGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, padding: 12 },
-  addBtn: { width: 78, alignItems: "center", gap: 4, paddingVertical: 10, borderRadius: radius.md, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border },
+  addBtn: { width: 78, alignItems: "center", gap: 4, paddingVertical: 12, borderRadius: radius.md, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border },
   addBtnText: { color: colors.onSurface, fontSize: 11, fontWeight: "700" },
   addHint: { width: "100%", color: colors.onSurface3, fontSize: 11 },
   noSel: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.lg, gap: 8 },
@@ -606,6 +933,6 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
   modalBox: { width: "100%", maxWidth: 380, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   modalTitle: { color: colors.onSurface, fontSize: 16, fontWeight: "900", marginBottom: 10 },
-  targetRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 11, paddingRight: 10 },
+  targetRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 13, paddingRight: 10 },
   targetText: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
 });
