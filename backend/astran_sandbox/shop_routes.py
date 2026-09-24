@@ -1,27 +1,31 @@
-"""Magazinul Astran: Modele (obiecte 3D, fara cod) si Scripturi (Luau).
+"""Magazinul Astran: Modele (obiecte 3D facute in Studio, fara cod) si Scripturi (Luau).
 
 Se ataseaza din server.py:
     api.include_router(make_shop_router(get_current_user, db))
+(acelasi apel atasaza si rutele Studio: /studio/models)
 
 Colectii Mongo folosite:
 - shop_items: {item_id, kind ("model"|"script"), owner_id, owner_username, name,
-    description, price, is_public, created_at, updated_at, downloads,
-    (model) object: {type, color, scale}
+    description, price, is_public, created_at, updated_at, downloads, thumbnail_url,
+    (model) model: {parts: [...]}, part_count, source_model_id,
+            object: {type, color, scale}  -- aproximare pentru Assets.load si listele vechi
     (script) files: [{name, source}]}
 - shop_purchases: {user_id, item_id} unic — cine a cumparat ce (Astrans nu se cer de doua ori)
 
+Un model se publica doar dintr-un model salvat in Studio (model_id).
 Comisionul platformei e 5%: la un pret de 100 Astrans, autorul primeste 95.
 """
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from .studio_routes import make_studio_router, shape_count, summary_object, validate_parts
 
 log = logging.getLogger("astran.shop")
 
@@ -29,8 +33,7 @@ PLATFORM_FEE_PERCENT = 5
 MAX_NAME_CHARS = 48
 MAX_DESC_CHARS = 500
 MAX_PRICE = 100000
-MODEL_SHAPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
-_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+MAX_THUMB_CHARS = 300000
 
 
 def now_utc() -> datetime:
@@ -47,10 +50,15 @@ def split_price(price: int) -> tuple[int, int]:
     return fee, price - fee
 
 
-class ModelObjectBody(BaseModel):
-    type: Literal["cube", "sphere", "cylinder", "cone", "pyramid"]
-    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
-    scale: float = Field(default=1.0, gt=0, le=20)
+def _clean_thumbnail(value: Optional[str]) -> Optional[str]:
+    """Imaginea de coperta: doar poze trimise ca data URL (base64), cu limita de marime."""
+    if not value:
+        return None
+    if len(value) > MAX_THUMB_CHARS:
+        raise HTTPException(status_code=400, detail="Thumbnail is too large")
+    if not value.startswith("data:image/") or ";base64," not in value[:64]:
+        raise HTTPException(status_code=400, detail="Thumbnail must be an image")
+    return value
 
 
 class ScriptFileBody(BaseModel):
@@ -59,11 +67,12 @@ class ScriptFileBody(BaseModel):
 
 
 class PublishModelBody(BaseModel):
+    model_id: str = Field(min_length=1, max_length=64)  # modelul salvat in Studio care se publica
     name: str = Field(min_length=2, max_length=MAX_NAME_CHARS)
     description: str = Field(default="", max_length=MAX_DESC_CHARS)
     price: int = Field(default=0, ge=0, le=MAX_PRICE)
     is_public: bool = True
-    object: ModelObjectBody
+    thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)
 
 
 class PublishScriptBody(BaseModel):
@@ -79,12 +88,20 @@ class UpdateItemBody(BaseModel):
     description: Optional[str] = Field(default=None, max_length=MAX_DESC_CHARS)
     price: Optional[int] = Field(default=None, ge=0, le=MAX_PRICE)
     is_public: Optional[bool] = None
-    object: Optional[ModelObjectBody] = None
+    thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)  # "" = sterge poza
+    model_id: Optional[str] = Field(default=None, max_length=64)  # re-sincronizeaza continutul din Studio
     files: Optional[List[ScriptFileBody]] = Field(default=None, min_length=1, max_length=32)
 
 
+def _model_preview(doc: dict) -> dict:
+    preview = dict(doc.get("object") or {})
+    if doc.get("part_count"):
+        preview["part_count"] = doc["part_count"]
+    return preview
+
+
 def _public_item(doc: dict, owned: bool) -> dict:
-    """Ce vede oricine in lista/cautare. Continutul (files/object) se da doar la detaliu, daca e gratis/detinut."""
+    """Ce vede oricine in lista/cautare. Continutul (files/parts) se da doar la detaliu, daca e gratis/detinut."""
     return {
         "item_id": doc["item_id"],
         "kind": doc["kind"],
@@ -96,9 +113,23 @@ def _public_item(doc: dict, owned: bool) -> dict:
         "is_public": doc["is_public"],
         "downloads": doc.get("downloads", 0),
         "created_at": doc["created_at"],
+        "thumbnail_url": doc.get("thumbnail_url"),
         "owned": owned,
-        "preview": (doc.get("object") if doc["kind"] == "model" else {"file_count": len(doc.get("files", []))}),
+        "preview": (_model_preview(doc) if doc["kind"] == "model" else {"file_count": len(doc.get("files", []))}),
     }
+
+
+def _owner_content(doc: dict) -> dict:
+    """Continutul real al itemului, pentru cei care il detin."""
+    out: dict = {}
+    if "object" in doc:
+        out["object"] = doc["object"]
+    if "files" in doc:
+        out["files"] = doc["files"]
+    model = doc.get("model")
+    if isinstance(model, dict) and isinstance(model.get("parts"), list):
+        out["parts"] = model["parts"]
+    return out
 
 
 def make_shop_router(get_current_user, db) -> APIRouter:
@@ -138,6 +169,25 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         if item["is_public"]:
             return True
         return item["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
+
+    async def snapshot_from_studio(model_id: str, current: dict) -> dict:
+        """Ia modelul salvat in Studio (doar al utilizatorului) si intoarce campurile de pus in Magazin."""
+        doc = await db.studio_models.find_one({"model_id": model_id, "owner_id": current["user_id"]}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Model not found in your Studio")
+        try:
+            parts = validate_parts(doc.get("parts"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        count = shape_count(parts)
+        if count == 0:
+            raise HTTPException(status_code=400, detail="The model is empty - add objects in Studio first")
+        return {
+            "model": {"parts": parts},
+            "part_count": count,
+            "object": summary_object(parts),
+            "source_model_id": model_id,
+        }
 
     async def list_or_search(kind: str, q: Optional[str], mine: bool, current: dict) -> list[dict]:
         await ensure_indexes()
@@ -185,9 +235,13 @@ def make_shop_router(get_current_user, db) -> APIRouter:
 
     @router.post("/models")
     async def publish_model(body: PublishModelBody, current=Depends(get_current_user)):
+        thumb = _clean_thumbnail(body.thumbnail_url)
+        extra = await snapshot_from_studio(body.model_id, current)
+        if thumb:
+            extra["thumbnail_url"] = thumb
         doc = await publish(
             "model", current["user_id"], current["username"], body.name, body.description,
-            body.price, body.is_public, {"object": body.object.dict()},
+            body.price, body.is_public, extra,
         )
         return {"item": _public_item(doc, True)}
 
@@ -220,11 +274,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         is_owned = await owns(current["user_id"], it)
         result = _public_item(it, is_owned)
         if is_owned:
-            # continutul real (geometria sau fisierele) se da doar celor care detin itemul
-            if it["kind"] == "model":
-                result["object"] = it["object"]
-            else:
-                result["files"] = it["files"]
+            # continutul real (piesele sau fisierele) se da doar celor care detin itemul
+            result.update(_owner_content(it))
         return {"item": result}
 
     @router.patch("/items/{item_id}")
@@ -242,10 +293,12 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             updates["price"] = body.price
         if body.is_public is not None:
             updates["is_public"] = body.is_public
-        if body.object is not None:
+        if body.thumbnail_url is not None:
+            updates["thumbnail_url"] = _clean_thumbnail(body.thumbnail_url)
+        if body.model_id is not None:
             if it["kind"] != "model":
                 raise HTTPException(status_code=400, detail="This item is not a model")
-            updates["object"] = body.object.dict()
+            updates.update(await snapshot_from_studio(body.model_id, current))
         if body.files is not None:
             if it["kind"] != "script":
                 raise HTTPException(status_code=400, detail="This item is not a script")
@@ -260,7 +313,7 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             updates["updated_at"] = now_utc()
             await db.shop_items.update_one({"item_id": item_id}, {"$set": updates})
         it2 = await get_item(item_id)
-        return {"item": _public_item(it2, True) | {k: it2[k] for k in ("object", "files") if k in it2}}
+        return {"item": _public_item(it2, True) | _owner_content(it2)}
 
     @router.delete("/items/{item_id}")
     async def delete_item(item_id: str, current=Depends(get_current_user)):
@@ -329,4 +382,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         idx = {d["item_id"]: d for d in docs}
         return {"items": [_public_item(idx[i], True) for i in item_ids if i in idx]}
 
-    return router
+    # Un singur router de intors catre server.py: Magazinul + Studio 3D
+    outer = APIRouter()
+    outer.include_router(router)
+    outer.include_router(make_studio_router(get_current_user, db))
+    return outer
