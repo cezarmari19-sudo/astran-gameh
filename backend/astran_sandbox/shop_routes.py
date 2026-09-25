@@ -7,13 +7,18 @@ Se ataseaza din server.py:
 Colectii Mongo folosite:
 - shop_items: {item_id, kind ("model"|"script"), owner_id, owner_username, name,
     description, price, is_public, created_at, updated_at, downloads, thumbnail_url,
-    (model) model: {parts: [...]}, part_count, source_model_id,
+    (model) model: {parts: [...]}, part_count, source_model_id, slot (optional, pentru Avatar Editor),
             object: {type, color, scale}  -- aproximare pentru Assets.load si listele vechi
     (script) files: [{name, source}]}
 - shop_purchases: {user_id, item_id} unic — cine a cumparat ce (Astrans nu se cer de doua ori)
 
 Un model se publica doar dintr-un model salvat in Studio (model_id).
 Comisionul platformei e 5%: la un pret de 100 Astrans, autorul primeste 95.
+
+`slot` (optional, doar la modele): daca e setat la una dintre cheile din avatar_routes.SLOTS
+("hair", "shirt", "pants", "shoes", "hat", "accessory", "face", "back", "effect"), modelul
+devine echipabil in Avatar Editor. Modelele fara slot raman itemi normali de Magazin
+(ex. props pentru jocuri) si nu apar in Avatar Editor.
 """
 from __future__ import annotations
 
@@ -34,6 +39,14 @@ MAX_NAME_CHARS = 48
 MAX_DESC_CHARS = 500
 MAX_PRICE = 100000
 MAX_THUMB_CHARS = 300000
+
+
+def _valid_slots() -> set[str]:
+    try:
+        from .avatar_routes import SLOTS
+        return set(SLOTS.keys())
+    except Exception:  # noqa: BLE001
+        return {"hair", "shirt", "pants", "shoes", "hat", "accessory", "face", "back", "effect"}
 
 
 def now_utc() -> datetime:
@@ -61,6 +74,14 @@ def _clean_thumbnail(value: Optional[str]) -> Optional[str]:
     return value
 
 
+def _clean_slot(value: Optional[str]) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if value not in _valid_slots():
+        raise HTTPException(status_code=400, detail=f"Invalid slot '{value}'")
+    return value
+
+
 class ScriptFileBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     source: str = Field(default="", max_length=20000)
@@ -73,6 +94,7 @@ class PublishModelBody(BaseModel):
     price: int = Field(default=0, ge=0, le=MAX_PRICE)
     is_public: bool = True
     thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)
+    slot: Optional[str] = Field(default=None, max_length=32)  # daca setat, modelul devine echipabil in Avatar Editor
 
 
 class PublishScriptBody(BaseModel):
@@ -91,6 +113,7 @@ class UpdateItemBody(BaseModel):
     thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)  # "" = sterge poza
     model_id: Optional[str] = Field(default=None, max_length=64)  # re-sincronizeaza continutul din Studio
     files: Optional[List[ScriptFileBody]] = Field(default=None, min_length=1, max_length=32)
+    slot: Optional[str] = Field(default=None, max_length=32)  # "" = scoate din Avatar Editor
 
 
 def _model_preview(doc: dict) -> dict:
@@ -114,6 +137,7 @@ def _public_item(doc: dict, owned: bool) -> dict:
         "downloads": doc.get("downloads", 0),
         "created_at": doc["created_at"],
         "thumbnail_url": doc.get("thumbnail_url"),
+        "slot": doc.get("slot"),
         "owned": owned,
         "preview": (_model_preview(doc) if doc["kind"] == "model" else {"file_count": len(doc.get("files", []))}),
     }
@@ -145,6 +169,7 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             await db.shop_items.create_index([("kind", 1), ("is_public", 1), ("downloads", -1)])
             await db.shop_items.create_index([("owner_id", 1), ("created_at", -1)])
             await db.shop_items.create_index([("name", "text"), ("description", "text")])
+            await db.shop_items.create_index([("kind", 1), ("slot", 1)])
             await db.shop_purchases.create_index([("user_id", 1), ("item_id", 1)], unique=True)
         except Exception:  # noqa: BLE001
             log.warning("could not create shop indexes", exc_info=True)
@@ -189,13 +214,15 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             "source_model_id": model_id,
         }
 
-    async def list_or_search(kind: str, q: Optional[str], mine: bool, current: dict) -> list[dict]:
+    async def list_or_search(kind: str, q: Optional[str], mine: bool, current: dict, slot: Optional[str] = None) -> list[dict]:
         await ensure_indexes()
         query: dict = {"kind": kind}
         if mine:
             query["owner_id"] = current["user_id"]
         else:
             query["is_public"] = True
+        if slot:
+            query["slot"] = slot
         if q:
             query["$text"] = {"$search": q}
         cursor = db.shop_items.find(query, {"_id": 0}).sort(
@@ -230,15 +257,18 @@ def make_shop_router(get_current_user, db) -> APIRouter:
     # ---------- Modele ----------
 
     @router.get("/models")
-    async def list_models(q: Optional[str] = None, mine: bool = False, current=Depends(get_current_user)):
-        return {"items": await list_or_search("model", q, mine, current)}
+    async def list_models(q: Optional[str] = None, mine: bool = False, slot: Optional[str] = None, current=Depends(get_current_user)):
+        return {"items": await list_or_search("model", q, mine, current, slot)}
 
     @router.post("/models")
     async def publish_model(body: PublishModelBody, current=Depends(get_current_user)):
         thumb = _clean_thumbnail(body.thumbnail_url)
+        slot = _clean_slot(body.slot)
         extra = await snapshot_from_studio(body.model_id, current)
         if thumb:
             extra["thumbnail_url"] = thumb
+        if slot:
+            extra["slot"] = slot
         doc = await publish(
             "model", current["user_id"], current["username"], body.name, body.description,
             body.price, body.is_public, extra,
@@ -274,7 +304,6 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         is_owned = await owns(current["user_id"], it)
         result = _public_item(it, is_owned)
         if is_owned:
-            # continutul real (piesele sau fisierele) se da doar celor care detin itemul
             result.update(_owner_content(it))
         return {"item": result}
 
@@ -295,6 +324,10 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             updates["is_public"] = body.is_public
         if body.thumbnail_url is not None:
             updates["thumbnail_url"] = _clean_thumbnail(body.thumbnail_url)
+        if body.slot is not None:
+            if it["kind"] != "model":
+                raise HTTPException(status_code=400, detail="Only models can have a slot")
+            updates["slot"] = _clean_slot(body.slot)
         if body.model_id is not None:
             if it["kind"] != "model":
                 raise HTTPException(status_code=400, detail="This item is not a model")
