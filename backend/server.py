@@ -48,12 +48,19 @@ except Exception as exc:  # noqa: BLE001
     make_sandbox_router = None
     log.warning("Luau sandbox disabled: %s", exc)
 
-# Magazinul (Modele + Scripturi) e la fel de optional.
+# Magazinul de obiecte de joc (Modele + Scripturi) e la fel de optional.
 try:
     from astran_sandbox.shop_routes import make_shop_router
 except Exception as exc:  # noqa: BLE001
     make_shop_router = None
     log.warning("Shop disabled: %s", exc)
+
+# Magazinul separat de haine/accesorii pentru Avatar Editor.
+try:
+    from astran_sandbox.clothes_routes import make_clothes_router
+except Exception as exc:  # noqa: BLE001
+    make_clothes_router = None
+    log.warning("Clothes shop disabled: %s", exc)
 
 # Avatar Editor (corp + sloturi echipate) - optional, la fel ca celelalte module sandbox.
 try:
@@ -891,9 +898,13 @@ async def languages():
 if make_sandbox_router is not None:
     api.include_router(make_sandbox_router(get_current_user, db))
 
-# Shop (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
+# Shop de obiecte de joc (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
 if make_shop_router is not None:
     api.include_router(make_shop_router(get_current_user, db))
+
+# Clothes Shop (haine/accesorii pentru Avatar Editor): /api/clothes/items, /api/clothes/slots...
+if make_clothes_router is not None:
+    api.include_router(make_clothes_router(get_current_user, db))
 
 # Avatar Editor: /api/avatar/me, /api/avatar/inventory, /api/avatar/slots, /api/avatar/user/{id}
 if make_avatar_router is not None:
