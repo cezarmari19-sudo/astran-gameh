@@ -55,6 +55,13 @@ except Exception as exc:  # noqa: BLE001
     make_shop_router = None
     log.warning("Shop disabled: %s", exc)
 
+# Avatar Editor (corp + sloturi echipate) - optional, la fel ca celelalte module sandbox.
+try:
+    from astran_sandbox.avatar_routes import make_avatar_router
+except Exception as exc:  # noqa: BLE001
+    make_avatar_router = None
+    log.warning("Avatar disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -547,7 +554,6 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
-    # codul sursa al scriptului il vede doar proprietarul (sau adminul platformei)
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         g.pop("script", None)
     return {"game": g}
@@ -888,6 +894,10 @@ if make_sandbox_router is not None:
 # Shop (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
 if make_shop_router is not None:
     api.include_router(make_shop_router(get_current_user, db))
+
+# Avatar Editor: /api/avatar/me, /api/avatar/inventory, /api/avatar/slots, /api/avatar/user/{id}
+if make_avatar_router is not None:
+    api.include_router(make_avatar_router(get_current_user, db))
 
 app.include_router(api)
 
