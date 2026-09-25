@@ -1,21 +1,23 @@
 """Clothes Shop: magazin separat, exclusiv pentru haine si accesorii de Avatar Editor.
 
-Complet independent de Shop-ul de obiecte (shop_routes.py): colectie proprie
-(`clothes_items`), rute proprii (/clothes/...), propriile cumparaturi
-(`clothes_purchases`). Un copac facut in Studio si publicat in Shop-ul de obiecte
-NU apare aici, si invers.
+Complet independent de Shop-ul de obiecte (shop_routes.py) SI de Game Studio
+(studio_routes.py / colectia studio_models): colectie proprie (`clothes_items`),
+rute proprii (/clothes/...), propriile cumparaturi (`clothes_purchases`).
+
+Geometria itemelor de avatar (hat, hair, accessory, back, face, effect) NU vine din
+Game Studio. Vine din Avatar Item Studio - un editor separat in frontend
+(frontend/app/avatar-item-studio/[category].tsx) care trimite piesele direct la
+PATCH /clothes/items/{id}/geometry, ca body `{parts: [...]}` - acelasi format de
+date (Part[]) ca in Game Studio, dar niciodata citit din colectia studio_models.
 
 Doua feluri de item, dupa `render_kind`:
-- "geometry": hat, hair, accessory, back, face, effect - obiecte 3D construite in Studio,
-   continut in `model: {parts: [...]}` (acelasi format ca in shop_routes.py).
-- "texture": shirt, pants - o singura imagine UV (585x559, sistem clasic Roblox) aplicata
-   pe geometria corpului, continut in `texture_url` (data URL PNG, generat de editorul
-   de textura din aplicatie).
+- "geometry": hat, hair, accessory, back, face, effect - Part[] trimise direct de
+   Avatar Item Studio.
+- "texture": shirt, pants - o singura imagine UV (585x559) trimisa de TextureEditor.
 
 Un item e creat ca DRAFT (is_public=False, fara continut) prin POST /clothes/items,
 apoi capata continut prin PATCH .../geometry sau PATCH .../texture (dupa render_kind),
-si devine vizibil in Shop abia dupa POST .../publish. Editarea unui item existent
-trece prin aceleasi rute de continut, fara sa creeze un item nou.
+si devine vizibil in Shop abia dupa POST .../publish.
 
 Se ataseaza din server.py:
     api.include_router(make_clothes_router(get_current_user, db))
@@ -24,7 +26,7 @@ Colectia Mongo `clothes_items`:
     {item_id, owner_id, owner_username, name, description, price, is_public,
      slot (una din SLOTS), render_kind ("geometry"|"texture"), thumbnail_url, downloads,
      -- geometry --
-     model: {parts: [...]}, part_count, object: {...} (preview), source_model_id,
+     model: {parts: [...]}, part_count, object: {...} (preview),
      -- texture --
      texture_url: str,
      created_at, updated_at}
@@ -41,7 +43,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .studio_routes import shape_count, summary_object, validate_parts
+from .studio_routes import PartModel, shape_count, summary_object, validate_parts
 
 log = logging.getLogger("astran.clothes")
 
@@ -51,9 +53,7 @@ MAX_DESC_CHARS = 500
 MAX_PRICE = 100000
 MAX_THUMB_CHARS = 300000
 MAX_TEXTURE_CHARS = 2_500_000  # ~1.8MB binar dupa decodare base64: suficient pentru 585x559 PNG
-
-TEMPLATE_W = 585
-TEMPLATE_H = 559
+MAX_PARTS_PER_ITEM = 200  # un item de avatar e o singura haina/accesoriu, nu o harta intreaga
 
 # Categoriile din Avatar Editor. Extensibil: adauga o linie aici SI in avatar_routes.SLOTS
 # SI in SLOT_DEFS din avatarTypes.ts (frontend) - toate trei identice ca chei.
@@ -69,7 +69,8 @@ SLOTS: dict[str, str] = {
     "effect": "Efect",
 }
 
-# Care sloturi folosesc textura UV (shirt/pants) vs geometrie din Studio (tot restul).
+# Care sloturi folosesc textura UV (shirt/pants, din TextureEditor) vs geometrie
+# (tot restul, din Avatar Item Studio).
 TEXTURE_SLOTS = {"shirt", "pants"}
 
 
@@ -132,7 +133,8 @@ class UpdateClothesMetaBody(BaseModel):
 
 
 class SetGeometryBody(BaseModel):
-    model_id: str = Field(min_length=1, max_length=64)  # modelul salvat in Studio
+    """Piesele vin direct din Avatar Item Studio (frontend) - niciodata din Game Studio."""
+    parts: list[PartModel] = Field(min_length=1, max_length=MAX_PARTS_PER_ITEM)
 
 
 class SetTextureBody(BaseModel):
@@ -230,24 +232,6 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             return True
         return item["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
 
-    async def snapshot_from_studio(model_id: str, current: dict) -> dict:
-        doc = await db.studio_models.find_one({"model_id": model_id, "owner_id": current["user_id"]}, {"_id": 0})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Model not found in your Studio")
-        try:
-            parts = validate_parts(doc.get("parts"))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        count = shape_count(parts)
-        if count == 0:
-            raise HTTPException(status_code=400, detail="The model is empty - add objects in Studio first")
-        return {
-            "model": {"parts": parts},
-            "part_count": count,
-            "object": summary_object(parts),
-            "source_model_id": model_id,
-        }
-
     # ---------- categorii ----------
 
     @router.get("/slots")
@@ -308,9 +292,20 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         it = await get_own_item(item_id, current)
         if it["render_kind"] != "geometry":
             raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use a texture, not geometry")
-        extra = await snapshot_from_studio(body.model_id, current)
-        extra["updated_at"] = now_utc()
-        await db.clothes_items.update_one({"item_id": item_id}, {"$set": extra})
+        try:
+            parts = validate_parts([p.dict() for p in body.parts])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        count = shape_count(parts)
+        if count == 0:
+            raise HTTPException(status_code=400, detail="Add at least one shape before saving")
+        updates = {
+            "model": {"parts": parts},
+            "part_count": count,
+            "object": summary_object(parts),
+            "updated_at": now_utc(),
+        }
+        await db.clothes_items.update_one({"item_id": item_id}, {"$set": updates})
         it2 = await get_item(item_id)
         return {"item": _public_item(it2, True) | _owner_content(it2)}
 
@@ -318,7 +313,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
     async def set_texture(item_id: str, body: SetTextureBody, current=Depends(get_current_user)):
         it = await get_own_item(item_id, current)
         if it["render_kind"] != "texture":
-            raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use geometry from Studio, not a texture")
+            raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use geometry, not a texture")
         texture = _clean_texture(body.texture_url)
         await db.clothes_items.update_one(
             {"item_id": item_id},
@@ -356,7 +351,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         it = await get_own_item(item_id, current)
         has_content = bool(it.get("model") or it.get("texture_url"))
         if not has_content:
-            kind_hint = "a model from Studio" if it["render_kind"] == "geometry" else "a texture"
+            kind_hint = "geometry (build it in the item editor)" if it["render_kind"] == "geometry" else "a texture"
             raise HTTPException(status_code=400, detail=f"Add {kind_hint} before publishing")
         await db.clothes_items.update_one(
             {"item_id": item_id},
