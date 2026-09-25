@@ -7,13 +7,14 @@ Colectia Mongo `user_avatars`:
     {user_id, body: {height, width, proportions, head_size, skin_color, body_shape},
      equipped: {slot: item_id | None, ...}, updated_at}
 
-Un item se poate echipa intr-un slot doar daca:
-- e de tip "model" in shop_items (deci vine din Studio), SI
-- are un camp "slot" valid (setat la publicare in shop_routes.py), SI
-- utilizatorul il detine (proprietar, gratis+public, sau cumparat - vezi shop_routes.owns)
+Hainele/accesoriile echipabile vin din Clothes Shop (clothes_routes.py, colectia
+`clothes_items`), NU din Shop-ul de obiecte de joc. Un item se poate echipa
+intr-un slot doar daca utilizatorul il detine (proprietar, gratis+public, sau
+cumparat din Clothes Shop).
 
 Sloturile sunt extensibile: SLOTS de mai jos e singura lista care trebuie extinsa
-cand se adauga o categorie noua de item-uri.
+cand se adauga o categorie noua. Trebuie sa ramana identica cu SLOTS din
+clothes_routes.py.
 """
 from __future__ import annotations
 
@@ -26,8 +27,9 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger("astran.avatar")
 
-# Categoriile din Avatar Editor. Cheia = "slot" stocat pe shop_items; eticheta = ce vede userul.
-# Pentru a adauga o categorie noua: adauga o linie aici (backend) si in SLOT_DEFS din avatarTypes.ts (frontend).
+# Categoriile din Avatar Editor. Cheia = "slot" stocat pe clothes_items; eticheta = ce vede userul.
+# Pentru a adauga o categorie noua: adauga o linie aici SI in clothes_routes.SLOTS SI in
+# SLOT_DEFS din avatarTypes.ts (frontend) - toate trei trebuie sa foloseasca aceleasi chei.
 SLOTS: dict[str, str] = {
     "hair": "Păr",
     "shirt": "Tricou",
@@ -111,22 +113,12 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
             log.warning("could not create avatar indexes", exc_info=True)
         indexes_ready = True
 
-    async def owns_item(user_id: str, item: dict) -> bool:
-        """Aceeasi logica ca in shop_routes.owns, dar avem nevoie de ea si aici."""
-        if item["owner_id"] == user_id:
-            return True
-        if item["price"] == 0 and item["is_public"]:
-            return True
-        return await db.shop_purchases.find_one({"user_id": user_id, "item_id": item["item_id"]}, {"_id": 0}) is not None
-
-    async def owned_model_items(user_id: str) -> list[dict]:
-        """Toate item-urile de tip 'model' cu slot valid pe care userul le poate echipa: proprii + cumparate."""
-        purchases = await db.shop_purchases.find({"user_id": user_id}, {"_id": 0, "item_id": 1}).to_list(1000)
+    async def owned_clothes_items(user_id: str) -> list[dict]:
+        """Toate hainele/accesoriile din Clothes Shop pe care userul le poate echipa: proprii + cumparate + gratis-publice."""
+        purchases = await db.clothes_purchases.find({"user_id": user_id}, {"_id": 0, "item_id": 1}).to_list(1000)
         purchased_ids = [p["item_id"] for p in purchases]
-        cursor = db.shop_items.find(
+        cursor = db.clothes_items.find(
             {
-                "kind": "model",
-                "slot": {"$in": list(SLOTS.keys())},
                 "$or": [
                     {"owner_id": user_id},
                     {"item_id": {"$in": purchased_ids}},
@@ -156,7 +148,7 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
 
     @router.get("/inventory")
     async def get_inventory(current=Depends(get_current_user)):
-        docs = await owned_model_items(current["user_id"])
+        docs = await owned_clothes_items(current["user_id"])
         return {"items": [_inventory_item(d) for d in docs]}
 
     @router.get("/me")
@@ -174,12 +166,11 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
         doc = await db.user_avatars.find_one({"user_id": user_id}, {"_id": 0})
         if not doc:
             doc = default_avatar(user_id)
-        # Alaturam si continutul (piesele) fiecarui item echipat, ca clientul sa poata reda direct avatarul.
         equipped = doc.get("equipped") or {}
         item_ids = [v for v in equipped.values() if v]
         parts_by_item: dict[str, dict] = {}
         if item_ids:
-            docs = await db.shop_items.find({"item_id": {"$in": item_ids}}, {"_id": 0}).to_list(len(item_ids))
+            docs = await db.clothes_items.find({"item_id": {"$in": item_ids}}, {"_id": 0}).to_list(len(item_ids))
             for d in docs:
                 model = d.get("model") or {}
                 if isinstance(model.get("parts"), list):
@@ -191,8 +182,7 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
         await ensure_indexes()
         clean = clean_body(body.body)
 
-        # validam echiparea: doar sloturi cunoscute, doar item-uri detinute si compatibile cu slotul
-        owned = await owned_model_items(current["user_id"])
+        owned = await owned_clothes_items(current["user_id"])
         owned_by_id = {d["item_id"]: d for d in owned}
 
         equipped_in: dict = body.equipped or {}
