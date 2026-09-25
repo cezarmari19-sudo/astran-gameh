@@ -8,9 +8,14 @@ Colectia Mongo `user_avatars`:
      equipped: {slot: item_id | None, ...}, updated_at}
 
 Hainele/accesoriile echipabile vin din Clothes Shop (clothes_routes.py, colectia
-`clothes_items`), NU din Shop-ul de obiecte de joc. Un item se poate echipa
-intr-un slot doar daca utilizatorul il detine (proprietar, gratis+public, sau
-cumparat din Clothes Shop).
+`clothes_items`). Fiecare item are un `render_kind`:
+- "geometry" (hat, hair, accessory, back, face, effect): continutul e `model.parts`,
+  randat ca in Studio, atasat pe corp la un punct de ancorare.
+- "texture" (shirt, pants): continutul e `texture_url`, o imagine UV aplicata pe
+  geometria corpului (vezi frontend/src/avatar/uvTemplate.ts).
+
+Un item se poate echipa intr-un slot doar daca utilizatorul il detine (proprietar,
+gratis+public, sau cumparat din Clothes Shop) SI are continut publicat.
 
 Sloturile sunt extensibile: SLOTS de mai jos e singura lista care trebuie extinsa
 cand se adauga o categorie noua. Trebuie sa ramana identica cu SLOTS din
@@ -27,9 +32,6 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger("astran.avatar")
 
-# Categoriile din Avatar Editor. Cheia = "slot" stocat pe clothes_items; eticheta = ce vede userul.
-# Pentru a adauga o categorie noua: adauga o linie aici SI in clothes_routes.SLOTS SI in
-# SLOT_DEFS din avatarTypes.ts (frontend) - toate trei trebuie sa foloseasca aceleasi chei.
 SLOTS: dict[str, str] = {
     "hair": "Păr",
     "shirt": "Tricou",
@@ -62,7 +64,7 @@ def default_body() -> dict:
     return {
         "height": 1.0,
         "width": 1.0,
-        "proportions": 1.0,  # raport trunchi/picioare, 0.7..1.3
+        "proportions": 1.0,
         "head_size": 1.0,
         "skin_color": "#E8B48C",
         "body_shape": "standard",
@@ -114,31 +116,32 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
         indexes_ready = True
 
     async def owned_clothes_items(user_id: str) -> list[dict]:
-        """Toate hainele/accesoriile din Clothes Shop pe care userul le poate echipa: proprii + cumparate + gratis-publice."""
+        """Toate hainele/accesoriile PUBLICATE pe care userul le poate echipa: proprii + cumparate + gratis-publice."""
         purchases = await db.clothes_purchases.find({"user_id": user_id}, {"_id": 0, "item_id": 1}).to_list(1000)
         purchased_ids = [p["item_id"] for p in purchases]
         cursor = db.clothes_items.find(
             {
-                "$or": [
-                    {"owner_id": user_id},
-                    {"item_id": {"$in": purchased_ids}},
-                    {"price": 0, "is_public": True},
-                ],
+                "$and": [
+                    {"$or": [{"model": {"$exists": True}}, {"texture_url": {"$exists": True}}]},  # doar cu continut
+                    {"$or": [
+                        {"owner_id": user_id},
+                        {"item_id": {"$in": purchased_ids}},
+                        {"price": 0, "is_public": True},
+                    ]},
+                ]
             },
             {"_id": 0},
         )
         return await cursor.to_list(1000)
 
     def _inventory_item(doc: dict) -> dict:
-        preview = dict(doc.get("object") or {})
-        if doc.get("part_count"):
-            preview["part_count"] = doc["part_count"]
         return {
             "item_id": doc["item_id"],
             "name": doc["name"],
             "slot": doc.get("slot"),
+            "render_kind": doc.get("render_kind", "geometry"),
             "thumbnail_url": doc.get("thumbnail_url"),
-            "preview": preview,
+            "preview": dict(doc.get("object") or {}, part_count=doc.get("part_count")) if doc.get("render_kind") != "texture" else {"has_texture": True},
             "owner_username": doc["owner_username"],
         }
 
@@ -168,14 +171,17 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
             doc = default_avatar(user_id)
         equipped = doc.get("equipped") or {}
         item_ids = [v for v in equipped.values() if v]
-        parts_by_item: dict[str, dict] = {}
+        content_by_item: dict[str, dict] = {}
         if item_ids:
             docs = await db.clothes_items.find({"item_id": {"$in": item_ids}}, {"_id": 0}).to_list(len(item_ids))
             for d in docs:
-                model = d.get("model") or {}
-                if isinstance(model.get("parts"), list):
-                    parts_by_item[d["item_id"]] = {"item_id": d["item_id"], "name": d["name"], "parts": model["parts"]}
-        return {"avatar": doc, "equipped_content": parts_by_item}
+                if d.get("render_kind") == "texture" and d.get("texture_url"):
+                    content_by_item[d["item_id"]] = {"item_id": d["item_id"], "name": d["name"], "render_kind": "texture", "texture_url": d["texture_url"]}
+                else:
+                    model = d.get("model") or {}
+                    if isinstance(model.get("parts"), list):
+                        content_by_item[d["item_id"]] = {"item_id": d["item_id"], "name": d["name"], "render_kind": "geometry", "parts": model["parts"]}
+        return {"avatar": doc, "equipped_content": content_by_item}
 
     @router.put("/me")
     async def save_my_avatar(body: SaveAvatarBody, current=Depends(get_current_user)):
