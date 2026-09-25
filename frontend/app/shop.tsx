@@ -35,6 +35,7 @@ type ShopItem = {
   downloads: number;
   owned: boolean;
   thumbnail_url?: string | null;
+  slot?: string | null; // doar modele: daca setat, itemul e echipabil in Avatar Editor
   preview: any; // model: {type,color,scale,part_count}  ·  script: {file_count}
 };
 
@@ -45,6 +46,7 @@ type ShopItemDetail = ShopItem & {
 };
 
 type StudioModel = { model_id: string; name: string; part_count: number };
+type SlotDef = { key: string; label: string };
 
 const SHAPE_ICON: Record<string, string> = {
   cube: "cube-outline",
@@ -239,6 +241,12 @@ function ModelCard({ item, onPress }: { item: ShopItem; onPress: () => void }) {
       <Text style={styles.cardAuthor} numberOfLines={1}>
         by {item.owner_username}{p.part_count ? ` · ${p.part_count} objects` : ""}
       </Text>
+      {item.slot ? (
+        <View style={styles.slotTag}>
+          <MaterialCommunityIcons name="account-outline" size={10} color={colors.brand} />
+          <Text style={styles.slotTagText}>Avatar</Text>
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -372,6 +380,12 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
                     <Text style={styles.detailMetaText}>{item.preview.part_count} objects</Text>
                   </>
                 ) : null}
+                {item.slot ? (
+                  <>
+                    <Text style={styles.detailMetaText}>·</Text>
+                    <Text style={styles.detailMetaText}>Avatar item</Text>
+                  </>
+                ) : null}
               </View>
 
               <Text style={styles.detailId} selectable>{item.item_id}</Text>
@@ -383,7 +397,7 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
                   <MaterialCommunityIcons name="check-circle" size={16} color={colors.brand} />
                   <Text style={styles.ownedText}>
                     {item.kind === "model"
-                      ? "You own this - use it from Studio or Assets.load(\"" + item.item_id + "\")"
+                      ? "You own this - use it from Studio or Assets.load(\"" + item.item_id + "\")" + (item.slot ? " or equip it in Avatar" : "")
                       : "You own this script"}
                   </Text>
                 </View>
@@ -467,6 +481,8 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
   const [models, setModels] = useState<StudioModel[]>([]);
   const [modelId, setModelId] = useState<string | null>(null);
   const [thumbnail, setThumbnail] = useState<string | null | undefined>(undefined); // undefined = neschimbata, null = stearsa
+  const [slot, setSlot] = useState<string | null>(null); // null = nu e item de Avatar
+  const [slots, setSlots] = useState<SlotDef[]>([]);
 
   useEffect(() => {
     if (!visible) return;
@@ -481,6 +497,7 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
       setIsPublic(editItem.is_public);
       setFiles(editItem.files ?? []);
       setModelId(null);
+      setSlot(editItem.slot ?? null);
     } else {
       setName("");
       setDescription("");
@@ -488,6 +505,7 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
       setIsPublic(true);
       setFiles([]);
       setModelId(presetModelId ?? null);
+      setSlot(null);
     }
   }, [visible]);
 
@@ -504,6 +522,14 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
         }
       })
       .catch(() => setModels([]));
+  }, [visible, kind]);
+
+  // categoriile disponibile pentru Avatar Editor (extensibile din backend)
+  useEffect(() => {
+    if (!visible || kind !== "model") return;
+    api("/avatar/slots")
+      .then(r => setSlots(Array.isArray(r?.slots) ? r.slots : []))
+      .catch(() => setSlots([]));
   }, [visible, kind]);
 
   function pickModel(m: StudioModel) {
@@ -591,6 +617,7 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
           if (modelId) body.model_id = modelId;
           if (thumbnail === null) body.thumbnail_url = "";
           else if (typeof thumbnail === "string") body.thumbnail_url = thumbnail;
+          body.slot = slot ?? ""; // "" scoate din Avatar Editor daca a fost debifat
         }
         await api(`/shop/items/${editItem.item_id}`, { method: "PATCH", body: JSON.stringify(body) });
       } else if (kind === "script") {
@@ -601,6 +628,7 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
       } else {
         const body: any = { model_id: modelId, name: nm, description, price: priceNum, is_public: isPublic };
         if (typeof thumbnail === "string") body.thumbnail_url = thumbnail;
+        if (slot) body.slot = slot;
         await api("/shop/models", { method: "POST", body: JSON.stringify(body) });
       }
       onDone();
@@ -700,6 +728,28 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
                 </View>
               )}
 
+              <Text style={styles.lab}>Avatar Editor category (optional)</Text>
+              <Text style={styles.hintText}>Set this if the model is wearable — it'll show up in the Avatar Editor for anyone who owns it.</Text>
+              <View style={styles.slotGrid}>
+                <Pressable
+                  testID="publish-slot-none"
+                  onPress={() => setSlot(null)}
+                  style={[styles.slotChip, slot === null && styles.slotChipActive]}
+                >
+                  <Text style={[styles.slotChipText, slot === null && { color: colors.brand }]}>None</Text>
+                </Pressable>
+                {slots.map(s => (
+                  <Pressable
+                    key={s.key}
+                    testID={`publish-slot-${s.key}`}
+                    onPress={() => setSlot(s.key)}
+                    style={[styles.slotChip, slot === s.key && styles.slotChipActive]}
+                  >
+                    <Text style={[styles.slotChipText, slot === s.key && { color: colors.brand }]}>{s.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
               <Text style={styles.lab}>Thumbnail</Text>
               <View style={styles.thumbRow}>
                 {shownThumb ? (
@@ -785,6 +835,8 @@ const styles = StyleSheet.create({
   cardMetaRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   cardPrice: { color: colors.onSurface2, fontSize: 12, fontWeight: "700" },
   cardAuthor: { color: colors.onSurface3, fontSize: 11 },
+  slotTag: { flexDirection: "row", alignItems: "center", gap: 3, alignSelf: "flex-start", backgroundColor: colors.brandTint, borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 2, marginTop: 2 },
+  slotTagText: { color: colors.brand, fontSize: 9, fontWeight: "800", letterSpacing: 0.3 },
   detailBackdrop: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl },
   detailBox: { width: "100%", maxWidth: 400, maxHeight: "88%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   detailHeader: { alignItems: "center", gap: 4, marginBottom: 4 },
@@ -817,6 +869,10 @@ const styles = StyleSheet.create({
   modelPick: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   modelPickActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   modelPickName: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
+  slotGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
+  slotChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  slotChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  slotChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12 },
   thumbRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 6 },
   thumbPreview: { width: 84, height: 84, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
