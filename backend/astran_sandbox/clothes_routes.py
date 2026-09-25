@@ -8,11 +8,12 @@ Geometria itemelor de avatar (hat, hair, accessory, back, face, effect) NU vine 
 Game Studio. Vine din Avatar Item Studio - un editor separat in frontend
 (frontend/app/avatar-item-studio/[category].tsx) care trimite piesele direct la
 PATCH /clothes/items/{id}/geometry, ca body `{parts: [...]}` - acelasi format de
-date (Part[]) ca in Game Studio, dar niciodata citit din colectia studio_models.
+date (dict-uri de piese, validate cu studio_routes.validate_parts) ca in Game Studio,
+dar niciodata citit din colectia studio_models.
 
 Doua feluri de item, dupa `render_kind`:
-- "geometry": hat, hair, accessory, back, face, effect - Part[] trimise direct de
-   Avatar Item Studio.
+- "geometry": hat, hair, accessory, back, face, effect - piese (dict-uri) trimise
+   direct de Avatar Item Studio.
 - "texture": shirt, pants - o singura imagine UV (585x559) trimisa de TextureEditor.
 
 Un item e creat ca DRAFT (is_public=False, fara continut) prin POST /clothes/items,
@@ -38,12 +39,12 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .studio_routes import PartModel, shape_count, summary_object, validate_parts
+from .studio_routes import shape_count, summary_object, validate_parts, MAX_PARTS as STUDIO_MAX_PARTS
 
 log = logging.getLogger("astran.clothes")
 
@@ -53,7 +54,9 @@ MAX_DESC_CHARS = 500
 MAX_PRICE = 100000
 MAX_THUMB_CHARS = 300000
 MAX_TEXTURE_CHARS = 2_500_000  # ~1.8MB binar dupa decodare base64: suficient pentru 585x559 PNG
-MAX_PARTS_PER_ITEM = 200  # un item de avatar e o singura haina/accesoriu, nu o harta intreaga
+# Un item de avatar e o singura haina/accesoriu, nu o harta intreaga - limita e mai mica
+# decat cea din Game Studio (STUDIO_MAX_PARTS), dar validate_parts o accepta ca parametru comun.
+MAX_PARTS_PER_ITEM = 200
 
 # Categoriile din Avatar Editor. Extensibil: adauga o linie aici SI in avatar_routes.SLOTS
 # SI in SLOT_DEFS din avatarTypes.ts (frontend) - toate trei identice ca chei.
@@ -133,8 +136,10 @@ class UpdateClothesMetaBody(BaseModel):
 
 
 class SetGeometryBody(BaseModel):
-    """Piesele vin direct din Avatar Item Studio (frontend) - niciodata din Game Studio."""
-    parts: list[PartModel] = Field(min_length=1, max_length=MAX_PARTS_PER_ITEM)
+    """Piesele vin direct din Avatar Item Studio (frontend), ca dict-uri brute -
+    validate_parts (din studio_routes.py) le curata si le verifica, la fel ca pentru
+    Game Studio. Niciodata citite din colectia studio_models."""
+    parts: List[dict] = Field(min_length=1, max_length=MAX_PARTS_PER_ITEM)
 
 
 class SetTextureBody(BaseModel):
@@ -293,7 +298,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         if it["render_kind"] != "geometry":
             raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use a texture, not geometry")
         try:
-            parts = validate_parts([p.dict() for p in body.parts])
+            parts = validate_parts(body.parts)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         count = shape_count(parts)
