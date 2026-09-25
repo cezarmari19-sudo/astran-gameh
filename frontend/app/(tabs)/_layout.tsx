@@ -38,6 +38,13 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="avatar"
+        options={{
+          title: "Avatar",
+          tabBarIcon: ({ color }) => <MaterialCommunityIcons name="account-outline" size={22} color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="friends"
         options={{
           title: t("friends"),
