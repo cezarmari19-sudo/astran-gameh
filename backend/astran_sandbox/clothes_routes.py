@@ -3,20 +3,31 @@
 Complet independent de Shop-ul de obiecte (shop_routes.py): colectie proprie
 (`clothes_items`), rute proprii (/clothes/...), propriile cumparaturi
 (`clothes_purchases`). Un copac facut in Studio si publicat in Shop-ul de obiecte
-NU apare aici, si invers - cele doua magazine nu se ating.
+NU apare aici, si invers.
 
-Sursa modelului e aceeasi (un model salvat in Studio, din studio_routes.py):
-utilizatorul construieste piesele o singura data, apoi alege in care magazin
-il publica (obiecte de joc, sau haine de avatar).
+Doua feluri de item, dupa `render_kind`:
+- "geometry": hat, hair, accessory, back, face, effect - obiecte 3D construite in Studio,
+   continut in `model: {parts: [...]}` (acelasi format ca in shop_routes.py).
+- "texture": shirt, pants - o singura imagine UV (585x559, sistem clasic Roblox) aplicata
+   pe geometria corpului, continut in `texture_url` (data URL PNG, generat de editorul
+   de textura din aplicatie).
+
+Un item e creat ca DRAFT (is_public=False, fara continut) prin POST /clothes/items,
+apoi capata continut prin PATCH .../geometry sau PATCH .../texture (dupa render_kind),
+si devine vizibil in Shop abia dupa POST .../publish. Editarea unui item existent
+trece prin aceleasi rute de continut, fara sa creeze un item nou.
 
 Se ataseaza din server.py:
     api.include_router(make_clothes_router(get_current_user, db))
 
 Colectia Mongo `clothes_items`:
     {item_id, owner_id, owner_username, name, description, price, is_public,
-     slot (obligatoriu - una din SLOTS), thumbnail_url, downloads,
-     model: {parts: [...]}, part_count, object: {...} (preview),
-     source_model_id, created_at, updated_at}
+     slot (una din SLOTS), render_kind ("geometry"|"texture"), thumbnail_url, downloads,
+     -- geometry --
+     model: {parts: [...]}, part_count, object: {...} (preview), source_model_id,
+     -- texture --
+     texture_url: str,
+     created_at, updated_at}
 
 Colectia Mongo `clothes_purchases`: {user_id, item_id} unic.
 """
@@ -39,9 +50,13 @@ MAX_NAME_CHARS = 48
 MAX_DESC_CHARS = 500
 MAX_PRICE = 100000
 MAX_THUMB_CHARS = 300000
+MAX_TEXTURE_CHARS = 2_500_000  # ~1.8MB binar dupa decodare base64: suficient pentru 585x559 PNG
 
-# Categoriile din Avatar Editor. Extensibil: adauga o linie aici SI in SLOT_DEFS
-# din frontend/src/avatar/avatarTypes.ts (cheile trebuie sa fie identice).
+TEMPLATE_W = 585
+TEMPLATE_H = 559
+
+# Categoriile din Avatar Editor. Extensibil: adauga o linie aici SI in avatar_routes.SLOTS
+# SI in SLOT_DEFS din avatarTypes.ts (frontend) - toate trei identice ca chei.
 SLOTS: dict[str, str] = {
     "hair": "Păr",
     "shirt": "Tricou",
@@ -53,6 +68,13 @@ SLOTS: dict[str, str] = {
     "back": "Accesoriu spate",
     "effect": "Efect",
 }
+
+# Care sloturi folosesc textura UV (shirt/pants) vs geometrie din Studio (tot restul).
+TEXTURE_SLOTS = {"shirt", "pants"}
+
+
+def render_kind_for_slot(slot: str) -> str:
+    return "texture" if slot in TEXTURE_SLOTS else "geometry"
 
 
 def now_utc() -> datetime:
@@ -78,36 +100,57 @@ def _clean_thumbnail(value: Optional[str]) -> Optional[str]:
     return value
 
 
+def _clean_texture(value: str) -> str:
+    if not value:
+        raise HTTPException(status_code=400, detail="Texture is empty")
+    if len(value) > MAX_TEXTURE_CHARS:
+        raise HTTPException(status_code=400, detail="Texture is too large")
+    if not value.startswith("data:image/") or ";base64," not in value[:64]:
+        raise HTTPException(status_code=400, detail="Texture must be an image")
+    return value
+
+
 def _clean_slot(value: str) -> str:
     if value not in SLOTS:
         raise HTTPException(status_code=400, detail=f"Invalid slot '{value}'")
     return value
 
 
-class PublishClothesBody(BaseModel):
-    model_id: str = Field(min_length=1, max_length=64)  # modelul salvat in Studio care se publica
+class CreateClothesBody(BaseModel):
+    """Creeaza un draft gol intr-o categorie. Continutul se adauga separat, dupa render_kind."""
     name: str = Field(min_length=2, max_length=MAX_NAME_CHARS)
+    slot: str = Field(min_length=1, max_length=32)
     description: str = Field(default="", max_length=MAX_DESC_CHARS)
-    price: int = Field(default=0, ge=0, le=MAX_PRICE)
-    is_public: bool = True
-    thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)
-    slot: str = Field(min_length=1, max_length=32)  # obligatoriu - una din categoriile Avatar Editor
 
 
-class UpdateClothesBody(BaseModel):
+class UpdateClothesMetaBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=MAX_NAME_CHARS)
     description: Optional[str] = Field(default=None, max_length=MAX_DESC_CHARS)
     price: Optional[int] = Field(default=None, ge=0, le=MAX_PRICE)
     is_public: Optional[bool] = None
-    thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)  # "" = sterge poza
-    model_id: Optional[str] = Field(default=None, max_length=64)  # re-sincronizeaza continutul din Studio
-    slot: Optional[str] = Field(default=None, max_length=32)
+    thumbnail_url: Optional[str] = Field(default=None, max_length=MAX_THUMB_CHARS + 100)
+
+
+class SetGeometryBody(BaseModel):
+    model_id: str = Field(min_length=1, max_length=64)  # modelul salvat in Studio
+
+
+class SetTextureBody(BaseModel):
+    texture_url: str = Field(max_length=MAX_TEXTURE_CHARS + 100)  # PNG data URL, 585x559, din TextureEditor
+
+
+class PublishBody(BaseModel):
+    price: int = Field(default=0, ge=0, le=MAX_PRICE)
+    is_public: bool = True
 
 
 def _preview(doc: dict) -> dict:
+    if doc.get("render_kind") == "texture":
+        return {"render_kind": "texture", "has_texture": bool(doc.get("texture_url"))}
     preview = dict(doc.get("object") or {})
     if doc.get("part_count"):
         preview["part_count"] = doc["part_count"]
+    preview["render_kind"] = "geometry"
     return preview
 
 
@@ -121,21 +164,27 @@ def _public_item(doc: dict, owned: bool) -> dict:
         "price": doc["price"],
         "is_public": doc["is_public"],
         "slot": doc["slot"],
+        "render_kind": doc["render_kind"],
         "downloads": doc.get("downloads", 0),
         "created_at": doc["created_at"],
         "thumbnail_url": doc.get("thumbnail_url"),
         "owned": owned,
+        "has_content": bool(doc.get("model") or doc.get("texture_url")),
         "preview": _preview(doc),
     }
 
 
 def _owner_content(doc: dict) -> dict:
     out: dict = {}
-    if "object" in doc:
-        out["object"] = doc["object"]
-    model = doc.get("model")
-    if isinstance(model, dict) and isinstance(model.get("parts"), list):
-        out["parts"] = model["parts"]
+    if doc.get("render_kind") == "texture":
+        if doc.get("texture_url"):
+            out["texture_url"] = doc["texture_url"]
+    else:
+        if "object" in doc:
+            out["object"] = doc["object"]
+        model = doc.get("model")
+        if isinstance(model, dict) and isinstance(model.get("parts"), list):
+            out["parts"] = model["parts"]
     return out
 
 
@@ -161,6 +210,12 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         it = await db.clothes_items.find_one({"item_id": item_id}, {"_id": 0})
         if not it:
             raise HTTPException(status_code=404, detail="Item not found")
+        return it
+
+    async def get_own_item(item_id: str, current: dict) -> dict:
+        it = await get_item(item_id)
+        if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+            raise HTTPException(status_code=403, detail="Not the owner")
         return it
 
     async def owns(user_id: str, item: dict) -> bool:
@@ -193,9 +248,13 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             "source_model_id": model_id,
         }
 
+    # ---------- categorii ----------
+
     @router.get("/slots")
     async def list_slots():
-        return {"slots": [{"key": k, "label": v} for k, v in SLOTS.items()]}
+        return {"slots": [{"key": k, "label": v, "render_kind": render_kind_for_slot(k)} for k, v in SLOTS.items()]}
+
+    # ---------- listare / cautare ----------
 
     @router.get("/items")
     async def list_items(q: Optional[str] = None, mine: bool = False, slot: Optional[str] = None, current=Depends(get_current_user)):
@@ -219,30 +278,94 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             out.append(_public_item(d, is_owned))
         return {"items": out}
 
+    # ---------- creare (draft) ----------
+
     @router.post("/items")
-    async def publish_item(body: PublishClothesBody, current=Depends(get_current_user)):
+    async def create_item(body: CreateClothesBody, current=Depends(get_current_user)):
         await ensure_indexes()
-        thumb = _clean_thumbnail(body.thumbnail_url)
         slot = _clean_slot(body.slot)
-        extra = await snapshot_from_studio(body.model_id, current)
-        if thumb:
-            extra["thumbnail_url"] = thumb
         doc = {
             "item_id": new_id("cloth_"),
             "owner_id": current["user_id"],
             "owner_username": current["username"],
             "name": body.name,
             "description": body.description,
-            "price": body.price,
-            "is_public": body.is_public,
+            "price": 0,
+            "is_public": False,  # draft: nu apare in Shop pana la /publish
             "slot": slot,
+            "render_kind": render_kind_for_slot(slot),
             "downloads": 0,
             "created_at": now_utc(),
             "updated_at": now_utc(),
-            **extra,
         }
         await db.clothes_items.insert_one(doc)
         return {"item": _public_item(doc, True)}
+
+    # ---------- continut ----------
+
+    @router.patch("/items/{item_id}/geometry")
+    async def set_geometry(item_id: str, body: SetGeometryBody, current=Depends(get_current_user)):
+        it = await get_own_item(item_id, current)
+        if it["render_kind"] != "geometry":
+            raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use a texture, not geometry")
+        extra = await snapshot_from_studio(body.model_id, current)
+        extra["updated_at"] = now_utc()
+        await db.clothes_items.update_one({"item_id": item_id}, {"$set": extra})
+        it2 = await get_item(item_id)
+        return {"item": _public_item(it2, True) | _owner_content(it2)}
+
+    @router.patch("/items/{item_id}/texture")
+    async def set_texture(item_id: str, body: SetTextureBody, current=Depends(get_current_user)):
+        it = await get_own_item(item_id, current)
+        if it["render_kind"] != "texture":
+            raise HTTPException(status_code=400, detail=f"'{it['slot']}' items use geometry from Studio, not a texture")
+        texture = _clean_texture(body.texture_url)
+        await db.clothes_items.update_one(
+            {"item_id": item_id},
+            {"$set": {"texture_url": texture, "updated_at": now_utc()}},
+        )
+        it2 = await get_item(item_id)
+        return {"item": _public_item(it2, True) | _owner_content(it2)}
+
+    # ---------- meta (nume/descriere/pret/vizibilitate/thumbnail) ----------
+
+    @router.patch("/items/{item_id}")
+    async def update_meta(item_id: str, body: UpdateClothesMetaBody, current=Depends(get_current_user)):
+        await get_own_item(item_id, current)
+        updates: dict = {}
+        if body.name is not None:
+            updates["name"] = body.name
+        if body.description is not None:
+            updates["description"] = body.description
+        if body.price is not None:
+            updates["price"] = body.price
+        if body.is_public is not None:
+            updates["is_public"] = body.is_public
+        if body.thumbnail_url is not None:
+            updates["thumbnail_url"] = _clean_thumbnail(body.thumbnail_url)
+        if updates:
+            updates["updated_at"] = now_utc()
+            await db.clothes_items.update_one({"item_id": item_id}, {"$set": updates})
+        it2 = await get_item(item_id)
+        return {"item": _public_item(it2, True) | _owner_content(it2)}
+
+    # ---------- publicare ----------
+
+    @router.post("/items/{item_id}/publish")
+    async def publish_item(item_id: str, body: PublishBody, current=Depends(get_current_user)):
+        it = await get_own_item(item_id, current)
+        has_content = bool(it.get("model") or it.get("texture_url"))
+        if not has_content:
+            kind_hint = "a model from Studio" if it["render_kind"] == "geometry" else "a texture"
+            raise HTTPException(status_code=400, detail=f"Add {kind_hint} before publishing")
+        await db.clothes_items.update_one(
+            {"item_id": item_id},
+            {"$set": {"price": body.price, "is_public": body.is_public, "updated_at": now_utc()}},
+        )
+        it2 = await get_item(item_id)
+        return {"item": _public_item(it2, True)}
+
+    # ---------- detaliu / stergere / cumparare ----------
 
     @router.get("/items/{item_id}")
     async def get_item_detail(item_id: str, current=Depends(get_current_user)):
@@ -255,39 +378,9 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             result.update(_owner_content(it))
         return {"item": result}
 
-    @router.patch("/items/{item_id}")
-    async def update_item(item_id: str, body: UpdateClothesBody, current=Depends(get_current_user)):
-        it = await get_item(item_id)
-        if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
-            raise HTTPException(status_code=403, detail="Not the owner")
-
-        updates: dict = {}
-        if body.name is not None:
-            updates["name"] = body.name
-        if body.description is not None:
-            updates["description"] = body.description
-        if body.price is not None:
-            updates["price"] = body.price
-        if body.is_public is not None:
-            updates["is_public"] = body.is_public
-        if body.thumbnail_url is not None:
-            updates["thumbnail_url"] = _clean_thumbnail(body.thumbnail_url)
-        if body.slot is not None:
-            updates["slot"] = _clean_slot(body.slot)
-        if body.model_id is not None:
-            updates.update(await snapshot_from_studio(body.model_id, current))
-
-        if updates:
-            updates["updated_at"] = now_utc()
-            await db.clothes_items.update_one({"item_id": item_id}, {"$set": updates})
-        it2 = await get_item(item_id)
-        return {"item": _public_item(it2, True) | _owner_content(it2)}
-
     @router.delete("/items/{item_id}")
     async def delete_item(item_id: str, current=Depends(get_current_user)):
-        it = await get_item(item_id)
-        if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
-            raise HTTPException(status_code=403, detail="Not the owner")
+        await get_own_item(item_id, current)
         await db.clothes_items.delete_one({"item_id": item_id})
         return {"ok": True}
 
@@ -349,5 +442,13 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         docs = await db.clothes_items.find({"item_id": {"$in": item_ids}}, {"_id": 0}).to_list(200)
         idx = {d["item_id"]: d for d in docs}
         return {"items": [_public_item(idx[i], True) for i in item_ids if i in idx]}
+
+    @router.get("/mine/drafts")
+    async def my_drafts(current=Depends(get_current_user)):
+        """Itemele proprii, publicate sau nu - pentru ecranul 'itemele mele' din Create."""
+        await ensure_indexes()
+        cursor = db.clothes_items.find({"owner_id": current["user_id"]}, {"_id": 0}).sort("updated_at", -1).limit(200)
+        docs = await cursor.to_list(200)
+        return {"items": [_public_item(d, True) for d in docs]}
 
     return router
