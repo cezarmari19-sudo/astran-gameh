@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, Platform, Modal, ScrollView } from "react-native";
+import { View, Text, StyleSheet, Pressable, Platform, Modal } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -7,22 +7,20 @@ import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
 import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
+import { DeviceMotion } from "expo-sensors";
 import { api } from "@/src/api/client";
-import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE } from "@/src/studio/sceneShared";
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
-import { createObject, applyLocalTransform, applyMaterial, disposeObject } from "@/src/studio3d/modelTypes";
+import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
 
-// ---------- operatii de script (identic cu inainte) ----------
+// ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
 };
 type MeshState = { x: number; y: number; z: number; scale: number };
-type ScriptStatus =
-  | { kind: "none" } | { kind: "loading" } | { kind: "ok"; count: number } | { kind: "error"; message: string };
 
 function placeMesh(m: THREE.Mesh) {
   const s = m.userData as MeshState;
@@ -60,28 +58,34 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, op: Script
 // ---------- constante de gameplay ----------
 const PLAYER_RADIUS = 0.35;
 const PLAYER_HALF_HEIGHT_DEFAULT = 0.9;
-const MOVE_SPEED = 3.2; // unitati/secunda
+const MOVE_SPEED = 3.2;
 const GRAVITY = -18;
 const JOYSTICK_RADIUS = 52;
-const CAM_MIN_DIST = 0.15; // sub acest prag => first person
+const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
 const CAM_FIRST_PERSON_THRESHOLD = 0.6;
+
+// Giroscop: cat de mult influenteaza inclinarea telefonului rotirea camerei, pe langa swipe.
+// Valorile mici insumate cu swipe-ul dau o senzatie fluida, nu brusca - swipe-ul ramane
+// controlul principal, giroscopul adauga o senzatie de "priveste in jur inclinand telefonul".
+const GYRO_YAW_SENSITIVITY = 1.4;   // rotatia stanga-dreapta a telefonului (beta pe Android/iOS, in jurul axei verticale)
+const GYRO_PITCH_SENSITIVITY = 1.1; // inclinarea in sus/jos a telefonului
+const GYRO_SMOOTHING = 0.12;        // 0..1, cat de repede urmeaza camera unghiul brut al giroscopului (mai mic = mai fluid)
 
 type GraphicsQuality = "low" | "medium" | "high";
 
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { t } = useI18n();
 
   const [game, setGame] = useState<any>(null);
   const [isOwner, setIsOwner] = useState(false);
-  const [scriptStatus, setScriptStatus] = useState<ScriptStatus>({ kind: "none" });
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [quality, setQuality] = useState<GraphicsQuality>("medium");
   const [renderDistance, setRenderDistance] = useState(60);
+  const [gyroEnabled, setGyroEnabled] = useState(true);
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
@@ -98,86 +102,108 @@ export default function PlayScreen() {
   const playerHalfHeight = useRef(PLAYER_HALF_HEIGHT_DEFAULT);
   const alive = useRef(true);
   const rafId = useRef<number | null>(null);
-  const [resetKey, setResetKey] = useState(0);
 
-  // Fizica/miscare (mutable, actualizate in bucla de randare - nu in React state, pentru performanta)
   const pos = useRef(new THREE.Vector3(0, 0, 0));
   const velY = useRef(0);
-  const onGround = useRef(true);
-  const facingAngle = useRef(0); // unde priveste avatarul (radiani, in jurul Y)
+  const facingAngle = useRef(0);
 
-  // Camera third-person / first-person
-  const camAngle = useRef(0.0);   // orbit orizontal in jurul jucatorului
-  const camPolar = useRef(1.15);  // orbit vertical
+  // Camera: unghiul final = swipe (baza manuala) + contributie giroscop (relativa, netezita)
+  const camAngle = useRef(0.0);
+  const camPolar = useRef(1.15);
   const camDist = useRef(4.5);
   const lastCamAngle = useRef(0);
   const lastCamPolar = useRef(1.15);
   const lastCamDist = useRef(4.5);
   const firstPerson = useRef(false);
 
-  // Joystick (stanga jos)
+  // Giroscop: unghiuri brute citite din senzor si contributia lor netezita, separate de swipe
+  const gyroYawRaw = useRef(0);
+  const gyroPitchRaw = useRef(0);
+  const gyroYawSmoothed = useRef(0);
+  const gyroPitchSmoothed = useRef(0);
+  const gyroBaseYaw = useRef<number | null>(null);   // unghiul initial al telefonului, folosit ca "zero" relativ
+  const gyroBasePitch = useRef<number | null>(null);
+
+  // Joystick
   const joyActive = useRef(false);
-  const joyVec = useRef({ x: 0, y: 0 }); // -1..1
+  const joyVec = useRef({ x: 0, y: 0 });
   const [joyKnob, setJoyKnob] = useState({ x: 0, y: 0 });
   const [joyVisible, setJoyVisible] = useState(false);
   const [joyOrigin, setJoyOrigin] = useState({ x: 80, y: 80 });
 
-  // ---------- incarcare joc + gasire instanta de server ----------
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; if (rafId.current !== null) cancelAnimationFrame(rafId.current); };
+  }, []);
+
+  // ---------- giroscop: citim orientarea telefonului, calculam o contributie RELATIVA (nu absoluta) ----------
+  // Relativ, ca playerul sa poata tine telefonul in orice pozitie de start confortabila - primul
+  // cadru citit devine "centrul", iar miscarea ulterioara a telefonului roteste camera fata de acel centru.
+  useEffect(() => {
+    if (Platform.OS === "web" || !gyroEnabled) return;
+    let sub: any;
+    (async () => {
+      const available = await DeviceMotion.isAvailableAsync().catch(() => false);
+      if (!available) return;
+      DeviceMotion.setUpdateInterval(33); // ~30fps, suficient pentru camera, fara sa consume prea multa baterie
+      sub = DeviceMotion.addListener(evt => {
+        const rotation = evt.rotation; // { alpha, beta, gamma } in radiani
+        if (!rotation) return;
+        const yaw = rotation.alpha ?? 0;
+        const pitch = rotation.beta ?? 0;
+        if (gyroBaseYaw.current === null) { gyroBaseYaw.current = yaw; gyroBasePitch.current = pitch; }
+        gyroYawRaw.current = (yaw - gyroBaseYaw.current) * GYRO_YAW_SENSITIVITY;
+        gyroPitchRaw.current = (pitch - (gyroBasePitch.current ?? 0)) * GYRO_PITCH_SENSITIVITY;
+      });
+    })();
+    return () => { sub?.remove(); };
+  }, [gyroEnabled]);
+
+  // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let ownerNow = false;
       try {
         const [g, me] = await Promise.all([api(`/games/${id}`), api("/auth/me")]);
         if (cancelled) return;
         setGame(g.game);
-        ownerNow = !!me?.user?.user_id && me.user.user_id === g.game?.owner_id;
-        setIsOwner(ownerNow);
+        setIsOwner(!!me?.user?.user_id && me.user.user_id === g.game?.owner_id);
 
-        // corpul avatarului jucatorului, mereu incarcat (chiar daca jocul foloseste un character custom
-        // pentru randare, mecanicile de dimensiune raman legate de userul curent)
         try {
           const av = await api("/avatar/me");
           if (av?.avatar?.body) avatarBodyRef.current = { ...defaultBody(), ...av.avatar.body };
-        } catch {}
+        } catch (e) { console.log("[play] avatar load failed", e); }
 
-        // daca jocul are un character custom (model din Shop), il incarcam ca inlocuitor vizual al avatarului
         const charId = g.game?.player_character_model_id;
         if (charId && g.game?.player_character_source === "shop_model") {
           try {
             const item = await api(`/shop/items/${charId}`);
             if (Array.isArray(item?.item?.parts)) characterPartsRef.current = item.item.parts;
-          } catch {}
+          } catch (e) { console.log("[play] character load failed", e); }
         }
       } catch (e: any) {
-        if (!cancelled) setScriptStatus({ kind: "error", message: e?.message || "Could not load the game" });
+        console.log("[play] game load failed", e);
         return;
       }
 
-      // instanta de server (poate crea sau alatura una existenta)
       try {
         const r = await api(`/games/${id}/play`, { method: "POST" });
         instanceRef.current = r?.session ?? null;
-      } catch {}
+      } catch (e) { console.log("[play] instance join failed", e); }
 
-      setScriptStatus({ kind: "loading" });
       try {
         const run = await api(`/sandbox/games/${id}/run`, { method: "POST" });
         if (cancelled) return;
-        const ops = Array.isArray(run?.ops) ? run.ops : [];
-        scriptOpsRef.current = ops;
-        if (Array.isArray(run?.errors) && run.errors.length > 0) setScriptStatus({ kind: "error", message: run.errors[0] });
-        else if (ops.length === 0) setScriptStatus({ kind: "none" });
-        else setScriptStatus({ kind: "ok", count: ops.length });
-      } catch (e: any) {
-        if (!cancelled) setScriptStatus({ kind: "error", message: e?.message || "Script did not run" });
-      }
+        scriptOpsRef.current = Array.isArray(run?.ops) ? run.ops : [];
+        if (Array.isArray(run?.errors) && run.errors.length > 0) {
+          // erorile de script sunt de interes pentru dezvoltator, niciodata afisate playerului
+          console.log("[play] script errors", run.errors);
+        }
+      } catch (e) { console.log("[play] script run failed", e); }
     })();
-
     return () => { cancelled = true; };
   }, [id]);
 
-  // heartbeat + leave la iesire, ca instanta de server sa se elibereze
   useEffect(() => {
     const iv = setInterval(() => {
       const inst = instanceRef.current;
@@ -190,16 +216,9 @@ export default function PlayScreen() {
     };
   }, [id]);
 
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; if (rafId.current !== null) cancelAnimationFrame(rafId.current); };
-  }, []);
-
-  // ---------- construirea avatarului jucatorului (corp real, sau character custom) ----------
   function buildPlayerVisual(): THREE.Group {
     const group = new THREE.Group();
     if (characterPartsRef.current && characterPartsRef.current.length > 0) {
-      // character custom din Shop: randat exact ca in Studio (createObject/applyLocalTransform)
       const objects = new Map<string, THREE.Object3D>();
       characterPartsRef.current.forEach(p => {
         const obj = createObject(p);
@@ -214,7 +233,7 @@ export default function PlayScreen() {
         const parent = p.parent ? objects.get(p.parent) : null;
         (parent ?? group).add(obj);
       });
-      playerHalfHeight.current = 0.6; // aproximare rezonabila pentru un model custom mic-mediu
+      playerHalfHeight.current = 0.6;
     } else {
       const bm = buildBodyMeshes();
       layoutBody(bm, avatarBodyRef.current);
@@ -224,14 +243,12 @@ export default function PlayScreen() {
     return group;
   }
 
-  // ---------- collision AABB simpla: playerul e un cilindru aproximat ca o cutie ----------
   function resolveCollisions(next: THREE.Vector3, prev: THREE.Vector3): THREE.Vector3 {
     const r = PLAYER_RADIUS;
     const result = next.clone();
     for (const box of solidBoxesRef.current) {
       const withinY = result.y < box.maxY && result.y + playerHalfHeight.current * 2 > box.minY;
       if (!withinY) continue;
-      // rezolvam separat pe X si Z, ca alunecarea de-a lungul unui perete sa functioneze
       if (result.x + r > box.minX && result.x - r < box.maxX && result.z + r > box.minZ && result.z - r < box.maxZ) {
         const prevOutsideX = prev.x + r <= box.minX || prev.x - r >= box.maxX;
         const prevOutsideZ = prev.z + r <= box.minZ || prev.z - r >= box.maxZ;
@@ -244,7 +261,7 @@ export default function PlayScreen() {
   }
 
   function groundHeightAt(x: number, z: number): number {
-    let maxTop = 0; // podeaua de baza e la y=0
+    let maxTop = 0;
     for (const box of solidBoxesRef.current) {
       if (x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ) {
         if (box.maxY > maxTop) maxTop = box.maxY;
@@ -280,11 +297,12 @@ export default function PlayScreen() {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
-    // obiectele lumii: cele vizibile se randeaza, cele solide (indiferent daca sunt vizibile) intra in lista de collision
+    // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate,
+    // fara nicio modificare de aspect. Doar cele solide (indiferent daca vizibile sau nu) devin collision.
     const boxes: AABB[] = [];
     let spawn = { x: 0, y: 0, z: 0 };
     (game.scene?.objects || []).forEach((o: SceneObj) => {
-      if (o.type === SPAWN_TYPE) { spawn = { x: o.x, y: o.y, z: o.z }; return; } // spawn nu se randeaza niciodata ca obiect
+      if (o.type === SPAWN_TYPE) { spawn = { x: o.x, y: o.y, z: o.z }; return; }
       const isVisible = o.visible !== false;
       if (isVisible) scene.add(buildMesh(o));
       const isSolid = o.solid !== false;
@@ -300,7 +318,6 @@ export default function PlayScreen() {
     scene.add(playerGroup);
     playerGroupRef.current = playerGroup;
 
-    // Redarea operatiilor din script (neschimbat)
     const scriptOps = scriptOpsRef.current;
     const scriptMeshes = new Map<string, THREE.Mesh>();
     let nextOp = 0;
@@ -321,11 +338,18 @@ export default function PlayScreen() {
         nextOp += 1;
       }
 
-      // ---------- miscare jucator (joystick, relativa la directia camerei) ----------
+      // netezirea contributiei giroscopului (independent de swipe, care ramane instant/direct)
+      gyroYawSmoothed.current += (gyroYawRaw.current - gyroYawSmoothed.current) * GYRO_SMOOTHING;
+      gyroPitchSmoothed.current += (gyroPitchRaw.current - gyroPitchSmoothed.current) * GYRO_SMOOTHING;
+      const effectiveAngle = camAngle.current + (gyroEnabled ? gyroYawSmoothed.current : 0);
+      const effectivePolar = Math.max(0.4, Math.min(Math.PI - 0.15, camPolar.current + (gyroEnabled ? gyroPitchSmoothed.current : 0)));
+
+      // miscare jucator - directia se calculeaza fata de directia CAMEREI (swipe + giroscop combinate),
+      // avatarul insusi nu se roteste singur, doar cand jucatorul se misca activ cu joystick-ul
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
-        const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+        const camForward = new THREE.Vector3(Math.sin(effectiveAngle), 0, Math.cos(effectiveAngle));
         const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
         const moveDir = new THREE.Vector3()
           .addScaledVector(camForward, -jv.y)
@@ -340,12 +364,10 @@ export default function PlayScreen() {
         }
       }
 
-      // ---------- gravitate + coliziune verticala simpla (stă pe obiecte solide) ----------
       const groundY = groundHeightAt(pos.current.x, pos.current.z);
       velY.current += GRAVITY * dt;
       let nextY = pos.current.y + velY.current * dt;
-      if (nextY <= groundY) { nextY = groundY; velY.current = 0; onGround.current = true; }
-      else onGround.current = false;
+      if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
       pos.current.y = nextY;
 
       if (playerGroupRef.current) {
@@ -354,16 +376,15 @@ export default function PlayScreen() {
         playerGroupRef.current.visible = !firstPerson.current;
       }
 
-      // ---------- camera: third-person orbit, cu tranzitie spre first-person la zoom maxim ----------
       firstPerson.current = camDist.current <= CAM_FIRST_PERSON_THRESHOLD;
       const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
       if (firstPerson.current) {
         camera.position.set(pos.current.x, eyeY, pos.current.z);
-        const lookDir = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+        const lookDir = new THREE.Vector3(Math.sin(effectiveAngle), 0, Math.cos(effectiveAngle));
         camera.lookAt(camera.position.clone().add(lookDir));
       } else {
         const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
-        const r = camDist.current, th = camAngle.current, ph = camPolar.current;
+        const r = camDist.current, th = effectiveAngle, ph = effectivePolar;
         camera.position.set(
           target.x + r * Math.sin(ph) * Math.sin(th),
           target.y + r * Math.cos(ph),
@@ -379,7 +400,6 @@ export default function PlayScreen() {
     setReady(true);
   };
 
-  // ---------- joystick (stanga jos) ----------
   const onJoyStart = (e: any) => {
     const { x, y } = e.nativeEvent;
     setJoyOrigin({ x, y });
@@ -408,7 +428,7 @@ export default function PlayScreen() {
     else if (st === State.END || st === State.CANCELLED || st === State.FAILED) onJoyEnd();
   };
 
-  // ---------- camera: swipe cu degetul din dreapta ecranului sa roteasca/pinch sa faca zoom ----------
+  // swipe: ramane controlul manual principal, se aduna liber peste contributia giroscopului
   const onCamPan = (e: any) => {
     const { translationX, translationY } = e.nativeEvent;
     camAngle.current = lastCamAngle.current - translationX * 0.008;
@@ -422,7 +442,6 @@ export default function PlayScreen() {
   };
   const onCamPinchState = (e: any) => { if (e.nativeEvent.oldState === State.ACTIVE) lastCamDist.current = camDist.current; };
 
-  // ---------- meniul "A" ----------
   function doRespawn() {
     const sp = spawnPointRef.current;
     pos.current.set(sp.x, sp.y, sp.z);
@@ -432,10 +451,9 @@ export default function PlayScreen() {
   async function doLeave() {
     const inst = instanceRef.current;
     if (inst) api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: inst.instance_id }) }).catch(() => {});
-    router.back();
+    router.replace({ pathname: "/game/[id]", params: { id } } as any);
   }
 
-  // aplicare live a setarilor grafice
   useEffect(() => {
     const r = rendererRef.current as any;
     if (r) r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
@@ -450,14 +468,12 @@ export default function PlayScreen() {
       {Platform.OS === "web" || !game ? (
         <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
           <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
-          <Text style={styles.webText}>{game?.title || "Loading..."}</Text>
-          <Text style={styles.webSub}>{game ? `${game.scene?.objects?.length || 0} objects · 3D on Expo Go` : ""}</Text>
+          <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        <GLView key={resetKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+        <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
-      {/* Zona din dreapta: camera (swipe orizontal orbiteaza, pinch zoom -> first person la zoom maxim) */}
       {ready && Platform.OS !== "web" ? (
         <PinchGestureHandler onGestureEvent={onCamPinch} onHandlerStateChange={onCamPinchState}>
           <PanGestureHandler onGestureEvent={onCamPan} onHandlerStateChange={onCamPanState} minPointers={1} maxPointers={1}>
@@ -466,7 +482,6 @@ export default function PlayScreen() {
         </PinchGestureHandler>
       ) : null}
 
-      {/* Joystick: zona stanga jos */}
       {ready && Platform.OS !== "web" ? (
         <PanGestureHandler onGestureEvent={onJoyMove} onHandlerStateChange={onJoyStateChange} minPointers={1} maxPointers={1}>
           <View style={styles.joystickZone}>
@@ -483,34 +498,13 @@ export default function PlayScreen() {
         </PanGestureHandler>
       ) : null}
 
-      {/* Buton "A" - meniu jucator, mereu stanga sus */}
+      {/* Singurul element de UI permanent: butonul de meniu "A", stanga sus */}
       <SafeAreaView edges={["top"]} style={styles.aBtnWrap} pointerEvents="box-none">
         <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
           <Text style={styles.aBtnText}>A</Text>
         </Pressable>
       </SafeAreaView>
 
-      <SafeAreaView edges={["top"]} style={styles.topBar} pointerEvents="box-none">
-        <View style={styles.titlePill}>
-          <Text style={styles.titleText} numberOfLines={1}>{game?.title || "..."}</Text>
-        </View>
-        {isOwner ? (
-          <Pressable testID="play-script-btn" onPress={() => router.push(`/studio/edit/${id}` as any)} style={styles.iconBtn}>
-            <MaterialCommunityIcons name="code-braces" size={22} color={colors.onSurface} />
-          </Pressable>
-        ) : null}
-      </SafeAreaView>
-
-      {isOwner ? (
-        <View style={styles.statusPill} pointerEvents="none">
-          {scriptStatus.kind === "loading" ? <Text style={styles.statusText}>Script: running…</Text>
-            : scriptStatus.kind === "ok" ? <Text style={[styles.statusText, { color: colors.brand }]}>Script: {scriptStatus.count} changes</Text>
-            : scriptStatus.kind === "error" ? <Text style={[styles.statusText, { color: colors.error }]} numberOfLines={2}>Script error: {scriptStatus.message}</Text>
-            : <Text style={[styles.statusText, { color: colors.onSurface3 }]}>Script: none</Text>}
-        </View>
-      ) : null}
-
-      {/* Meniul "A": Respawn / Leave / Settings - extensibil pentru optiuni viitoare */}
       <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
           <View style={styles.menuBox}>
@@ -531,11 +525,16 @@ export default function PlayScreen() {
         </Pressable>
       </Modal>
 
-      {/* Settings: Graphics Quality + Render Distance, aplicate live */}
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
           <Pressable style={styles.menuBox} onPress={e => e.stopPropagation?.()}>
             <Text style={styles.menuTitle}>Settings</Text>
+
+            <Text style={styles.settingLabel}>Camera: Gyroscope</Text>
+            <Pressable testID="play-toggle-gyro" onPress={() => { setGyroEnabled(v => !v); gyroBaseYaw.current = null; gyroBasePitch.current = null; }} style={styles.gyroToggle}>
+              <MaterialCommunityIcons name={gyroEnabled ? "toggle-switch" : "toggle-switch-off-outline"} size={26} color={gyroEnabled ? colors.brand : colors.onSurface3} />
+              <Text style={styles.gyroToggleText}>{gyroEnabled ? "On - tilt your phone to look around" : "Off"}</Text>
+            </Pressable>
 
             <Text style={styles.settingLabel}>Graphics Quality</Text>
             <View style={styles.qualityRow}>
@@ -569,7 +568,6 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.surface },
   webFallback: { alignItems: "center", justifyContent: "center", gap: 12 },
   webText: { color: colors.onSurface, fontWeight: "800", fontSize: 18 },
-  webSub: { color: colors.onSurface3, fontSize: 12 },
   cameraZone: { position: "absolute", top: 0, bottom: 0, right: 0, width: "55%" },
   joystickZone: { position: "absolute", left: 0, bottom: 0, width: 180, height: 180 },
   joyBase: { position: "absolute", width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(255,255,255,0.12)", borderWidth: 2, borderColor: "rgba(255,255,255,0.35)", alignItems: "center", justifyContent: "center" },
@@ -578,18 +576,14 @@ const styles = StyleSheet.create({
   aBtnWrap: { position: "absolute", top: 0, left: 0, padding: spacing.md },
   aBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
   aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
-  topBar: { position: "absolute", top: 0, left: 56, right: 0, flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md },
-  iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center" },
-  titlePill: { flex: 1, marginHorizontal: 10, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, alignItems: "center" },
-  titleText: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
-  statusPill: { position: "absolute", top: 68, left: spacing.md, right: spacing.md, backgroundColor: "rgba(0,0,0,0.65)", paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.md },
-  statusText: { color: colors.onSurface2, fontSize: 12, fontWeight: "700" },
   menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
   menuBox: { width: "100%", maxWidth: 340, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
   menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
   menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
   settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
+  gyroToggle: { flexDirection: "row", alignItems: "center", gap: 10 },
+  gyroToggleText: { color: colors.onSurface2, fontSize: 12, fontWeight: "600", flex: 1 },
   qualityRow: { flexDirection: "row", gap: 8 },
   distRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
