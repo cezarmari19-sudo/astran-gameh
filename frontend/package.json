@@ -30,6 +30,7 @@
     "expo-localization": "~17.0.9",
     "expo-router": "6.0.24",
     "expo-secure-store": "15.0.8",
+    "expo-sensors": "~15.0.7",
     "expo-splash-screen": "31.0.13",
     "expo-status-bar": "3.0.9",
     "expo-symbols": "1.0.8",
