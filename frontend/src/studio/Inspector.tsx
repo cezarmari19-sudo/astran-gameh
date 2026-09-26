@@ -1,5 +1,8 @@
 // frontend/src/studio/Inspector.tsx
-// Panoul din editor pentru obiectul selectat: Move / Rotate / Scale, culoare, duplicare, stergere.
+// Panoul din editor pentru obiectul selectat: Move / Rotate / Scale, culoare, Visible/Solid,
+// duplicare, stergere. Cand e activ multi-select (mai multe obiecte), doar actiunile care au
+// sens pe grup (Solid, Delete) sunt disponibile - vezi MultiSelectBar mai jos, folosit separat
+// din studio/create.tsx.
 import React, { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, ScrollView, StyleSheet, Platform } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -98,6 +101,9 @@ export default function Inspector({ obj, onChange, onDelete, onDuplicate, onFocu
   const [tool, setTool] = useState<Tool>("move");
   const [steps, setSteps] = useState<Record<Tool, number>>({ move: 0.5, rotate: 15, scale: 0.1 });
   const step = steps[tool];
+  const isSpawn = obj.type === "spawn";
+  const visible = obj.visible !== false;
+  const solid = obj.solid !== false;
 
   const resetTool = () => {
     if (tool === "move") onChange({ x: 0, y: 0, z: 0 });
@@ -109,7 +115,7 @@ export default function Inspector({ obj, onChange, onDelete, onDuplicate, onFocu
     <View style={styles.wrap}>
       <View style={styles.head}>
         <MaterialCommunityIcons name={iconFor(obj.type) as any} size={18} color={colors.brand} />
-        <Text style={styles.title}>{obj.type}</Text>
+        <Text style={styles.title}>{isSpawn ? "Spawn Point" : obj.type}</Text>
         <View style={{ flex: 1 }} />
         <Pressable testID="insp-focus" onPress={onFocus} hitSlop={8} style={styles.headBtn}>
           <MaterialCommunityIcons name="crosshairs-gps" size={20} color={colors.onSurface2} />
@@ -125,6 +131,18 @@ export default function Inspector({ obj, onChange, onDelete, onDuplicate, onFocu
         </Pressable>
         <Pressable testID="insp-close" onPress={onClose} hitSlop={8} style={styles.headBtn}>
           <MaterialCommunityIcons name="close" size={20} color={colors.onSurface2} />
+        </Pressable>
+      </View>
+
+      {/* Visible / Solid - independente una de alta, controleaza cum se comporta obiectul in Play */}
+      <View style={styles.flagsRow}>
+        <Pressable testID="insp-toggle-visible" onPress={() => onChange({ visible: !visible })} style={[styles.flagBtn, visible && styles.flagBtnActive]}>
+          <MaterialCommunityIcons name={visible ? "eye-outline" : "eye-off-outline"} size={16} color={visible ? colors.brand : colors.onSurface3} />
+          <Text style={[styles.flagText, visible && { color: colors.brand }]}>Visible</Text>
+        </Pressable>
+        <Pressable testID="insp-toggle-solid" onPress={() => onChange({ solid: !solid })} style={[styles.flagBtn, solid && styles.flagBtnActive]}>
+          <MaterialCommunityIcons name={solid ? "wall" : "walk"} size={16} color={solid ? colors.brand : colors.onSurface3} />
+          <Text style={[styles.flagText, solid && { color: colors.brand }]}>Solid</Text>
         </Pressable>
       </View>
 
@@ -212,16 +230,44 @@ export default function Inspector({ obj, onChange, onDelete, onDuplicate, onFocu
         )}
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 8 }}>
-        {PALETTE.map(c => (
-          <Pressable
-            key={c}
-            testID={`editor-color-${c}`}
-            onPress={() => onChange({ color: c })}
-            style={[styles.swatch, { backgroundColor: c }, obj.color === c && styles.swatchSel]}
-          />
-        ))}
-      </ScrollView>
+      {!isSpawn ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 8 }}>
+          {PALETTE.map(c => (
+            <Pressable
+              key={c}
+              testID={`editor-color-${c}`}
+              onPress={() => onChange({ color: c })}
+              style={[styles.swatch, { backgroundColor: c }, obj.color === c && styles.swatchSel]}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+// Bara pentru multi-selectie (Box Select): actiuni care se aplica pe toate obiectele selectate deodata.
+export function MultiSelectBar({ count, onSolid, onUnsolid, onDelete, onClear }: {
+  count: number; onSolid: () => void; onUnsolid: () => void; onDelete: () => void; onClear: () => void;
+}) {
+  return (
+    <View style={styles.multiWrap}>
+      <Text style={styles.multiTitle}>{count} selected</Text>
+      <View style={{ flex: 1 }} />
+      <Pressable testID="multi-solid-on" onPress={onSolid} style={styles.multiBtn}>
+        <MaterialCommunityIcons name="wall" size={16} color={colors.brand} />
+        <Text style={styles.multiBtnText}>Solid ON</Text>
+      </Pressable>
+      <Pressable testID="multi-solid-off" onPress={onUnsolid} style={styles.multiBtn}>
+        <MaterialCommunityIcons name="walk" size={16} color={colors.onSurface2} />
+        <Text style={styles.multiBtnText}>Solid OFF</Text>
+      </Pressable>
+      <Pressable testID="multi-delete" onPress={onDelete} style={[styles.multiBtn, { borderColor: colors.error }]}>
+        <MaterialCommunityIcons name="trash-can-outline" size={16} color={colors.error} />
+      </Pressable>
+      <Pressable testID="multi-clear" onPress={onClear} style={styles.multiBtn}>
+        <MaterialCommunityIcons name="close" size={16} color={colors.onSurface2} />
+      </Pressable>
     </View>
   );
 }
@@ -231,6 +277,10 @@ const styles = StyleSheet.create({
   head: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
   title: { color: colors.onSurface, fontWeight: "800", fontSize: 14, textTransform: "capitalize" },
   headBtn: { paddingHorizontal: 4, paddingVertical: 2 },
+  flagsRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
+  flagBtn: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: radius.pill, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border },
+  flagBtnActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  flagText: { color: colors.onSurface3, fontSize: 11, fontWeight: "700" },
   tabsRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 },
   tab: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border },
   tabActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
@@ -247,4 +297,8 @@ const styles = StyleSheet.create({
   fieldInput: { flex: 1, minWidth: 0, color: colors.onSurface, fontWeight: "700", fontSize: 12, textAlign: "center", paddingVertical: 2, paddingHorizontal: 0 },
   swatch: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: colors.border },
   swatchSel: { borderColor: colors.onSurface },
+  multiWrap: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 12 },
+  multiTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
+  multiBtn: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border },
+  multiBtnText: { color: colors.onSurface, fontSize: 11, fontWeight: "700" },
 });
