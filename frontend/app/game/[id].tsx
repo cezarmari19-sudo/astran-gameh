@@ -7,7 +7,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
-import { PrimaryButton, SecondaryButton } from "@/src/components/ui";
+import { PrimaryButton } from "@/src/components/ui";
 import { colors, radius, spacing } from "@/src/theme";
 
 const { width: SW } = Dimensions.get("window");
@@ -17,15 +17,13 @@ export default function GameDetail() {
   const router = useRouter();
   const { t } = useI18n();
   const [game, setGame] = useState<any>(null);
-  const [isOwner, setIsOwner] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [gameRes, meRes] = await Promise.all([api(`/games/${id}`), api("/auth/me")]);
-        setGame(gameRes.game);
-        setIsOwner(!!meRes?.user?.user_id && meRes.user.user_id === gameRes.game?.owner_id);
+        const res = await api(`/games/${id}`);
+        setGame(res.game);
       } catch (e: any) {
         setErr(e.message || "Failed");
       }
@@ -67,33 +65,12 @@ export default function GameDetail() {
       </ScrollView>
 
       <View style={styles.footer}>
-        {isOwner ? (
-          <View style={styles.footerRow}>
-            <View style={{ flex: 1 }}>
-              <SecondaryButton
-                testID="game-edit-button"
-                label="Edit"
-                icon="pencil-outline"
-                onPress={() => router.push({ pathname: "/studio/edit/[id]", params: { id: game.game_id } } as any)}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <PrimaryButton
-                testID="game-play-button"
-                label={t("play")}
-                icon="play"
-                onPress={() => router.push({ pathname: "/play/[id]", params: { id: game.game_id } })}
-              />
-            </View>
-          </View>
-        ) : (
-          <PrimaryButton
-            testID="game-play-button"
-            label={t("play")}
-            icon="play"
-            onPress={() => router.push({ pathname: "/play/[id]", params: { id: game.game_id } })}
-          />
-        )}
+        <PrimaryButton
+          testID="game-play-button"
+          label={t("play")}
+          icon="play"
+          onPress={() => router.push({ pathname: "/play/[id]", params: { id: game.game_id } })}
+        />
       </View>
     </View>
   );
@@ -123,5 +100,4 @@ const styles = StyleSheet.create({
   stats: { flexDirection: "row", justifyContent: "space-around", marginTop: 20, marginBottom: 20, padding: spacing.lg, backgroundColor: colors.surface2, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
   desc: { color: colors.onSurface2, fontSize: 14, lineHeight: 21 },
   footer: { position: "absolute", left: 0, right: 0, bottom: 0, padding: spacing.lg, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border },
-  footerRow: { flexDirection: "row", gap: 10 },
 });
