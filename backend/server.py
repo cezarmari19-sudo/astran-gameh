@@ -62,7 +62,7 @@ except Exception as exc:  # noqa: BLE001
     make_clothes_router = None
     log.warning("Clothes shop disabled: %s", exc)
 
-# Avatar Editor (corp + sloturi echipate) - optional, la fel ca celelalte module sandbox.
+# Avatar Editor (corp) - optional, la fel ca celelalte module sandbox.
 try:
     from astran_sandbox.avatar_routes import make_avatar_router
 except Exception as exc:  # noqa: BLE001
@@ -141,6 +141,12 @@ class UpdateProfileBody(BaseModel):
     language: Optional[str] = None
 
 
+# Max Players: input numeric liber (nu o lista fixa de optiuni), limitat doar la un interval rezonabil de server.
+MAX_PLAYERS_MIN = 1
+MAX_PLAYERS_MAX = 10000
+MAX_PLAYERS_DEFAULT = 20
+
+
 class GameCreateBody(BaseModel):
     title: str = Field(min_length=2, max_length=64)
     description: str = Field(default="", max_length=2000)
@@ -151,6 +157,9 @@ class GameCreateBody(BaseModel):
     allow_join_via_friends: bool = True
     scene: Optional[dict] = None
     script: str = Field(default="", max_length=20000)
+    max_players: int = Field(default=MAX_PLAYERS_DEFAULT, ge=MAX_PLAYERS_MIN, le=MAX_PLAYERS_MAX)
+    # daca setat, jucatorii intra in joc cu acest model (din Studio) in loc de avatarul lor personal
+    player_character_model_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class GameUpdateBody(BaseModel):
@@ -162,6 +171,9 @@ class GameUpdateBody(BaseModel):
     category: Optional[str] = None
     scene: Optional[dict] = None
     script: Optional[str] = Field(default=None, max_length=20000)
+    max_players: Optional[int] = Field(default=None, ge=MAX_PLAYERS_MIN, le=MAX_PLAYERS_MAX)
+    player_character_model_id: Optional[str] = Field(default=None, max_length=64)
+    clear_player_character: Optional[bool] = None  # true = revine la avatarul personal al jucatorului
 
 
 class GamePublic(BaseModel):
@@ -180,6 +192,8 @@ class GamePublic(BaseModel):
     created_at: datetime
     updated_at: datetime
     status: str = "active"
+    max_players: int = MAX_PLAYERS_DEFAULT
+    player_character_model_id: Optional[str] = None
 
 
 class FriendRequestBody(BaseModel):
@@ -203,6 +217,14 @@ class ReportBody(BaseModel):
     target_id: str
     reason: str
     details: Optional[str] = None
+
+
+class JoinInstanceBody(BaseModel):
+    instance_id: Optional[str] = None  # daca setat, incearca sa intre in acea instanta anume (ex: link de la un prieten)
+
+
+class HeartbeatBody(BaseModel):
+    instance_id: str
 
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
@@ -250,6 +272,11 @@ async def startup():
     await db.astran_ledger.create_index([("user_id", 1), ("timestamp", -1)])
     await db.reports.create_index("report_id", unique=True)
     await db.recently_played.create_index([("user_id", 1), ("played_at", -1)])
+    # Server instances: mai multe "camere" pentru acelasi joc, fiecare cu propriul plafon de jucatori.
+    await db.game_instances.create_index("instance_id", unique=True)
+    await db.game_instances.create_index([("game_id", 1), ("status", 1), ("player_count", 1)])
+    await db.instance_players.create_index([("instance_id", 1), ("user_id", 1)], unique=True)
+    await db.instance_players.create_index("last_seen", expireAfterSeconds=60)  # jucator inactiv >60s = considerat plecat
 
     existing = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
     if not existing:
@@ -466,6 +493,13 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
     return {"users": users}
 
 
+def _game_defaults(doc: dict) -> dict:
+    """Completeaza campurile noi (max_players, player_character) pentru jocurile salvate inainte de ele."""
+    doc.setdefault("max_players", MAX_PLAYERS_DEFAULT)
+    doc.setdefault("player_character_model_id", None)
+    return doc
+
+
 @api.post("/games")
 async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
     gid = new_id("game_")
@@ -488,6 +522,8 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "allow_join_via_friends": body.allow_join_via_friends,
         "scene": body.scene or {"objects": [], "sky": "#0F1012", "ground": "#1A1D21"},
         "script": body.script,
+        "max_players": body.max_players,
+        "player_character_model_id": body.player_character_model_id,
     }
     await db.games.insert_one(doc)
     return {"game": {k: v for k, v in doc.items() if k != "_id"}}
@@ -500,12 +536,14 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
         raise HTTPException(status_code=404, detail="Game not found")
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         raise HTTPException(status_code=403, detail="Not the owner")
-    updates = {k: v for k, v in body.dict().items() if v is not None}
+    updates = {k: v for k, v in body.dict(exclude={"clear_player_character"}).items() if v is not None}
+    if body.clear_player_character:
+        updates["player_character_model_id"] = None
     if updates:
         updates["updated_at"] = now_utc()
         await db.games.update_one({"game_id": game_id}, {"$set": updates})
     g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    return {"game": g2}
+    return {"game": _game_defaults(g2)}
 
 
 @api.delete("/games/{game_id}")
@@ -516,6 +554,7 @@ async def delete_game(game_id: str, current=Depends(get_current_user)):
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         raise HTTPException(status_code=403, detail="Not the owner")
     await db.games.delete_one({"game_id": game_id})
+    await db.game_instances.delete_many({"game_id": game_id})
     return {"ok": True}
 
 
@@ -533,13 +572,15 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
     }
     sort = sort_map.get(section, sort_map["for_you"])
     cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
-    return {"section": section, "games": await cursor.to_list(30)}
+    games = [_game_defaults(g) for g in await cursor.to_list(30)]
+    return {"section": section, "games": games}
 
 
 @api.get("/games/mine")
 async def my_games(current=Depends(get_current_user)):
     cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0, "script": 0}).sort("created_at", -1)
-    return {"games": await cursor.to_list(100)}
+    games = [_game_defaults(g) for g in await cursor.to_list(100)]
+    return {"games": games}
 
 
 @api.get("/games/recently-played")
@@ -550,7 +591,7 @@ async def recently_played(current=Depends(get_current_user)):
     if not game_ids:
         return {"games": []}
     games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0, "script": 0}).to_list(50)
-    idx = {g["game_id"]: g for g in games}
+    idx = {g["game_id"]: _game_defaults(g) for g in games}
     return {"games": [idx[gid] for gid in game_ids if gid in idx]}
 
 
@@ -563,23 +604,116 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Age-restricted content")
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         g.pop("script", None)
-    return {"game": g}
+    return {"game": _game_defaults(g)}
+
+
+# ---------- Server instances ----------
+# Cand un server ajunge la max_players, urmatorul jucator intra intr-o instanta noua, nu in
+# aceeasi sesiune. O instanta "moare" (status=closed) cand ultimul jucator pleaca de 60s+
+# (vezi indexul TTL pe instance_players.last_seen si reap_empty_instances de mai jos).
+
+async def reap_empty_instances(game_id: str) -> None:
+    """Inchide instantele fara niciun jucator activ (curatare oportunista, apelata la join)."""
+    open_instances = await db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).to_list(200)
+    for inst in open_instances:
+        active = await db.instance_players.count_documents({"instance_id": inst["instance_id"]})
+        if active == 0 and inst["player_count"] > 0:
+            await db.game_instances.update_one({"instance_id": inst["instance_id"]}, {"$set": {"player_count": 0}})
+        elif active != inst["player_count"]:
+            await db.game_instances.update_one({"instance_id": inst["instance_id"]}, {"$set": {"player_count": active}})
 
 
 @api.post("/games/{game_id}/play")
-async def play_game(game_id: str, current=Depends(get_current_user)):
+async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), current=Depends(get_current_user)):
+    """Gaseste sau creeaza o instanta de server cu loc liber si inregistreaza jucatorul in ea."""
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g:
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
-    await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1, "player_count": 1}})
+    g = _game_defaults(g)
+    max_players = g["max_players"]
+
+    await reap_empty_instances(game_id)
+
+    instance = None
+    if body.instance_id:
+        instance = await db.game_instances.find_one({"instance_id": body.instance_id, "game_id": game_id, "status": "open"}, {"_id": 0})
+        if instance and instance["player_count"] >= max_players:
+            instance = None  # instanta ceruta e plina - cautam/cream alta mai jos
+
+    if not instance:
+        instance = await db.game_instances.find_one_and_update(
+            {"game_id": game_id, "status": "open", "player_count": {"$lt": max_players}},
+            {"$inc": {"player_count": 1}},
+            sort=[("player_count", -1)],  # umplem instantele existente inainte sa deschidem una noua
+            return_document=True,
+            projection={"_id": 0},
+        )
+
+    if not instance:
+        instance = {
+            "instance_id": new_id("inst_"),
+            "game_id": game_id,
+            "status": "open",
+            "player_count": 1,
+            "created_at": now_utc(),
+        }
+        await db.game_instances.insert_one(instance)
+    else:
+        # find_one_and_update deja a incrementat player_count in DB; il oglindim si aici pentru raspuns
+        instance["player_count"] = instance.get("player_count", 0)
+
+    await db.instance_players.update_one(
+        {"instance_id": instance["instance_id"], "user_id": current["user_id"]},
+        {"$set": {"instance_id": instance["instance_id"], "user_id": current["user_id"], "last_seen": now_utc()}},
+        upsert=True,
+    )
+
+    await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1}})
     await db.recently_played.update_one(
         {"user_id": current["user_id"], "game_id": game_id},
         {"$set": {"played_at": now_utc()}},
         upsert=True,
     )
-    return {"ok": True, "session": {"instance_id": new_id("inst_"), "game_id": game_id}}
+
+    return {
+        "ok": True,
+        "session": {"instance_id": instance["instance_id"], "game_id": game_id},
+        "max_players": max_players,
+        "player_character_model_id": g.get("player_character_model_id"),
+    }
+
+
+@api.post("/games/{game_id}/instance/heartbeat")
+async def instance_heartbeat(game_id: str, body: HeartbeatBody, current=Depends(get_current_user)):
+    """Trimis periodic de client cat timp e in Play Mode - tine jucatorul 'activ' in instanta."""
+    res = await db.instance_players.update_one(
+        {"instance_id": body.instance_id, "user_id": current["user_id"]},
+        {"$set": {"last_seen": now_utc()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not in this instance")
+    return {"ok": True}
+
+
+@api.post("/games/{game_id}/instance/leave")
+async def instance_leave(game_id: str, body: HeartbeatBody, current=Depends(get_current_user)):
+    """Apelat la Leave, ca instanta sa se elibereze imediat (nu doar dupa expirarea TTL)."""
+    await db.instance_players.delete_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
+    await db.game_instances.update_one(
+        {"instance_id": body.instance_id, "player_count": {"$gt": 0}},
+        {"$inc": {"player_count": -1}},
+    )
+    return {"ok": True}
+
+
+@api.get("/games/{game_id}/instances")
+async def list_instances(game_id: str, current=Depends(get_current_user)):
+    """Lista serverelor deschise pentru un joc (util pentru debugging/afisare optionala in UI)."""
+    await reap_empty_instances(game_id)
+    cursor = db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).sort("created_at", 1)
+    return {"instances": await cursor.to_list(200)}
 
 
 def _pair(a: str, b: str) -> tuple[str, str]:
@@ -906,7 +1040,7 @@ if make_shop_router is not None:
 if make_clothes_router is not None:
     api.include_router(make_clothes_router(get_current_user, db))
 
-# Avatar Editor: /api/avatar/me, /api/avatar/inventory, /api/avatar/slots, /api/avatar/user/{id}
+# Avatar Editor: /api/avatar/me, /api/avatar/slots
 if make_avatar_router is not None:
     api.include_router(make_avatar_router(get_current_user, db))
 
