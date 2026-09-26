@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, Platform, Modal } from "react-native";
+import { View, Text, StyleSheet, Pressable, Platform, Modal, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
+import * as ScreenOrientation from "expo-screen-orientation";
 import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
-import { DeviceMotion } from "expo-sensors";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE } from "@/src/studio/sceneShared";
@@ -65,27 +65,19 @@ const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
 const CAM_FIRST_PERSON_THRESHOLD = 0.6;
 
-// Giroscop: cat de mult influenteaza inclinarea telefonului rotirea camerei, pe langa swipe.
-// Valorile mici insumate cu swipe-ul dau o senzatie fluida, nu brusca - swipe-ul ramane
-// controlul principal, giroscopul adauga o senzatie de "priveste in jur inclinand telefonul".
-const GYRO_YAW_SENSITIVITY = 1.4;   // rotatia stanga-dreapta a telefonului (beta pe Android/iOS, in jurul axei verticale)
-const GYRO_PITCH_SENSITIVITY = 1.1; // inclinarea in sus/jos a telefonului
-const GYRO_SMOOTHING = 0.12;        // 0..1, cat de repede urmeaza camera unghiul brut al giroscopului (mai mic = mai fluid)
-
 type GraphicsQuality = "low" | "medium" | "high";
 
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { width: screenW, height: screenH } = useWindowDimensions(); // se recalculeaza automat la rotatie
 
   const [game, setGame] = useState<any>(null);
-  const [isOwner, setIsOwner] = useState(false);
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [quality, setQuality] = useState<GraphicsQuality>("medium");
   const [renderDistance, setRenderDistance] = useState(60);
-  const [gyroEnabled, setGyroEnabled] = useState(true);
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
@@ -107,7 +99,7 @@ export default function PlayScreen() {
   const velY = useRef(0);
   const facingAngle = useRef(0);
 
-  // Camera: unghiul final = swipe (baza manuala) + contributie giroscop (relativa, netezita)
+  // Camera: DOAR swipe + pinch. Fara giroscop/inclinare.
   const camAngle = useRef(0.0);
   const camPolar = useRef(1.15);
   const camDist = useRef(4.5);
@@ -115,14 +107,6 @@ export default function PlayScreen() {
   const lastCamPolar = useRef(1.15);
   const lastCamDist = useRef(4.5);
   const firstPerson = useRef(false);
-
-  // Giroscop: unghiuri brute citite din senzor si contributia lor netezita, separate de swipe
-  const gyroYawRaw = useRef(0);
-  const gyroPitchRaw = useRef(0);
-  const gyroYawSmoothed = useRef(0);
-  const gyroPitchSmoothed = useRef(0);
-  const gyroBaseYaw = useRef<number | null>(null);   // unghiul initial al telefonului, folosit ca "zero" relativ
-  const gyroBasePitch = useRef<number | null>(null);
 
   // Joystick
   const joyActive = useRef(false);
@@ -136,28 +120,27 @@ export default function PlayScreen() {
     return () => { alive.current = false; if (rafId.current !== null) cancelAnimationFrame(rafId.current); };
   }, []);
 
-  // ---------- giroscop: citim orientarea telefonului, calculam o contributie RELATIVA (nu absoluta) ----------
-  // Relativ, ca playerul sa poata tine telefonul in orice pozitie de start confortabila - primul
-  // cadru citit devine "centrul", iar miscarea ulterioara a telefonului roteste camera fata de acel centru.
+  // ---------- rotatia ecranului: Play Mode elibereaza orientarea (portrait SAU landscape,
+  // dupa cum tine jucatorul telefonul), si o reblocheaza pe portrait la iesirea din ecran ----------
   useEffect(() => {
-    if (Platform.OS === "web" || !gyroEnabled) return;
-    let sub: any;
-    (async () => {
-      const available = await DeviceMotion.isAvailableAsync().catch(() => false);
-      if (!available) return;
-      DeviceMotion.setUpdateInterval(33); // ~30fps, suficient pentru camera, fara sa consume prea multa baterie
-      sub = DeviceMotion.addListener(evt => {
-        const rotation = evt.rotation; // { alpha, beta, gamma } in radiani
-        if (!rotation) return;
-        const yaw = rotation.alpha ?? 0;
-        const pitch = rotation.beta ?? 0;
-        if (gyroBaseYaw.current === null) { gyroBaseYaw.current = yaw; gyroBasePitch.current = pitch; }
-        gyroYawRaw.current = (yaw - gyroBaseYaw.current) * GYRO_YAW_SENSITIVITY;
-        gyroPitchRaw.current = (pitch - (gyroBasePitch.current ?? 0)) * GYRO_PITCH_SENSITIVITY;
-      });
-    })();
-    return () => { sub?.remove(); };
-  }, [gyroEnabled]);
+    if (Platform.OS === "web") return;
+    ScreenOrientation.unlockAsync().catch(() => {});
+    return () => {
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    };
+  }, []);
+
+  // camera.aspect trebuie recalculat de fiecare data cand ecranul isi schimba dimensiunile
+  // (adica exact cand playerul roteste telefonul) - altfel imaginea ramane deformata.
+  useEffect(() => {
+    const cam = cameraRef.current;
+    const renderer = rendererRef.current as any;
+    if (cam && screenW > 0 && screenH > 0) {
+      cam.aspect = screenW / screenH;
+      cam.updateProjectionMatrix();
+    }
+    if (renderer?.setSize) renderer.setSize(screenW, screenH);
+  }, [screenW, screenH]);
 
   // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
@@ -167,7 +150,6 @@ export default function PlayScreen() {
         const [g, me] = await Promise.all([api(`/games/${id}`), api("/auth/me")]);
         if (cancelled) return;
         setGame(g.game);
-        setIsOwner(!!me?.user?.user_id && me.user.user_id === g.game?.owner_id);
 
         try {
           const av = await api("/avatar/me");
@@ -196,7 +178,6 @@ export default function PlayScreen() {
         if (cancelled) return;
         scriptOpsRef.current = Array.isArray(run?.ops) ? run.ops : [];
         if (Array.isArray(run?.errors) && run.errors.length > 0) {
-          // erorile de script sunt de interes pentru dezvoltator, niciodata afisate playerului
           console.log("[play] script errors", run.errors);
         }
       } catch (e) { console.log("[play] script run failed", e); }
@@ -297,8 +278,7 @@ export default function PlayScreen() {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
-    // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate,
-    // fara nicio modificare de aspect. Doar cele solide (indiferent daca vizibile sau nu) devin collision.
+    // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate.
     const boxes: AABB[] = [];
     let spawn = { x: 0, y: 0, z: 0 };
     (game.scene?.objects || []).forEach((o: SceneObj) => {
@@ -338,18 +318,12 @@ export default function PlayScreen() {
         nextOp += 1;
       }
 
-      // netezirea contributiei giroscopului (independent de swipe, care ramane instant/direct)
-      gyroYawSmoothed.current += (gyroYawRaw.current - gyroYawSmoothed.current) * GYRO_SMOOTHING;
-      gyroPitchSmoothed.current += (gyroPitchRaw.current - gyroPitchSmoothed.current) * GYRO_SMOOTHING;
-      const effectiveAngle = camAngle.current + (gyroEnabled ? gyroYawSmoothed.current : 0);
-      const effectivePolar = Math.max(0.4, Math.min(Math.PI - 0.15, camPolar.current + (gyroEnabled ? gyroPitchSmoothed.current : 0)));
-
-      // miscare jucator - directia se calculeaza fata de directia CAMEREI (swipe + giroscop combinate),
-      // avatarul insusi nu se roteste singur, doar cand jucatorul se misca activ cu joystick-ul
+      // miscare jucator - directia se calculeaza fata de directia camerei (doar swipe),
+      // avatarul se roteste doar cand jucatorul se misca activ cu joystick-ul
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
-        const camForward = new THREE.Vector3(Math.sin(effectiveAngle), 0, Math.cos(effectiveAngle));
+        const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
         const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
         const moveDir = new THREE.Vector3()
           .addScaledVector(camForward, -jv.y)
@@ -380,11 +354,11 @@ export default function PlayScreen() {
       const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
       if (firstPerson.current) {
         camera.position.set(pos.current.x, eyeY, pos.current.z);
-        const lookDir = new THREE.Vector3(Math.sin(effectiveAngle), 0, Math.cos(effectiveAngle));
+        const lookDir = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
         camera.lookAt(camera.position.clone().add(lookDir));
       } else {
         const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
-        const r = camDist.current, th = effectiveAngle, ph = effectivePolar;
+        const r = camDist.current, th = camAngle.current, ph = camPolar.current;
         camera.position.set(
           target.x + r * Math.sin(ph) * Math.sin(th),
           target.y + r * Math.cos(ph),
@@ -428,7 +402,6 @@ export default function PlayScreen() {
     else if (st === State.END || st === State.CANCELLED || st === State.FAILED) onJoyEnd();
   };
 
-  // swipe: ramane controlul manual principal, se aduna liber peste contributia giroscopului
   const onCamPan = (e: any) => {
     const { translationX, translationY } = e.nativeEvent;
     camAngle.current = lastCamAngle.current - translationX * 0.008;
@@ -463,6 +436,10 @@ export default function PlayScreen() {
     if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
   }, [renderDistance]);
 
+  // Layout-ul joystick-ului/zonei de camera se adapteaza la orientare: in landscape, zona
+  // camerei ocupa jumatatea dreapta a unui ecran mai lat, joystick-ul ramane stanga-jos.
+  const isLandscape = screenW > screenH;
+
   return (
     <View style={styles.root}>
       {Platform.OS === "web" || !game ? (
@@ -471,13 +448,13 @@ export default function PlayScreen() {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+        <GLView key={`${screenW}x${screenH}`} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
       {ready && Platform.OS !== "web" ? (
         <PinchGestureHandler onGestureEvent={onCamPinch} onHandlerStateChange={onCamPinchState}>
           <PanGestureHandler onGestureEvent={onCamPan} onHandlerStateChange={onCamPanState} minPointers={1} maxPointers={1}>
-            <View style={styles.cameraZone} />
+            <View style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]} />
           </PanGestureHandler>
         </PinchGestureHandler>
       ) : null}
@@ -498,8 +475,8 @@ export default function PlayScreen() {
         </PanGestureHandler>
       ) : null}
 
-      {/* Singurul element de UI permanent: butonul de meniu "A", stanga sus */}
-      <SafeAreaView edges={["top"]} style={styles.aBtnWrap} pointerEvents="box-none">
+      {/* Butonul "A" - mereu stanga sus, in interiorul safe area, indiferent de orientare */}
+      <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
         <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
           <Text style={styles.aBtnText}>A</Text>
         </Pressable>
@@ -507,7 +484,7 @@ export default function PlayScreen() {
 
       <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
-          <View style={styles.menuBox}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
             <Text style={styles.menuTitle}>{game?.title}</Text>
             <Pressable testID="play-menu-respawn" onPress={doRespawn} style={styles.menuRow}>
               <MaterialCommunityIcons name="restart" size={20} color={colors.brand} />
@@ -527,14 +504,8 @@ export default function PlayScreen() {
 
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
-          <Pressable style={styles.menuBox} onPress={e => e.stopPropagation?.()}>
+          <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={e => e.stopPropagation?.()}>
             <Text style={styles.menuTitle}>Settings</Text>
-
-            <Text style={styles.settingLabel}>Camera: Gyroscope</Text>
-            <Pressable testID="play-toggle-gyro" onPress={() => { setGyroEnabled(v => !v); gyroBaseYaw.current = null; gyroBasePitch.current = null; }} style={styles.gyroToggle}>
-              <MaterialCommunityIcons name={gyroEnabled ? "toggle-switch" : "toggle-switch-off-outline"} size={26} color={gyroEnabled ? colors.brand : colors.onSurface3} />
-              <Text style={styles.gyroToggleText}>{gyroEnabled ? "On - tilt your phone to look around" : "Off"}</Text>
-            </Pressable>
 
             <Text style={styles.settingLabel}>Graphics Quality</Text>
             <View style={styles.qualityRow}>
@@ -568,7 +539,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.surface },
   webFallback: { alignItems: "center", justifyContent: "center", gap: 12 },
   webText: { color: colors.onSurface, fontWeight: "800", fontSize: 18 },
-  cameraZone: { position: "absolute", top: 0, bottom: 0, right: 0, width: "55%" },
+  cameraZone: { position: "absolute", top: 0, bottom: 0, right: 0 },
   joystickZone: { position: "absolute", left: 0, bottom: 0, width: 180, height: 180 },
   joyBase: { position: "absolute", width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(255,255,255,0.12)", borderWidth: 2, borderColor: "rgba(255,255,255,0.35)", alignItems: "center", justifyContent: "center" },
   joyKnob: { width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(204,255,0,0.85)" },
@@ -578,12 +549,11 @@ const styles = StyleSheet.create({
   aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
   menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
   menuBox: { width: "100%", maxWidth: 340, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
   menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
   menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
   menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
   settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
-  gyroToggle: { flexDirection: "row", alignItems: "center", gap: 10 },
-  gyroToggleText: { color: colors.onSurface2, fontSize: 12, fontWeight: "600", flex: 1 },
   qualityRow: { flexDirection: "row", gap: 8 },
   distRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
