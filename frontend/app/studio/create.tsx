@@ -15,10 +15,15 @@ import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 import AssetPicker from "@/src/components/AssetPicker";
-import Inspector from "@/src/studio/Inspector";
-import { ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, iconFor, buildMesh, applyTransform } from "@/src/studio/sceneShared";
+import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
+import { ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, iconFor, isSolidDefault, buildMesh, applyTransform } from "@/src/studio/sceneShared";
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
+
+const MAX_PLAYERS_MIN = 1;
+const MAX_PLAYERS_MAX = 10000;
+
+type ModelPick = { model_id: string; name: string; part_count: number };
 
 export default function StudioEditor() {
   const router = useRouter();
@@ -33,42 +38,53 @@ export default function StudioEditor() {
   const [ageCategory, setAgeCategory] = useState<"under_18" | "adult_18">("under_18");
   const [isPublic, setIsPublic] = useState(true);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
+  const [maxPlayersText, setMaxPlayersText] = useState("20");
+  const [playerCharacterId, setPlayerCharacterId] = useState<string | null>(null);
   const [scene, setScene] = useState<Scene>({ objects: [], sky: "#0F1012", ground: "#1A1D21" });
-  const [selId, setSelId] = useState<string | null>(null);
+  const [selIds, setSelIds] = useState<string[]>([]);
   const [showMeta, setShowMeta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [glReady, setGlReady] = useState(false); // devine true cand scena 3D e creata (ca sa sincronizam obiectele)
+  const [glReady, setGlReady] = useState(false);
 
   // Scripturi Luau (mai multe fisiere), rulate in sandbox pe server
   const [scriptFiles, setScriptFiles] = useState<ScriptFile[]>([]);
-  const scriptsDirty = useRef(false); // se trimit la salvare doar daca au fost modificate
+  const scriptsDirty = useRef(false);
   const [showScript, setShowScript] = useState(false);
-  const createdId = useRef<string | null>(null); // id-ul jocului nou creat, ca sa nu se creeze de doua ori
-  const [saved, setSaved] = useState(false); // arata "Salvat" o clipa dupa salvare
+  const createdId = useRef<string | null>(null);
+  const [saved, setSaved] = useState(false);
 
   // Modele din Shop atasate jocului (folosite din script cu Assets.load("id"))
   const [assetIds, setAssetIds] = useState<string[]>([]);
   const assetsDirty = useRef(false);
   const [showAssets, setShowAssets] = useState(false);
 
+  // Modelele publicate ale utilizatorului, pentru selectorul de Player Character
+  const [myModels, setMyModels] = useState<ModelPick[]>([]);
+  const [showCharacterPicker, setShowCharacterPicker] = useState(false);
+
   const meshMap = useRef<Record<string, THREE.Mesh>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const groundRef = useRef<THREE.Mesh | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const selBoxRef = useRef<THREE.BoxHelper | null>(null); // conturul obiectului selectat
+  const selBoxes = useRef<THREE.BoxHelper[]>([]);
   const rafId = useRef<number | null>(null);
   const alive = useRef(true);
   const canvasSize = useRef({ w: 1, h: 1 });
 
-  // Camera orbit control state (manual, gesture-driven — no auto animation)
-  const cameraTarget = useRef(new THREE.Vector3(0, 0, 0)); // punctul in jurul caruia se roteste camera
-  const cameraAngle = useRef(0.6);       // horizontal angle (radians)
-  const cameraPolar = useRef(0.85);      // vertical angle (radians), clamped
-  const cameraDistance = useRef(9);      // distance from target
+  // Camera orbit
+  const cameraTarget = useRef(new THREE.Vector3(0, 0, 0));
+  const cameraAngle = useRef(0.6);
+  const cameraPolar = useRef(0.85);
+  const cameraDistance = useRef(9);
   const lastAngle = useRef(0.6);
   const lastPolar = useRef(0.85);
   const lastDistance = useRef(9);
+
+  // Box Select
+  const [selectMode, setSelectMode] = useState(false);
+  const [boxRect, setBoxRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const boxStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -87,6 +103,8 @@ export default function StudioEditor() {
         setTitle(g.title); setDescription(g.description || ""); setCategory(g.category || "adventure");
         setAgeCategory(g.age_category); setIsPublic(g.is_public);
         setThumbnail(g.thumbnail_url || null);
+        setMaxPlayersText(String(g.max_players ?? 20));
+        setPlayerCharacterId(g.player_character_model_id ?? null);
         setScene(g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" });
         try {
           const sr = await api(`/sandbox/games/${editingId}/files`);
@@ -101,7 +119,13 @@ export default function StudioEditor() {
     })();
   }, [editingId]);
 
-  // Ieșirea din editor: daca sunt scripturi nesalvate, intreaba inainte sa se piarda
+  useEffect(() => {
+    api("/shop/models?mine=true").then(r => {
+      const items = Array.isArray(r?.items) ? r.items : [];
+      setMyModels(items.map((it: any) => ({ model_id: it.item_id, name: it.name, part_count: it.preview?.part_count ?? 0 })));
+    }).catch(() => {});
+  }, []);
+
   function leave() {
     if (!scriptsDirty.current && !assetsDirty.current) { router.back(); return; }
     Alert.alert("Ieși fără să salvezi?", "Scripturile modificate nu au fost salvate și se vor pierde.", [
@@ -129,28 +153,49 @@ export default function StudioEditor() {
       z: snap(tg.z + (Math.random() - 0.5) * 4),
       color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
       scale: 1,
+      visible: true,
+      solid: isSolidDefault(type),
     };
     setScene(s => ({ ...s, objects: [...s.objects, obj] }));
-    setSelId(obj.id);
+    setSelIds([obj.id]);
+  }
+
+  function addSpawn() {
+    const existing = scene.objects.find(o => o.type === SPAWN_TYPE);
+    if (existing) { setSelIds([existing.id]); return; } // un singur spawn point per joc, deocamdata
+    const tg = cameraTarget.current;
+    const obj: SceneObj = {
+      id: uid(), type: SPAWN_TYPE, x: Math.round(tg.x * 2) / 2, y: 0, z: Math.round(tg.z * 2) / 2,
+      color: "#CCFF00", scale: 1, visible: false, solid: false,
+    };
+    setScene(s => ({ ...s, objects: [...s.objects, obj] }));
+    setSelIds([obj.id]);
   }
 
   function updateSel(patch: Partial<SceneObj>) {
-    if (!selId) return;
-    setScene(s => ({ ...s, objects: s.objects.map(o => o.id === selId ? { ...o, ...patch } : o) }));
+    if (selIds.length === 0) return;
+    const ids = new Set(selIds);
+    setScene(s => ({ ...s, objects: s.objects.map(o => (ids.has(o.id) ? { ...o, ...patch } : o)) }));
   }
 
   function removeSel() {
-    if (!selId) return;
-    setScene(s => ({ ...s, objects: s.objects.filter(o => o.id !== selId) }));
-    setSelId(null);
+    if (selIds.length === 0) return;
+    const ids = new Set(selIds);
+    setScene(s => ({ ...s, objects: s.objects.filter(o => !ids.has(o.id)) }));
+    setSelIds([]);
   }
 
   function duplicateSel() {
-    const src = scene.objects.find(o => o.id === selId);
+    if (selIds.length !== 1) return;
+    const src = scene.objects.find(o => o.id === selIds[0]);
     if (!src) return;
     const copy: SceneObj = { ...src, id: uid(), x: src.x + 1, z: src.z + 1 };
     setScene(s => ({ ...s, objects: [...s.objects, copy] }));
-    setSelId(copy.id);
+    setSelIds([copy.id]);
+  }
+
+  function setSolidForSelection(solid: boolean) {
+    updateSel({ solid });
   }
 
   async function pickThumb() {
@@ -170,9 +215,16 @@ export default function StudioEditor() {
 
   async function save() {
     if (!title || title.length < 2) { setErr("Title too short"); setShowScript(false); setShowMeta(true); return; }
+    const maxPlayers = Math.max(MAX_PLAYERS_MIN, Math.min(MAX_PLAYERS_MAX, parseInt(maxPlayersText, 10) || 20));
     setBusy(true); setErr(null);
     try {
-      const body = { title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail, scene };
+      const body: any = {
+        title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail,
+        scene, max_players: maxPlayers,
+      };
+      if (playerCharacterId) { body.player_character_model_id = playerCharacterId; body.player_character_source = "shop_model"; }
+      else body.clear_player_character = true;
+
       let gameId: string | null = editingId || createdId.current;
       if (gameId) {
         await api(`/games/${gameId}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -192,7 +244,6 @@ export default function StudioEditor() {
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
       if (!editingId && gameId) {
-        // joc nou: trecem in modul de editare (apare ▶ si se reincarca de pe server ce s-a salvat)
         router.replace({ pathname: "/studio/edit/[id]", params: { id: gameId } });
       }
     } catch (e: any) { setErr(e.message); setShowScript(false); setShowMeta(true); }
@@ -216,7 +267,6 @@ export default function StudioEditor() {
     const s = sceneRef.current;
     if (!s) return;
 
-    // scoate obiectele sterse
     Object.keys(meshMap.current).forEach(id => {
       if (!scene.objects.find(o => o.id === id)) {
         const old = meshMap.current[id];
@@ -227,7 +277,6 @@ export default function StudioEditor() {
       }
     });
 
-    // adauga / actualizeaza obiectele
     scene.objects.forEach(o => {
       let m = meshMap.current[o.id];
       if (!m) {
@@ -237,25 +286,26 @@ export default function StudioEditor() {
         s.add(m);
       } else {
         applyTransform(m, o);
-        (m.material as THREE.MeshStandardMaterial).color.set(o.color);
+        (m.material as THREE.MeshStandardMaterial).color.set(o.type === "spawn" ? "#CCFF00" : o.color);
       }
+      m.visible = o.visible !== false || true; // in Studio TOATE obiectele raman vizibile (semi-transparent daca visible=false), ca sa poata fi editate
+      const isHidden = o.visible === false;
+      (m.material as THREE.MeshStandardMaterial).transparent = isHidden || o.type === "spawn";
+      (m.material as THREE.MeshStandardMaterial).opacity = isHidden ? 0.3 : (o.type === "spawn" ? 0.55 : 1);
     });
 
     if (groundRef.current) (groundRef.current.material as THREE.MeshStandardMaterial).color = new THREE.Color(scene.ground);
 
-    // conturul obiectului selectat
-    if (selBoxRef.current) {
-      s.remove(selBoxRef.current);
-      selBoxRef.current.geometry.dispose();
-      selBoxRef.current = null;
-    }
-    const selMesh = selId ? meshMap.current[selId] : undefined;
-    if (selMesh) {
-      const box = new THREE.BoxHelper(selMesh, 0xCCFF00);
+    selBoxes.current.forEach(b => { s.remove(b); b.geometry.dispose(); });
+    selBoxes.current = [];
+    selIds.forEach(id => {
+      const m = meshMap.current[id];
+      if (!m) return;
+      const box = new THREE.BoxHelper(m, 0xCCFF00);
       s.add(box);
-      selBoxRef.current = box;
-    }
-  }, [scene, selId, glReady]);
+      selBoxes.current.push(box);
+    });
+  }, [scene, selIds, glReady]);
 
   function updateCameraPosition() {
     const cam = cameraRef.current;
@@ -271,7 +321,7 @@ export default function StudioEditor() {
   }
 
   function focusSel() {
-    const o = scene.objects.find(x => x.id === selId);
+    const o = scene.objects.find(x => x.id === selIds[selIds.length - 1]);
     if (!o) return;
     cameraTarget.current.set(o.x, o.y + 0.5 * o.scale * (o.sy ?? 1), o.z);
     updateCameraPosition();
@@ -304,7 +354,7 @@ export default function StudioEditor() {
     s.add(ground);
     groundRef.current = ground;
     Object.keys(meshMap.current).forEach(k => delete meshMap.current[k]);
-    selBoxRef.current = null;
+    selBoxes.current = [];
 
     const render = () => {
       if (!alive.current) return;
@@ -313,12 +363,20 @@ export default function StudioEditor() {
       gl.endFrameEXP();
     };
     render();
-
-    // scena 3D exista acum: sincronizam obiectele deja incarcate (jocuri existente)
     setGlReady(true);
   };
 
-  // --- Selectie: atingi un obiect in scena ca sa-l alegi ---
+  // Proiecteaza pozitia 3D a unui obiect pe coordonate de ecran (px) - folosit de Box Select
+  function projectToScreen(o: SceneObj): { x: number; y: number } | null {
+    const cam = cameraRef.current;
+    if (!cam) return null;
+    const { w, h } = canvasSize.current;
+    const v = new THREE.Vector3(o.x, o.y + 0.5 * o.scale * (o.sy ?? 1), o.z);
+    v.project(cam);
+    if (v.z > 1) return null; // in spatele camerei
+    return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h };
+  }
+
   function pickAt(px: number, py: number) {
     const cam = cameraRef.current;
     if (!cam) return;
@@ -327,23 +385,52 @@ export default function StudioEditor() {
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, cam);
     const hits = ray.intersectObjects(Object.values(meshMap.current), false);
-    setSelId(hits.length > 0 ? (hits[0].object.userData.objId as string) : null);
+    setSelIds(hits.length > 0 ? [hits[0].object.userData.objId as string] : []);
   }
 
   const onTapStateChange = (e: any) => {
+    if (selectMode) return; // in Box Select tap-ul nu selecteaza individual, doar dreptunghiul conteaza
     if (e.nativeEvent.state === State.ACTIVE) pickAt(e.nativeEvent.x, e.nativeEvent.y);
   };
 
-  // --- Gesture handlers: drag to orbit, pinch to zoom ---
+  // --- Box Select: tragi un deget, se deseneaza un dreptunghi, la final selectam ce cade in el ---
+  const onBoxPanEvent = (e: any) => {
+    if (!selectMode) return;
+    const { x, y, state } = e.nativeEvent;
+    if (state === State.BEGAN) { boxStart.current = { x, y }; setBoxRect({ x0: x, y0: y, x1: x, y1: y }); return; }
+    if (!boxStart.current) return;
+    setBoxRect({ x0: boxStart.current.x, y0: boxStart.current.y, x1: x, y1: y });
+  };
+  const onBoxPanStateChange = (e: any) => {
+    if (!selectMode) return;
+    if (e.nativeEvent.oldState === State.ACTIVE && boxStart.current) {
+      const r = boxRect;
+      if (r) {
+        const minX = Math.min(r.x0, r.x1), maxX = Math.max(r.x0, r.x1);
+        const minY = Math.min(r.y0, r.y1), maxY = Math.max(r.y0, r.y1);
+        const inside = scene.objects.filter(o => {
+          const p = projectToScreen(o);
+          return p && p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
+        });
+        setSelIds(inside.map(o => o.id));
+      }
+      boxStart.current = null;
+      setBoxRect(null);
+    }
+  };
+
+  // --- Orbit camera (dezactivat cat timp Box Select e activ, ca sa nu se roteasca in timp ce tragi dreptunghiul) ---
   const onPanGestureEvent = (e: any) => {
+    if (selectMode) { onBoxPanEvent(e); return; }
     const { translationX, translationY } = e.nativeEvent;
     cameraAngle.current = lastAngle.current - translationX * 0.008;
     let newPolar = lastPolar.current - translationY * 0.008;
-    newPolar = Math.max(0.2, Math.min(Math.PI - 0.2, newPolar)); // clamp to avoid flipping
+    newPolar = Math.max(0.2, Math.min(Math.PI - 0.2, newPolar));
     cameraPolar.current = newPolar;
     updateCameraPosition();
   };
   const onPanHandlerStateChange = (e: any) => {
+    if (selectMode) { onBoxPanStateChange(e); return; }
     if (e.nativeEvent.oldState === State.ACTIVE) {
       lastAngle.current = cameraAngle.current;
       lastPolar.current = cameraPolar.current;
@@ -353,7 +440,7 @@ export default function StudioEditor() {
   const onPinchGestureEvent = (e: any) => {
     const scaleFactor = e.nativeEvent.scale;
     let newDist = lastDistance.current / scaleFactor;
-    newDist = Math.max(3, Math.min(25, newDist)); // clamp zoom range
+    newDist = Math.max(3, Math.min(25, newDist));
     cameraDistance.current = newDist;
     updateCameraPosition();
   };
@@ -363,7 +450,9 @@ export default function StudioEditor() {
     }
   };
 
-  const sel = scene.objects.find(o => o.id === selId);
+  const singleSel = selIds.length === 1 ? scene.objects.find(o => o.id === selIds[0]) : undefined;
+  const hasSpawn = scene.objects.some(o => o.type === SPAWN_TYPE);
+  const selectedCharacter = myModels.find(m => m.model_id === playerCharacterId);
 
   if (loading) return <SafeAreaView style={styles.center}><ActivityIndicator color={colors.brand} /></SafeAreaView>;
 
@@ -384,7 +473,7 @@ export default function StudioEditor() {
           </View>
         ) : (
           <>
-            <PinchGestureHandler onGestureEvent={onPinchGestureEvent} onHandlerStateChange={onPinchHandlerStateChange}>
+            <PinchGestureHandler onGestureEvent={onPinchGestureEvent} onHandlerStateChange={onPinchHandlerStateChange} enabled={!selectMode}>
               <PanGestureHandler onGestureEvent={onPanGestureEvent} onHandlerStateChange={onPanHandlerStateChange} minPointers={1} maxPointers={1}>
                 <TapGestureHandler maxDist={10} onHandlerStateChange={onTapStateChange}>
                   <View
@@ -392,14 +481,31 @@ export default function StudioEditor() {
                     onLayout={e => { canvasSize.current = { w: e.nativeEvent.layout.width || 1, h: e.nativeEvent.layout.height || 1 }; }}
                   >
                     <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+                    {boxRect ? (
+                      <View
+                        pointerEvents="none"
+                        style={[
+                          styles.boxSelectRect,
+                          {
+                            left: Math.min(boxRect.x0, boxRect.x1),
+                            top: Math.min(boxRect.y0, boxRect.y1),
+                            width: Math.abs(boxRect.x1 - boxRect.x0),
+                            height: Math.abs(boxRect.y1 - boxRect.y0),
+                          },
+                        ]}
+                      />
+                    ) : null}
                     <View style={styles.hintPill} pointerEvents="none">
                       <MaterialCommunityIcons name="gesture-swipe" size={14} color={colors.onSurface3} />
-                      <Text style={styles.hintText}>Tap to select · Drag to rotate · Pinch to zoom</Text>
+                      <Text style={styles.hintText}>{selectMode ? "Drag to box-select objects" : "Tap to select · Drag to rotate · Pinch to zoom"}</Text>
                     </View>
                   </View>
                 </TapGestureHandler>
               </PanGestureHandler>
             </PinchGestureHandler>
+            <Pressable testID="editor-select-mode" onPress={() => { setSelectMode(v => !v); setSelIds([]); }} style={[styles.viewBtn, { right: 54 }, selectMode && { borderColor: colors.brand, borderWidth: 1 }]}>
+              <MaterialCommunityIcons name="selection-drag" size={20} color={selectMode ? colors.brand : colors.onSurface} />
+            </Pressable>
             <Pressable testID="editor-reset-view" onPress={resetView} style={styles.viewBtn}>
               <MaterialCommunityIcons name="home-outline" size={20} color={colors.onSurface} />
             </Pressable>
@@ -418,6 +524,10 @@ export default function StudioEditor() {
             <MaterialCommunityIcons name="storefront-outline" size={22} color={colors.brand} />
             <Text style={styles.toolBtnText}>{assetIds.length > 0 ? `shop ${assetIds.length}` : "shop"}</Text>
           </Pressable>
+          <Pressable testID="editor-add-spawn" onPress={addSpawn} style={[styles.toolBtn, hasSpawn && { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="map-marker-radius-outline" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>{hasSpawn ? "spawn ✓" : "spawn"}</Text>
+          </Pressable>
           {OBJ_TYPES.map(k => (
             <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
               <MaterialCommunityIcons name={iconFor(k) as any} size={22} color={colors.brand} />
@@ -431,22 +541,30 @@ export default function StudioEditor() {
         </ScrollView>
       </View>
 
-      {sel ? (
+      {selIds.length > 1 ? (
+        <MultiSelectBar
+          count={selIds.length}
+          onSolid={() => setSolidForSelection(true)}
+          onUnsolid={() => setSolidForSelection(false)}
+          onDelete={removeSel}
+          onClear={() => setSelIds([])}
+        />
+      ) : singleSel ? (
         <Inspector
-          obj={sel}
+          obj={singleSel}
           onChange={updateSel}
           onDelete={removeSel}
           onDuplicate={duplicateSel}
           onFocus={focusSel}
-          onClose={() => setSelId(null)}
+          onClose={() => setSelIds([])}
         />
       ) : (
         <View style={styles.objList}>
-          <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select</Text>
+          <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select, or use Box Select</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingBottom: 8 }}>
             {scene.objects.map(o => (
-              <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelId(o.id)} style={[styles.objChip, { borderColor: o.color }]}>
-                <MaterialCommunityIcons name={iconFor(o.type) as any} size={14} color={o.color} />
+              <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelIds([o.id])} style={[styles.objChip, { borderColor: o.type === "spawn" ? colors.brand : o.color }]}>
+                <MaterialCommunityIcons name={iconFor(o.type) as any} size={14} color={o.type === "spawn" ? colors.brand : o.color} />
                 <Text style={styles.objChipText}>{o.type}</Text>
               </Pressable>
             ))}
@@ -520,6 +638,26 @@ export default function StudioEditor() {
               <Pressable testID="editor-age-under" onPress={() => setAgeCategory("under_18")} style={[styles.ageBtn, ageCategory === "under_18" && styles.ageBtnActive]}><Text style={[styles.ageBtnText, ageCategory === "under_18" && { color: colors.brand }]}>{t("age_under_18")}</Text></Pressable>
               <Pressable testID="editor-age-adult" onPress={() => setAgeCategory("adult_18")} style={[styles.ageBtn, ageCategory === "adult_18" && styles.ageBtnActive]}><Text style={[styles.ageBtnText, ageCategory === "adult_18" && { color: colors.brand }]}>{t("age_18_plus")}</Text></Pressable>
             </View>
+
+            <Text style={styles.lab}>Max Players</Text>
+            <TextInput
+              testID="editor-max-players"
+              value={maxPlayersText}
+              onChangeText={t => setMaxPlayersText(t.replace(/[^0-9]/g, ""))}
+              keyboardType="number-pad"
+              style={styles.input}
+              placeholder="20"
+              placeholderTextColor={colors.onSurface3}
+            />
+            <Text style={styles.hintSmall}>Servers fill up to this number, then new players join a new server automatically.</Text>
+
+            <Text style={styles.lab}>Player Character</Text>
+            <Pressable testID="editor-pick-character" onPress={() => setShowCharacterPicker(true)} style={styles.characterPick}>
+              <MaterialCommunityIcons name={selectedCharacter ? "cube-scan" : "account-outline"} size={20} color={colors.brand} />
+              <Text style={styles.characterPickText}>{selectedCharacter ? selectedCharacter.name : "Personal avatar (default)"}</Text>
+              <MaterialCommunityIcons name="chevron-right" size={18} color={colors.onSurface3} />
+            </Pressable>
+
             <Pressable onPress={() => setIsPublic(v => !v)} style={styles.toggle} testID="editor-toggle-public">
               <MaterialCommunityIcons name={isPublic ? "eye" : "eye-off"} size={20} color={isPublic ? colors.brand : colors.onSurface3} />
               <Text style={{ color: colors.onSurface, flex: 1, fontWeight: "700" }}>{t("public_game")}</Text>
@@ -531,6 +669,38 @@ export default function StudioEditor() {
             </View>
           </ScrollView>
         </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showCharacterPicker} transparent animationType="fade" onRequestClose={() => setShowCharacterPicker(false)}>
+        <Pressable style={styles.pickerBackdrop} onPress={() => setShowCharacterPicker(false)}>
+          <View style={styles.pickerBox}>
+            <Text style={styles.sheetTitle}>Player Character</Text>
+            <Pressable
+              testID="character-pick-personal"
+              onPress={() => { setPlayerCharacterId(null); setShowCharacterPicker(false); }}
+              style={[styles.characterRow, !playerCharacterId && styles.characterRowActive]}
+            >
+              <MaterialCommunityIcons name="account-outline" size={20} color={colors.brand} />
+              <Text style={styles.characterRowText}>Personal avatar (each player's own)</Text>
+              {!playerCharacterId ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+            </Pressable>
+            <ScrollView style={{ maxHeight: 260 }}>
+              {myModels.map(m => (
+                <Pressable
+                  key={m.model_id}
+                  testID={`character-pick-${m.model_id}`}
+                  onPress={() => { setPlayerCharacterId(m.model_id); setShowCharacterPicker(false); }}
+                  style={[styles.characterRow, playerCharacterId === m.model_id && styles.characterRowActive]}
+                >
+                  <MaterialCommunityIcons name="cube-scan" size={20} color={colors.brand} />
+                  <Text style={styles.characterRowText} numberOfLines={1}>{m.name}</Text>
+                  {playerCharacterId === m.model_id ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+                </Pressable>
+              ))}
+              {myModels.length === 0 ? <Text style={styles.hintSmall}>Publish a model in Shop first to use it as a character.</Text> : null}
+            </ScrollView>
+          </View>
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -544,6 +714,7 @@ const styles = StyleSheet.create({
   canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, margin: spacing.md, overflow: "hidden" },
   hintPill: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
   hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
+  boxSelectRect: { position: "absolute", borderWidth: 2, borderColor: colors.brand, backgroundColor: "rgba(204,255,0,0.15)" },
   viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
   toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
   toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
@@ -562,6 +733,7 @@ const styles = StyleSheet.create({
   thumbOverlay: { position: "absolute", right: 8, bottom: 8, flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill },
   thumbText: { color: "#fff", fontSize: 11, fontWeight: "700" },
   lab: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14 },
+  hintSmall: { color: colors.onSurface3, fontSize: 11, marginTop: 6 },
   input: { marginTop: 6, backgroundColor: colors.surface2, color: colors.onSurface, fontSize: 15, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: colors.border },
   pill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   pillActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
@@ -569,10 +741,17 @@ const styles = StyleSheet.create({
   ageBtn: { flex: 1, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
   ageBtnActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
   ageBtnText: { color: colors.onSurface2, fontWeight: "700" },
+  characterPick: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 6, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  characterPickText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
   toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   switch: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.surface3, padding: 3 },
   switchOn: { backgroundColor: colors.brand },
   knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.onSurface2 },
   knobOn: { backgroundColor: colors.onBrand, marginLeft: "auto" },
   err: { color: colors.error, marginTop: 8, fontSize: 12, fontWeight: "600" },
+  pickerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  pickerBox: { width: "100%", maxWidth: 400, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  characterRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  characterRowActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  characterRowText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
 });
