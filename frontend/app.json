@@ -4,7 +4,7 @@
     "slug": "astran-gameh",
     "version": "1.0.0",
     "owner": "js8sjsjs-team",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
     "userInterfaceStyle": "automatic",
