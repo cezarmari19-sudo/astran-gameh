@@ -1,5 +1,6 @@
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
+import * as ScreenOrientation from "expo-screen-orientation";
 import { useEffect } from "react";
 import { LogBox, StatusBar } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -20,6 +21,12 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [loaded, error]);
+
+  // Restul aplicatiei (meniuri, Studio, Shop) ramane mereu portrait. Doar ecranul Play
+  // (frontend/app/play/[id].tsx) elibereaza orientarea si o reblocheaza la iesire.
+  useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, []);
 
   if (!loaded && !error) return null;
 
