@@ -1,28 +1,9 @@
 // frontend/src/avatar/avatarTypes.ts
-// Tipuri + randare 3D pentru Avatar Editor. Corpul e construit din forme simple (three.js),
-// iar item-urile de geometrie echipate (par, palarii, accesorii) sunt piese (Part[]) create in
-// Avatar Item Studio - randate cu exact aceleasi functii pure ca in Game Studio
-// (createObject/applyLocalTransform/applyMaterial din modelTypes.ts), dar NICIODATA citite
-// din colectia studio_models: sursa lor e clothes_items (vezi backend/astran_sandbox/clothes_routes.py).
+// Tipuri + randare 3D pentru corpul avatarului. Doar personalizarea corpului (inaltime,
+// latime, proportii, marime cap, culoare piele, forma) - fara haine/accesorii echipabile
+// deocamdata; acelea raman pregatite in backend (clothes_routes.py, avatar_routes.py) pentru
+// cand se reia partea de Shop pe frontend.
 import * as THREE from "three";
-import type { Part } from "@/src/studio3d/modelTypes";
-import { createObject, applyLocalTransform, applyMaterial, disposeObject, byIdMap, isVisibleDeep } from "@/src/studio3d/modelTypes";
-
-// Sloturile din Avatar Editor. Extensibil: pentru o categorie noua, adauga o linie aici
-// SI in SLOTS din backend/astran_sandbox/clothes_routes.py (cheile trebuie identice).
-export type Slot = "hair" | "shirt" | "pants" | "shoes" | "hat" | "accessory" | "face" | "back" | "effect";
-
-export const SLOT_DEFS: { key: Slot; label: string; icon: string; renderKind: "geometry" | "texture" }[] = [
-  { key: "hair", label: "Păr", icon: "hair-dryer", renderKind: "geometry" },
-  { key: "shirt", label: "Tricouri", icon: "tshirt-crew-outline", renderKind: "texture" },
-  { key: "pants", label: "Pantaloni", icon: "human", renderKind: "texture" },
-  { key: "shoes", label: "Încălțăminte", icon: "shoe-sneaker", renderKind: "geometry" },
-  { key: "hat", label: "Pălării", icon: "hat-fedora", renderKind: "geometry" },
-  { key: "accessory", label: "Accesorii", icon: "sunglasses", renderKind: "geometry" },
-  { key: "face", label: "Față", icon: "emoticon-outline", renderKind: "geometry" },
-  { key: "back", label: "Accesorii spate", icon: "bag-personal-outline", renderKind: "geometry" },
-  { key: "effect", label: "Efecte", icon: "shimmer", renderKind: "geometry" },
-];
 
 export const BODY_SHAPES: { key: string; label: string }[] = [
   { key: "standard", label: "Standard" },
@@ -31,11 +12,11 @@ export const BODY_SHAPES: { key: string; label: string }[] = [
 ];
 
 export type AvatarBody = {
-  height: number;
-  width: number;
-  proportions: number;
-  head_size: number;
-  skin_color: string;
+  height: number;       // 0.7..1.4
+  width: number;        // 0.7..1.4
+  proportions: number;  // 0.7..1.3 (trunchi vs picioare)
+  head_size: number;    // 0.7..1.4
+  skin_color: string;   // #rrggbb
   body_shape: "standard" | "slim" | "broad";
 };
 
@@ -43,21 +24,7 @@ export function defaultBody(): AvatarBody {
   return { height: 1, width: 1, proportions: 1, head_size: 1, skin_color: "#E8B48C", body_shape: "standard" };
 }
 
-export type Equipped = Partial<Record<Slot, string | null>>;
-
-export type InventoryItem = {
-  item_id: string;
-  name: string;
-  slot: Slot;
-  render_kind: "geometry" | "texture";
-  thumbnail_url?: string | null;
-  preview?: { color?: string; part_count?: number; has_texture?: boolean };
-  owner_username: string;
-};
-
-// ---------- corp ----------
-
-const BODY_COLOR_UNIFORM = "#3A4047"; // haine implicite daca slotul shirt/pants nu e echipat
+const BODY_COLOR_UNIFORM = "#3A4047"; // haine implicite (tricou/pantaloni de baza) - inca fara sistem de echipare
 
 type BodyMeshes = {
   group: THREE.Group;
@@ -75,6 +42,7 @@ export function buildBodyMeshes(): BodyMeshes {
   const clothMat = () => new THREE.MeshStandardMaterial({ color: new THREE.Color(BODY_COLOR_UNIFORM), roughness: 0.8 });
 
   const group = new THREE.Group();
+
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 16), skinMat());
   const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.22, 0.6, 16), clothMat());
   const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.2, 0.22, 16), clothMat());
@@ -124,45 +92,3 @@ export function bodyHeightWorld(body: AvatarBody): number {
   const torsoLen = 0.6 * body.height * body.proportions;
   return legLen + 0.22 + torsoLen + 0.56 * body.head_size;
 }
-
-// ---------- randarea unui item de geometrie echipat (piese din Avatar Item Studio) ----------
-// Foloseste exact functiile pure din modelTypes.ts (aceleasi ca in Game Studio), aplicate
-// unei liste de piese ce provin din clothes_items, nu din studio_models.
-
-export function buildEquippedGroup(parts: Part[]): THREE.Group {
-  const group = new THREE.Group();
-  const objects = new Map<string, THREE.Object3D>();
-
-  parts.forEach(p => {
-    const obj = createObject(p);
-    applyLocalTransform(obj, p);
-    const mesh = obj as THREE.Mesh;
-    if (mesh.isMesh) applyMaterial(mesh.material as THREE.MeshStandardMaterial, p);
-    obj.visible = p.visible;
-    objects.set(p.id, obj);
-  });
-
-  parts.forEach(p => {
-    const obj = objects.get(p.id)!;
-    const parent = p.parent ? objects.get(p.parent) : null;
-    (parent ?? group).add(obj);
-  });
-
-  return group;
-}
-
-export function disposeEquippedGroup(g: THREE.Group) {
-  g.traverse(o => disposeObject(o));
-}
-
-// Ancora aproximativa (inaltime relativa la corp, 0=picioare .. 1=varful capului) pentru fiecare
-// slot de geometrie, folosita cand pozitionam grupul unui item echipat pe corp.
-export const SLOT_ANCHOR_Y: Partial<Record<Slot, number>> = {
-  shoes: 0.02,
-  hair: 0.97,
-  hat: 1.0,
-  accessory: 0.6,
-  face: 0.88,
-  back: 0.55,
-  effect: 0.5,
-};
