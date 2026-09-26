@@ -1,18 +1,11 @@
-name: Build Android APK
+name: EAS Build Local (Android)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'frontend/**'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -22,40 +15,30 @@ jobs:
         with:
           node-version: 20
 
+      - name: Setup Java (necesar pentru Gradle/Android)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Yarn dependencies
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Install dependencies
-        run: npm install --legacy-peer-deps
-
-      - name: Add native 3D packages via expo install
-        run: npx expo install expo-gl expo-three three
-
-      - name: Fix Expo dependency versions
-        run: npx expo install --fix
-
-      - name: Init EAS project (creates if missing)
-        run: eas init --non-interactive --force
+      - name: EAS Build (local, Android)
+        working-directory: frontend
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-
-      - name: Build APK with EAS (wait for result)
-        run: eas build --platform android --profile preview --non-interactive --wait --json > build-result.json
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-
-      - name: Extract APK download URL
-        id: extract
-        run: |
-          URL=$(cat build-result.json | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')); console.log(Array.isArray(d)?d[0].artifacts.buildUrl:d.artifacts.buildUrl)")
-          echo "apk_url=$URL" >> "$GITHUB_OUTPUT"
-
-      - name: Download APK
-        run: curl -L "${{ steps.extract.outputs.apk_url }}" -o astran-game.apk
+        run: eas build --platform android --profile preview --local --non-interactive --output ../app-build.apk
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: astran-game-apk
-          path: frontend/astran-game.apk
-          retention-days: 30
+          name: android-apk
+          path: app-build.apk
