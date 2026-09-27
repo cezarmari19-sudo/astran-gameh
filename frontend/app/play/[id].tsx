@@ -78,11 +78,11 @@ export default function PlayScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [quality, setQuality] = useState<GraphicsQuality>("medium");
   const [renderDistance, setRenderDistance] = useState(60);
-  // Cheia de remontare a GLView-ului: creste DOAR cand se schimba orientarea
-  // (portret <-> landscape), nu la orice mica variatie de screenW/screenH
-  // (bare de sistem, clavatura etc.) - vezi useEffect-ul de mai jos.
+  // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
+  // orientare a device-ului (nu la orice mica variatie de screenW/screenH,
+  // gen bare de sistem). Vezi useEffect-ul de mai jos, bazat pe evenimentul
+  // nativ de orientare, nu pe screenW/screenH.
   const [glMountKey, setGlMountKey] = useState(0);
-  const isLandscapeNow = screenW > screenH;
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
@@ -149,36 +149,72 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // ---------- resize real la schimbarea orientarii ----------
+  // ---------- remontare GLView la FIECARE schimbare reala de orientare ----------
   // Pe Android, expo-gl leaga suprafata EGL de dimensiunile View-ului la
   // momentul montarii. Redimensionarea view-ului FARA remontare nu garanteaza
-  // realocarea completa a acelei suprafete pe toate device-urile: rezultatul
-  // e ca gl.drawingBufferWidth/Height raman desincronizate de dimensiunea
-  // fizica reala dupa o rotire de ecran, iar randarea ajunge sa foloseasca un
-  // buffer cu dimensiunea veche (portret) intr-un View nou, mai lat (landscape)
-  // -> banda cu continutul vechi + zona neagra necunoscuta GPU-ului.
-  // Solutia tehnica corecta e sa remontam explicit GLView-ul (context GL nou,
-  // deci suprafata EGL noua, alocata corect la dimensiunea curenta) de fiecare
-  // data cand se schimba orientarea, si sa restauram starea jocului (pozitia
-  // jucatorului, unghiul camerei) in noul context, ca userul sa nu simta un
-  // reset vizual - vezi glMountKey si preservedStateRef mai jos.
+  // realocarea completa a acelei suprafete pe toate device-urile, iar randarea
+  // ajunge sa foloseasca un buffer cu dimensiunea/orientarea veche.
+  //
+  // IMPORTANT: nu putem detecta asta comparand doar screenW > screenH (boolean
+  // "e landscape?"), pentru ca useWindowDimensions() intoarce ACEEASI pereche
+  // de valori atat pentru LANDSCAPE_LEFT cat si pentru LANDSCAPE_RIGHT (e doar
+  // telefonul intors 180 fata de axa lunga, dimensiunile logice raman identice).
+  // Asta inseamna ca o rotire directa stanga<->dreapta (fara sa treci prin
+  // portret) nu schimba deloc acel boolean, deci nu declansa remontarea -
+  // exact cauza bug-ului: suprafata EGL ramanea legata de orientarea veche,
+  // iar randarea acoperea doar partea din ecran care se suprapune cu vechea
+  // orientare, restul ramanand nedesenat (negru).
+  //
+  // Solutia tehnica corecta e sa ascultam evenimentul NATIV de orientare
+  // (expo-screen-orientation), care distinge toate cele 4 stari posibile
+  // (PORTRAIT_UP, PORTRAIT_DOWN, LANDSCAPE_LEFT, LANDSCAPE_RIGHT) si sa
+  // remontam GLView-ul de fiecare data cand aceasta valoare se schimba,
+  // indiferent daca e o schimbare portret<->landscape sau landscape<->landscape.
+  const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
-    // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
-    // context GL (vezi inceputul lui onContextCreate). La primul randaj
-    // (montarea initiala) inca nu exista o scena activa - nu salvam nimic.
-    if (sceneRef.current) {
-      preservedStateRef.current = {
-        pos: pos.current.clone(),
-        velY: velY.current,
-        facingAngle: facingAngle.current,
-        camAngle: camAngle.current,
-        camPolar: camPolar.current,
-        camDist: camDist.current,
-      };
-    }
-    setReady(false);
-    setGlMountKey(k => k + 1);
-  }, [isLandscapeNow]);
+    if (Platform.OS === "web") return;
+    let subscription: ScreenOrientation.Subscription | null = null;
+    let cancelled = false;
+
+    const remountFor = (orientation: ScreenOrientation.Orientation) => {
+      if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
+      currentOrientationRef.current = orientation;
+      // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
+      // context GL (vezi inceputul lui onContextCreate). La primul apel
+      // (montarea initiala a ecranului) inca nu exista o scena activa - nu
+      // salvam nimic, jucatorul porneste normal din spawn.
+      if (sceneRef.current) {
+        preservedStateRef.current = {
+          pos: pos.current.clone(),
+          velY: velY.current,
+          facingAngle: facingAngle.current,
+          camAngle: camAngle.current,
+          camPolar: camPolar.current,
+          camDist: camDist.current,
+        };
+      }
+      setReady(false);
+      setGlMountKey(k => k + 1);
+    };
+
+    (async () => {
+      // Citim orientarea curenta o data, la montare, ca sa avem o valoare de
+      // start (fara sa declansam remontare - e chiar prima montare a GLView).
+      try {
+        const initial = await ScreenOrientation.getOrientationAsync();
+        if (!cancelled) currentOrientationRef.current = initial;
+      } catch {}
+
+      subscription = ScreenOrientation.addOrientationChangeListener(event => {
+        remountFor(event.orientationInfo.orientation);
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (subscription) ScreenOrientation.removeOrientationChangeListener(subscription);
+    };
+  }, []);
 
   // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
@@ -365,10 +401,10 @@ export default function PlayScreen() {
       rafId.current = requestAnimationFrame(render);
 
       // Plasa de siguranta: daca dimensiunile buffer-ului GL s-au schimbat intre
-      // doua cadre (de ex. rotirea ecranului a fost aplicata de sistem inainte
-      // ca React sa re-randeze si sa declanseze efectul de mai sus), sincronizam
-      // aici camera si renderer-ul cu marimea REALA curenta, in fiecare cadru
-      // in care difera. Costul e neglijabil (doar o comparatie de intregi).
+      // doua cadre, sincronizam aici camera si renderer-ul cu marimea REALA
+      // curenta. Costul e neglijabil (doar o comparatie de intregi). Ramane
+      // utila pe device-urile unde buffer-ul se actualizeaza corect fara
+      // remontare completa (nu toate au bug-ul EGL descris mai sus).
       // IMPORTANT: setSize aici NU primeste al treilea parametru (updateStyle) -
       // pe expo-gl acel parametru poate desincroniza gl.viewport() de bufferul
       // real si impinge tot ce se randeaza intr-o parte a ecranului.
@@ -523,12 +559,12 @@ export default function PlayScreen() {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        // key={glMountKey}: GLView se remonteaza DOAR cand se schimba orientarea
-        // (portret <-> landscape), nu la orice variatie minora de dimensiune.
-        // Remontarea creeaza un context GL nou, cu suprafata EGL alocata corect
-        // la dimensiunea curenta - vezi explicatia din useEffect-ul de mai sus.
-        // Starea jocului (pozitie, unghi camera) e pastrata si restaurata in
-        // onContextCreate, ca userul sa nu simta un reset vizual.
+        // key={glMountKey}: GLView se remonteaza la fiecare schimbare REALA de
+        // orientare a device-ului (inclusiv landscape-stanga <-> landscape-dreapta),
+        // detectata prin evenimentul nativ, nu prin screenW/screenH. Remontarea
+        // creeaza un context GL nou, cu suprafata EGL alocata corect la
+        // orientarea curenta. Starea jocului (pozitie, unghi camera) e pastrata
+        // si restaurata in onContextCreate, ca userul sa nu simta un reset vizual.
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
