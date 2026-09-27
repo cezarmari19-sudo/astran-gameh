@@ -70,7 +70,7 @@ type GraphicsQuality = "low" | "medium" | "high";
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { width: screenW, height: screenH } = useWindowDimensions(); // se recalculeaza automat la rotatie
+  const { width: screenW, height: screenH } = useWindowDimensions();
 
   const [game, setGame] = useState<any>(null);
   const [ready, setReady] = useState(false);
@@ -120,8 +120,7 @@ export default function PlayScreen() {
     return () => { alive.current = false; if (rafId.current !== null) cancelAnimationFrame(rafId.current); };
   }, []);
 
-  // ---------- rotatia ecranului: Play Mode elibereaza orientarea (portrait SAU landscape,
-  // dupa cum tine jucatorul telefonul), si o reblocheaza pe portrait la iesirea din ecran ----------
+  // ---------- rotatia ecranului: Play Mode elibereaza orientarea, si o reblocheaza pe portrait la iesire ----------
   useEffect(() => {
     if (Platform.OS === "web") return;
     ScreenOrientation.unlockAsync().catch(() => {});
@@ -130,8 +129,6 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // camera.aspect trebuie recalculat de fiecare data cand ecranul isi schimba dimensiunile
-  // (adica exact cand playerul roteste telefonul) - altfel imaginea ramane deformata.
   useEffect(() => {
     const cam = cameraRef.current;
     const renderer = rendererRef.current as any;
@@ -318,15 +315,19 @@ export default function PlayScreen() {
         nextOp += 1;
       }
 
-      // miscare jucator - directia se calculeaza fata de directia camerei (doar swipe),
-      // avatarul se roteste doar cand jucatorul se misca activ cu joystick-ul
+      // Miscare jucator, relativa la directia camerei (doar swipe/pan controleaza camera).
+      // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
+      // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
+      // camForward e vectorul "inainte" al camerei; adaugam +jv.y * camForward (nu -jv.y)
+      // ca "in jos pe joystick" (jv.y pozitiv) sa impinga in directia opusa lui camForward
+      // prin semnul din spatele calcului de mai jos - vezi nota linia urmatoare.
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
         const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
         const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
         const moveDir = new THREE.Vector3()
-          .addScaledVector(camForward, -jv.y)
+          .addScaledVector(camForward, jv.y)
           .addScaledVector(camRight, jv.x);
         if (moveDir.lengthSq() > 0.0001) {
           moveDir.normalize();
@@ -388,6 +389,7 @@ export default function PlayScreen() {
     const ang = Math.atan2(dy, dx);
     const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
     setJoyKnob({ x: kx, y: ky });
+    // ky pozitiv = deget tras in jos fata de centrul joystick-ului (coordonate ecran standard)
     joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
   };
   const onJoyEnd = () => {
@@ -436,8 +438,6 @@ export default function PlayScreen() {
     if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
   }, [renderDistance]);
 
-  // Layout-ul joystick-ului/zonei de camera se adapteaza la orientare: in landscape, zona
-  // camerei ocupa jumatatea dreapta a unui ecran mai lat, joystick-ul ramane stanga-jos.
   const isLandscape = screenW > screenH;
 
   return (
@@ -475,7 +475,6 @@ export default function PlayScreen() {
         </PanGestureHandler>
       ) : null}
 
-      {/* Butonul "A" - mereu stanga sus, in interiorul safe area, indiferent de orientare */}
       <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
         <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
           <Text style={styles.aBtnText}>A</Text>
