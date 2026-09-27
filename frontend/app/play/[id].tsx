@@ -78,6 +78,11 @@ export default function PlayScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [quality, setQuality] = useState<GraphicsQuality>("medium");
   const [renderDistance, setRenderDistance] = useState(60);
+  // Cheia de remontare a GLView-ului: creste DOAR cand se schimba orientarea
+  // (portret <-> landscape), nu la orice mica variatie de screenW/screenH
+  // (bare de sistem, clavatura etc.) - vezi useEffect-ul de mai jos.
+  const [glMountKey, setGlMountKey] = useState(0);
+  const isLandscapeNow = screenW > screenH;
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
@@ -112,6 +117,17 @@ export default function PlayScreen() {
   const lastCamDist = useRef(4.5);
   const firstPerson = useRef(false);
 
+  // La remontarea GLView-ului (schimbare de orientare) contextul GL, scena,
+  // camera si renderer-ul se recreeaza de la zero. Ca sa nu se vada un reset
+  // (jucatorul sarind la spawn, camera revenind la unghiul implicit), pastram
+  // aici pozitia curenta si unghiul camerei INAINTE de remontare, si le
+  // restauram in noul onContextCreate. Ref, nu state: nu trebuie sa declanseze
+  // re-render, doar sa supravietuiasca intre demontare/montare.
+  const preservedStateRef = useRef<{
+    pos: THREE.Vector3; velY: number; facingAngle: number;
+    camAngle: number; camPolar: number; camDist: number;
+  } | null>(null);
+
   // Joystick
   const joyActive = useRef(false);
   const joyVec = useRef({ x: 0, y: 0 });
@@ -133,31 +149,36 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // ---------- resize real: foloseste dimensiunile FIZICE ale drawing buffer-ului GL ----------
-  // useWindowDimensions() intoarce puncte logice (density-independent), dar
-  // renderer-ul si camera three.js trebuie configurate pe baza dimensiunilor
-  // reale ale buffer-ului WebGL (gl.drawingBufferWidth/Height), care includ
-  // pixelRatio-ul. Daca le amestecam, aspect ratio-ul camerei nu mai corespunde
-  // cu ce deseneaza efectiv GPU-ul, iar frustum-ul nu mai acopera tot ecranul
-  // fizic -> apar zone negre in anumite directii de rotire a camerei.
-  // Acest efect ruleaza la orice schimbare de screenW/screenH (inclusiv
-  // rotirea telefonului), dar citeste marimea REALA din obiectul gl retinut.
+  // ---------- resize real la schimbarea orientarii ----------
+  // Pe Android, expo-gl leaga suprafata EGL de dimensiunile View-ului la
+  // momentul montarii. Redimensionarea view-ului FARA remontare nu garanteaza
+  // realocarea completa a acelei suprafete pe toate device-urile: rezultatul
+  // e ca gl.drawingBufferWidth/Height raman desincronizate de dimensiunea
+  // fizica reala dupa o rotire de ecran, iar randarea ajunge sa foloseasca un
+  // buffer cu dimensiunea veche (portret) intr-un View nou, mai lat (landscape)
+  // -> banda cu continutul vechi + zona neagra necunoscuta GPU-ului.
+  // Solutia tehnica corecta e sa remontam explicit GLView-ul (context GL nou,
+  // deci suprafata EGL noua, alocata corect la dimensiunea curenta) de fiecare
+  // data cand se schimba orientarea, si sa restauram starea jocului (pozitia
+  // jucatorului, unghiul camerei) in noul context, ca userul sa nu simta un
+  // reset vizual - vezi glMountKey si preservedStateRef mai jos.
   useEffect(() => {
-    const gl = glRef.current;
-    const cam = cameraRef.current;
-    const renderer = rendererRef.current as any;
-    if (!gl || !cam || !renderer) return;
-
-    // La schimbarea orientarii, drawingBufferWidth/Height ale gl-ului expo se
-    // actualizeaza intern; le recitim aici (nu folosim screenW/screenH direct).
-    const w = gl.drawingBufferWidth;
-    const h = gl.drawingBufferHeight;
-    if (!w || !h) return;
-
-    renderer.setSize(w, h, false); // false = nu atinge stilul CSS/layout-ul view-ului, doar buffer-ul de desen
-    cam.aspect = w / h;
-    cam.updateProjectionMatrix();
-  }, [screenW, screenH]);
+    // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
+    // context GL (vezi inceputul lui onContextCreate). La primul randaj
+    // (montarea initiala) inca nu exista o scena activa - nu salvam nimic.
+    if (sceneRef.current) {
+      preservedStateRef.current = {
+        pos: pos.current.clone(),
+        velY: velY.current,
+        facingAngle: facingAngle.current,
+        camAngle: camAngle.current,
+        camPolar: camPolar.current,
+        camDist: camDist.current,
+      };
+    }
+    setReady(false);
+    setGlMountKey(k => k + 1);
+  }, [isLandscapeNow]);
 
   // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
@@ -308,8 +329,25 @@ export default function PlayScreen() {
     });
     solidBoxesRef.current = boxes;
     spawnPointRef.current = spawn;
-    pos.current.set(spawn.x, spawn.y, spawn.z);
-    velY.current = 0;
+
+    // Daca venim dintr-o remontare (schimbare de orientare), restauram starea
+    // jocului din instanta veche in loc sa trimitem jucatorul inapoi la spawn.
+    const preserved = preservedStateRef.current;
+    if (preserved) {
+      pos.current.copy(preserved.pos);
+      velY.current = preserved.velY;
+      facingAngle.current = preserved.facingAngle;
+      camAngle.current = preserved.camAngle;
+      lastCamAngle.current = preserved.camAngle;
+      camPolar.current = preserved.camPolar;
+      lastCamPolar.current = preserved.camPolar;
+      camDist.current = preserved.camDist;
+      lastCamDist.current = preserved.camDist;
+      preservedStateRef.current = null;
+    } else {
+      pos.current.set(spawn.x, spawn.y, spawn.z);
+      velY.current = 0;
+    }
 
     const playerGroup = buildPlayerVisual();
     playerGroup.position.copy(pos.current);
@@ -482,11 +520,13 @@ export default function PlayScreen() {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        // Fara "key" pe dimensiuni: GLView NU mai este remontat la resize/rotire.
-        // Contextul GL, scena, camera si renderer-ul raman aceleasi pe toata durata
-        // Play Mode; doar dimensiunile buffer-ului si aspect-ul camerei se
-        // actualizeaza (vezi useEffect-ul de resize si plasa de siguranta din render()).
-        <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+        // key={glMountKey}: GLView se remonteaza DOAR cand se schimba orientarea
+        // (portret <-> landscape), nu la orice variatie minora de dimensiune.
+        // Remontarea creeaza un context GL nou, cu suprafata EGL alocata corect
+        // la dimensiunea curenta - vezi explicatia din useEffect-ul de mai sus.
+        // Starea jocului (pozitie, unghi camera) e pastrata si restaurata in
+        // onContextCreate, ca userul sa nu simta un reset vizual.
+        <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
       {ready && Platform.OS !== "web" ? (
