@@ -400,21 +400,18 @@ export default function PlayScreen() {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
 
-      // Plasa de siguranta: daca dimensiunile buffer-ului GL s-au schimbat intre
-      // doua cadre, sincronizam aici camera si renderer-ul cu marimea REALA
-      // curenta. Costul e neglijabil (doar o comparatie de intregi). Ramane
-      // utila pe device-urile unde buffer-ul se actualizeaza corect fara
-      // remontare completa (nu toate au bug-ul EGL descris mai sus).
-      // IMPORTANT: setSize aici NU primeste al treilea parametru (updateStyle) -
-      // pe expo-gl acel parametru poate desincroniza gl.viewport() de bufferul
-      // real si impinge tot ce se randeaza intr-o parte a ecranului.
-      const curW = gl.drawingBufferWidth;
-      const curH = gl.drawingBufferHeight;
-      if (curW && curH && (camera.aspect !== curW / curH)) {
-        renderer.setSize(curW, curH);
-        camera.aspect = curW / curH;
-        camera.updateProjectionMatrix();
-      }
+      // NOTA: nu mai recalculam aici camera.aspect/renderer.setSize pe baza
+      // gl.drawingBufferWidth/Height in fiecare cadru. Motivul: setPixelRatio
+      // (declansat de schimbarea Graphics Quality) modifica intentionat
+      // drawingBufferWidth/Height fara nicio schimbare reala de orientare sau
+      // dimensiune a ferestrei. Recalcularea de aici interpreta gresit acea
+      // schimbare ca pe un resize real si apela renderer.setSize() peste
+      // valori deja scalate de pixelRatio, dublandu-l efectiv - rezultatul
+      // era un buffer mult mai mare decat ecranul fizic, ceea ce facea camera
+      // sa para "apropiata" de personaj la calitate grafica mai mare.
+      // Schimbarile REALE de orientare sunt tratate corect prin remontarea
+      // completa a GLView-ului (vezi glMountKey si listener-ul de orientare
+      // de mai sus), care recreeaza camera cu aspect-ul corect de la zero.
 
       const now = Date.now();
       const dt = Math.min(0.05, (now - lastFrame) / 1000);
@@ -542,7 +539,21 @@ export default function PlayScreen() {
 
   useEffect(() => {
     const r = rendererRef.current as any;
-    if (r) r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+    const cam = cameraRef.current;
+    if (!r) return;
+    r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+    // getSize() intoarce dimensiunea logica (CSS), NEAFECTATA de pixelRatio -
+    // spre deosebire de gl.drawingBufferWidth/Height, care se scaleaza cu el.
+    // Recalculam aspectul din aceasta dimensiune logica, ca schimbarea de
+    // calitate grafica sa nu modifice cadrul vizibil al camerei.
+    if (cam) {
+      const size = new THREE.Vector2();
+      r.getSize(size);
+      if (size.x > 0 && size.y > 0) {
+        cam.aspect = size.x / size.y;
+        cam.updateProjectionMatrix();
+      }
+    }
   }, [quality]);
   useEffect(() => {
     const cam = cameraRef.current;
