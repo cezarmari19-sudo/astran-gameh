@@ -90,6 +90,10 @@ export default function PlayScreen() {
   const rendererRef = useRef<Renderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  // Referinta catre contextul GL, ca sa putem citi dimensiunile REALE ale
+  // drawing buffer-ului (in pixeli fizici) de fiecare data cand se schimba
+  // orientarea/dimensiunea ecranului - nu doar o data, la creare.
+  const glRef = useRef<any>(null);
   const playerGroupRef = useRef<THREE.Group | null>(null);
   const playerHalfHeight = useRef(PLAYER_HALF_HEIGHT_DEFAULT);
   const alive = useRef(true);
@@ -129,14 +133,30 @@ export default function PlayScreen() {
     };
   }, []);
 
+  // ---------- resize real: foloseste dimensiunile FIZICE ale drawing buffer-ului GL ----------
+  // useWindowDimensions() intoarce puncte logice (density-independent), dar
+  // renderer-ul si camera three.js trebuie configurate pe baza dimensiunilor
+  // reale ale buffer-ului WebGL (gl.drawingBufferWidth/Height), care includ
+  // pixelRatio-ul. Daca le amestecam, aspect ratio-ul camerei nu mai corespunde
+  // cu ce deseneaza efectiv GPU-ul, iar frustum-ul nu mai acopera tot ecranul
+  // fizic -> apar zone negre in anumite directii de rotire a camerei.
+  // Acest efect ruleaza la orice schimbare de screenW/screenH (inclusiv
+  // rotirea telefonului), dar citeste marimea REALA din obiectul gl retinut.
   useEffect(() => {
+    const gl = glRef.current;
     const cam = cameraRef.current;
     const renderer = rendererRef.current as any;
-    if (cam && screenW > 0 && screenH > 0) {
-      cam.aspect = screenW / screenH;
-      cam.updateProjectionMatrix();
-    }
-    if (renderer?.setSize) renderer.setSize(screenW, screenH);
+    if (!gl || !cam || !renderer) return;
+
+    // La schimbarea orientarii, drawingBufferWidth/Height ale gl-ului expo se
+    // actualizeaza intern; le recitim aici (nu folosim screenW/screenH direct).
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    if (!w || !h) return;
+
+    renderer.setSize(w, h, false); // false = nu atinge stilul CSS/layout-ul view-ului, doar buffer-ul de desen
+    cam.aspect = w / h;
+    cam.updateProjectionMatrix();
   }, [screenW, screenH]);
 
   // ---------- incarcare joc + instanta de server ----------
@@ -250,6 +270,7 @@ export default function PlayScreen() {
 
   const onContextCreate = async (gl: any) => {
     if (!game) return;
+    glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
     renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
@@ -304,6 +325,19 @@ export default function PlayScreen() {
     const render = () => {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
+
+      // Plasa de siguranta: daca dimensiunile buffer-ului GL s-au schimbat intre
+      // doua cadre (de ex. rotirea ecranului a fost aplicata de sistem inainte
+      // ca React sa re-randeze si sa declanseze efectul de mai sus), sincronizam
+      // aici camera si renderer-ul cu marimea REALA curenta, in fiecare cadru
+      // in care difera. Costul e neglijabil (doar o comparatie de intregi).
+      const curW = gl.drawingBufferWidth;
+      const curH = gl.drawingBufferHeight;
+      if (curW && curH && (camera.aspect !== curW / curH)) {
+        renderer.setSize(curW, curH, false);
+        camera.aspect = curW / curH;
+        camera.updateProjectionMatrix();
+      }
 
       const now = Date.now();
       const dt = Math.min(0.05, (now - lastFrame) / 1000);
@@ -448,7 +482,11 @@ export default function PlayScreen() {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        <GLView key={`${screenW}x${screenH}`} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+        // Fara "key" pe dimensiuni: GLView NU mai este remontat la resize/rotire.
+        // Contextul GL, scena, camera si renderer-ul raman aceleasi pe toata durata
+        // Play Mode; doar dimensiunile buffer-ului si aspect-ul camerei se
+        // actualizeaza (vezi useEffect-ul de resize si plasa de siguranta din render()).
+        <GLView style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
       {ready && Platform.OS !== "web" ? (
