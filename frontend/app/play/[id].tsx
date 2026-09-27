@@ -369,10 +369,13 @@ export default function PlayScreen() {
       // ca React sa re-randeze si sa declanseze efectul de mai sus), sincronizam
       // aici camera si renderer-ul cu marimea REALA curenta, in fiecare cadru
       // in care difera. Costul e neglijabil (doar o comparatie de intregi).
+      // IMPORTANT: setSize aici NU primeste al treilea parametru (updateStyle) -
+      // pe expo-gl acel parametru poate desincroniza gl.viewport() de bufferul
+      // real si impinge tot ce se randeaza intr-o parte a ecranului.
       const curW = gl.drawingBufferWidth;
       const curH = gl.drawingBufferHeight;
       if (curW && curH && (camera.aspect !== curW / curH)) {
-        renderer.setSize(curW, curH, false);
+        renderer.setSize(curW, curH);
         camera.aspect = curW / curH;
         camera.updateProjectionMatrix();
       }
