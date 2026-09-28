@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, Platform, Modal, useWindowDimensions } from "react-native";
+import { View, Text, StyleSheet, Pressable, Platform, Modal, ScrollView, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -75,6 +75,58 @@ const QUALITY_LABELS: Record<GraphicsQuality, string> = {
   high: "Viziunea 3",
 };
 
+// ---------- Render: 10 niveluri de distanta de randare (metri) ----------
+// Nivelul 4 = 60m, adica valoarea de dinainte. Vechile 30/60/100/150 sunt nivelurile 2/4/6/8.
+const RENDER_DISTANCES = [20, 30, 45, 60, 80, 100, 125, 150, 200, 250];
+
+// ---------- Grafica: 10 niveluri de calitate a iluminarii ----------
+// Nivelul 5 = exact aspectul de dinainte (ambient 0.55 + directionala 1.1).
+// Sub 5: iluminare mai plata. Peste 5: mai bogata (lumina de cer/sol + lumina de umplere).
+// Nu foloseste pixel ratio: acela ramane la "Viziune" (vezi nota din useEffect-ul [quality]).
+type Lights = {
+  ambient: THREE.AmbientLight;
+  dir: THREE.DirectionalLight;
+  hemi: THREE.HemisphereLight;
+  fill: THREE.DirectionalLight;
+};
+const GRAPHICS_LEVELS: { ambient: number; dir: number; hemi: number; fill: number }[] = [
+  { ambient: 1.0,  dir: 0.0,  hemi: 0.0,  fill: 0.0 },  // 1
+  { ambient: 0.85, dir: 0.45, hemi: 0.0,  fill: 0.0 },  // 2
+  { ambient: 0.7,  dir: 0.8,  hemi: 0.0,  fill: 0.0 },  // 3
+  { ambient: 0.6,  dir: 1.0,  hemi: 0.0,  fill: 0.0 },  // 4
+  { ambient: 0.55, dir: 1.1,  hemi: 0.0,  fill: 0.0 },  // 5 (ca inainte)
+  { ambient: 0.45, dir: 1.1,  hemi: 0.25, fill: 0.0 },  // 6
+  { ambient: 0.4,  dir: 1.15, hemi: 0.3,  fill: 0.25 }, // 7
+  { ambient: 0.35, dir: 1.2,  hemi: 0.35, fill: 0.35 }, // 8
+  { ambient: 0.3,  dir: 1.25, hemi: 0.4,  fill: 0.45 }, // 9
+  { ambient: 0.25, dir: 1.3,  hemi: 0.45, fill: 0.55 }, // 10
+];
+function applyGraphicsLevel(lights: Lights, level: number) {
+  const cfg = GRAPHICS_LEVELS[Math.max(1, Math.min(10, level)) - 1];
+  lights.ambient.intensity = cfg.ambient;
+  lights.dir.intensity = cfg.dir;
+  lights.hemi.intensity = cfg.hemi;
+  lights.fill.intensity = cfg.fill;
+}
+
+// Selector cu 10 puncte: casutele 1..valoare sunt aprinse, cea aleasa e plina.
+function LevelPicker({ value, onChange, testIDPrefix }: { value: number; onChange: (n: number) => void; testIDPrefix: string }) {
+  return (
+    <View style={styles.levelRow}>
+      {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+        <Pressable
+          key={n}
+          testID={`${testIDPrefix}-${n}`}
+          onPress={() => onChange(n)}
+          style={[styles.levelChip, n <= value && styles.levelChipActive, n === value && styles.levelChipCurrent]}
+        >
+          <Text style={[styles.levelChipText, n < value && { color: colors.brand }, n === value && { color: colors.onBrand }]}>{n}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -84,8 +136,13 @@ export default function PlayScreen() {
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // "quality" = Viziunea 1/2/3 (pixel ratio 1 / 1.4 / 2) - vezi nota din useEffect-ul [quality].
   const [quality, setQuality] = useState<GraphicsQuality>("medium");
-  const [renderDistance, setRenderDistance] = useState(60);
+  const [renderLevel, setRenderLevel] = useState(4); // 4 = 60m, ca inainte
+  const renderDistance = RENDER_DISTANCES[renderLevel - 1];
+  const [graphicsLevel, setGraphicsLevel] = useState(5); // 5 = aspectul de dinainte
+  const graphicsLevelRef = useRef(graphicsLevel);
+  graphicsLevelRef.current = graphicsLevel;
   // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
   // orientare a device-ului (nu la orice mica variatie de screenW/screenH,
   // gen bare de sistem). Vezi useEffect-ul de mai jos, bazat pe evenimentul
@@ -103,6 +160,7 @@ export default function PlayScreen() {
   const rendererRef = useRef<Renderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const lightsRef = useRef<Lights | null>(null);
   // Referinta catre contextul GL, ca sa putem citi dimensiunile REALE ale
   // drawing buffer-ului (in pixeli fizici) de fiecare data cand se schimba
   // orientarea/dimensiunea ecranului - nu doar o data, la creare.
@@ -349,10 +407,18 @@ export default function PlayScreen() {
     const camera = new THREE.PerspectiveCamera(70, w / h, 0.05, renderDistance);
     cameraRef.current = camera;
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
     const dir = new THREE.DirectionalLight(0xffffff, 1.1);
     dir.position.set(5, 10, 4);
+    const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x1a1d21, 0);
+    const fill = new THREE.DirectionalLight(0xffffff, 0);
+    fill.position.set(-5, 4, -4);
+    scene.add(ambient);
     scene.add(dir);
+    scene.add(hemi);
+    scene.add(fill);
+    lightsRef.current = { ambient, dir, hemi, fill };
+    applyGraphicsLevel(lightsRef.current, graphicsLevelRef.current);
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(80, 80, 1, 1),
@@ -408,18 +474,9 @@ export default function PlayScreen() {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
 
-      // NOTA: nu mai recalculam aici camera.aspect/renderer.setSize pe baza
-      // gl.drawingBufferWidth/Height in fiecare cadru. Motivul: setPixelRatio
-      // (declansat de schimbarea Graphics Quality) modifica intentionat
-      // drawingBufferWidth/Height fara nicio schimbare reala de orientare sau
-      // dimensiune a ferestrei. Recalcularea de aici interpreta gresit acea
-      // schimbare ca pe un resize real si apela renderer.setSize() peste
-      // valori deja scalate de pixelRatio, dublandu-l efectiv - rezultatul
-      // era un buffer mult mai mare decat ecranul fizic, ceea ce facea camera
-      // sa para "apropiata" de personaj la calitate grafica mai mare.
-      // Schimbarile REALE de orientare sunt tratate corect prin remontarea
-      // completa a GLView-ului (vezi glMountKey si listener-ul de orientare
-      // de mai sus), care recreeaza camera cu aspect-ul corect de la zero.
+      // NOTA: aspectul camerei se seteaza la creare (onContextCreate). Schimbarile
+      // de orientare remonteaza GLView-ul (vezi glMountKey si listener-ul de
+      // orientare de mai sus), deci camera se recreeaza cu aspectul corect.
 
       const now = Date.now();
       const dt = Math.min(0.05, (now - lastFrame) / 1000);
@@ -550,10 +607,12 @@ export default function PlayScreen() {
     const cam = cameraRef.current;
     if (!r) return;
     r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
-    // getSize() intoarce dimensiunea logica (CSS), NEAFECTATA de pixelRatio -
-    // spre deosebire de gl.drawingBufferWidth/Height, care se scaleaza cu el.
-    // Recalculam aspectul din aceasta dimensiune logica, ca schimbarea de
-    // calitate grafica sa nu modifice cadrul vizibil al camerei.
+    // NOTA (Viziune): three.js seteaza viewport-ul GL la size * pixelRatio, dar
+    // bufferul expo-gl are dimensiune fixa. La 1.4 / 2 viewport-ul depaseste
+    // bufferul, deci se vede doar o parte din scena, marita (personajul se muta
+    // spre coltul din dreapta-sus). Comportamentul e pastrat intentionat ca
+    // "Viziunea 1/2/3", la cererea utilizatorului. NU folosi pixelRatio pentru
+    // calitate grafica - pentru asta exista setarea Grafica (iluminare).
     if (cam) {
       const size = new THREE.Vector2();
       r.getSize(size);
@@ -563,6 +622,9 @@ export default function PlayScreen() {
       }
     }
   }, [quality]);
+  useEffect(() => {
+    if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
+  }, [graphicsLevel]);
   useEffect(() => {
     const cam = cameraRef.current;
     if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
@@ -640,29 +702,28 @@ export default function PlayScreen() {
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
           <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={e => e.stopPropagation?.()}>
-            <Text style={styles.menuTitle}>Settings</Text>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.menuTitle}>Settings</Text>
 
-            <Text style={styles.settingLabel}>Viziune</Text>
-            <View style={styles.qualityRow}>
-              {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
-                <Pressable key={q} testID={`play-quality-${q}`} onPress={() => setQuality(q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
-                  <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
-                </Pressable>
-              ))}
-            </View>
+              <Text style={styles.settingLabel}>Viziune</Text>
+              <View style={styles.qualityRow}>
+                {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
+                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => setQuality(q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
+                    <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
+                  </Pressable>
+                ))}
+              </View>
 
-            <Text style={styles.settingLabel}>Render Distance: {renderDistance}m</Text>
-            <View style={styles.distRow}>
-              {[30, 60, 100, 150].map(d => (
-                <Pressable key={d} testID={`play-distance-${d}`} onPress={() => setRenderDistance(d)} style={[styles.qualityChip, renderDistance === d && styles.qualityChipActive]}>
-                  <Text style={[styles.qualityChipText, renderDistance === d && { color: colors.brand }]}>{d}m</Text>
-                </Pressable>
-              ))}
-            </View>
+              <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
+              <LevelPicker value={graphicsLevel} onChange={setGraphicsLevel} testIDPrefix="play-graphics" />
 
-            <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
-              <Text style={styles.menuCloseBtnText}>Close</Text>
-            </Pressable>
+              <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
+              <LevelPicker value={renderLevel} onChange={setRenderLevel} testIDPrefix="play-render" />
+
+              <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
+                <Text style={styles.menuCloseBtnText}>Close</Text>
+              </Pressable>
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -690,7 +751,11 @@ const styles = StyleSheet.create({
   menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
   settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
   qualityRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  distRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  levelRow: { flexDirection: "row", gap: 5 },
+  levelChip: { flex: 1, height: 34, borderRadius: 8, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  levelChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  levelChipCurrent: { backgroundColor: colors.brand },
+  levelChipText: { color: colors.onSurface2, fontWeight: "800", fontSize: 11 },
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   qualityChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
