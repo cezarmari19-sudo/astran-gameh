@@ -67,6 +67,14 @@ const CAM_FIRST_PERSON_THRESHOLD = 0.6;
 
 type GraphicsQuality = "low" | "medium" | "high";
 
+// Numele afisate in Settings. Valorile interne (low/medium/high) raman
+// neschimbate si controleaza in continuare pixel ratio-ul; se schimba doar textul.
+const QUALITY_LABELS: Record<GraphicsQuality, string> = {
+  low: "Viziunea 1",
+  medium: "Viziunea 2",
+  high: "Viziunea 3",
+};
+
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -634,11 +642,11 @@ export default function PlayScreen() {
           <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={e => e.stopPropagation?.()}>
             <Text style={styles.menuTitle}>Settings</Text>
 
-            <Text style={styles.settingLabel}>Graphics Quality</Text>
+            <Text style={styles.settingLabel}>Viziune</Text>
             <View style={styles.qualityRow}>
               {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
                 <Pressable key={q} testID={`play-quality-${q}`} onPress={() => setQuality(q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
-                  <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{q}</Text>
+                  <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
                 </Pressable>
               ))}
             </View>
@@ -681,7 +689,7 @@ const styles = StyleSheet.create({
   menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
   menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
   settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
-  qualityRow: { flexDirection: "row", gap: 8 },
+  qualityRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   distRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
