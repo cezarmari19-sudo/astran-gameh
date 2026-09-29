@@ -32,8 +32,11 @@ MAX_CONCURRENT_RUNS = 4
 CACHE_SIZE = 128
 
 SHAPE_TYPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
+OP_KINDS = ("create", "set", "destroy", "world", "material")
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$")
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")       # id de obiect (din script sau din scena Studio)
+_MATERIAL_ID_RE = re.compile(r"^m[0-9]{1,4}$")         # id de material: m1, m2, ...
 
 
 class SandboxUnavailable(RuntimeError):
@@ -41,6 +44,13 @@ class SandboxUnavailable(RuntimeError):
 
 
 # ---------- fisiere ----------
+
+# Numele rezervate pentru fisierele pe care le adauga serverul (nu scriptul jocului).
+# Host-ul (host.cpp, validName) accepta doar litere, cifre, _ - si /, deci NU pot incepe cu "@".
+ASSETS_FILE_NAME = "__assets"  # citit de prelude.luau pentru Assets.load
+SCENE_FILE_NAME = "__scene"    # citit de prelude.luau: obiectele facute in Studio
+RESERVED_NAMES = {ASSETS_FILE_NAME, SCENE_FILE_NAME}
+
 
 def validate_files(files: Any) -> list[dict]:
     """Verifica lista de fisiere {name, source} si intoarce o copie curata. Ridica ValueError."""
@@ -61,6 +71,8 @@ def validate_files(files: Any) -> list[dict]:
             raise ValueError("Invalid script entry")
         if len(name) > MAX_NAME_CHARS or not _NAME_RE.match(name):
             raise ValueError(f"Invalid script name '{name[:40]}' (use letters, numbers, _ - and /)")
+        if name in RESERVED_NAMES:
+            raise ValueError(f"The script name '{name}' is reserved")
         if name in seen:
             raise ValueError(f"Duplicate script name '{name}'")
         if len(source) > MAX_SOURCE_CHARS:
@@ -79,12 +91,11 @@ def files_from_source(source: str) -> list[dict]:
     return [{"name": ENTRY_NAME, "source": source}]
 
 
-ASSETS_FILE_NAME = "@assets"  # numele rezervat citit de prelude.luau pentru Assets.load
 MAX_ASSETS = 200
 
 
 def assets_file(assets: list[dict]) -> Optional[dict]:
-    """Construieste fisierul special "@assets" din modelele cumparate de joc.
+    """Construieste fisierul special "__assets" din modelele cumparate de joc.
 
     `assets` = [{"id": str, "name": str, "object": {"type", "color", "scale"}}, ...]
     Datele sunt deja curatate de shop_routes.py inainte sa ajunga aici; tot facem
@@ -109,11 +120,61 @@ def assets_file(assets: list[dict]) -> Optional[dict]:
     return {"name": ASSETS_FILE_NAME, "source": "return " + json.dumps(payload, ensure_ascii=False)}
 
 
-def _bundle(files: list[dict], assets: Optional[list[dict]] = None) -> bytes:
+MAX_SCENE_OBJECTS = 1000
+_SCENE_NAME_JUNK = re.compile(r"[^\w\- .]")
+
+
+def scene_file(scene: Any) -> Optional[dict]:
+    """Construieste fisierul special "__scene" cu obiectele facute in Studio, ca scriptul sa le poata alege.
+
+    Obiectele din Studio nu au (inca) nume, deci primesc unul automat dupa tip si numarul lor de ordine:
+    Cube1, Cube2, Sphere1, Cylinder1, Cone1, Tree1... Daca un obiect are un camp "name", se foloseste acela.
+    Markerul "spawn" nu se trimite.
+    """
+    if not isinstance(scene, dict):
+        return None
+    objects = scene.get("objects")
+    if not isinstance(objects, list) or not objects:
+        return None
+
+    counters: dict[str, int] = {}
+    clean = []
+    for o in objects[:MAX_SCENE_OBJECTS]:
+        if not isinstance(o, dict):
+            continue
+        oid, otype = o.get("id"), o.get("type")
+        if not isinstance(oid, str) or not _ID_RE.match(oid) or not isinstance(otype, str):
+            continue
+        if otype == "spawn":
+            continue
+        counters[otype] = counters.get(otype, 0) + 1
+
+        custom = o.get("name")
+        name = _SCENE_NAME_JUNK.sub("", custom).strip()[:64] if isinstance(custom, str) else ""
+        if not name:
+            name = f"{otype.capitalize()[:20]}{counters[otype]}"
+
+        entry: dict = {"id": oid, "name": name, "type": otype[:20]}
+        for key, default in (("x", 0.0), ("y", 0.0), ("z", 0.0), ("scale", 1.0), ("sx", 1.0), ("sy", 1.0), ("sz", 1.0)):
+            n = _number(o.get(key))
+            entry[key] = n if n is not None else default
+        color = o.get("color")
+        entry["color"] = color.lower() if isinstance(color, str) and _HEX_COLOR.match(color) else "#a3a3a3"
+        entry["solid"] = o.get("solid") is not False
+        entry["visible"] = o.get("visible") is not False
+        clean.append(entry)
+
+    if not clean:
+        return None
+    payload = json.dumps(clean, ensure_ascii=False)
+    return {"name": SCENE_FILE_NAME, "source": "return " + json.dumps(payload, ensure_ascii=False)}
+
+
+def _bundle(files: list[dict], assets: Optional[list[dict]] = None, scene: Any = None) -> bytes:
     all_files = list(files)
-    extra = assets_file(assets) if assets else None
-    if extra is not None:
-        all_files.append(extra)
+    for extra in (assets_file(assets) if assets else None, scene_file(scene)):
+        if extra is not None:
+            all_files.append(extra)
 
     parts: list[bytes] = []
     for f in all_files:
@@ -124,7 +185,7 @@ def _bundle(files: list[dict], assets: Optional[list[dict]] = None) -> bytes:
     return b"".join(parts)
 
 
-def _cache_key(files: list[dict], assets: Optional[list[dict]] = None) -> str:
+def _cache_key(files: list[dict], assets: Optional[list[dict]] = None, scene: Any = None) -> str:
     h = hashlib.sha256()
     for f in files:
         h.update(f["name"].encode("utf-8"))
@@ -135,8 +196,12 @@ def _cache_key(files: list[dict], assets: Optional[list[dict]] = None) -> str:
         h.update(data)
     extra = assets_file(assets) if assets else None
     if extra is not None:
-        h.update(b"\0@assets\0")
+        h.update(b"\0" + ASSETS_FILE_NAME.encode("ascii") + b"\0")
         h.update(extra["source"].encode("utf-8"))
+    extra_scene = scene_file(scene)
+    if extra_scene is not None:
+        h.update(b"\0" + SCENE_FILE_NAME.encode("ascii") + b"\0")
+        h.update(extra_scene["source"].encode("utf-8"))
     return h.hexdigest()
 
 
@@ -200,6 +265,10 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _bool(v: Any) -> Optional[bool]:
+    return v if isinstance(v, bool) else None
+
+
 def sanitize_ops(raw: Any) -> list[dict]:
     """Rezultatul vine dintr-un script necunoscut: valideaza tot inainte sa ajunga la clienti."""
     if not isinstance(raw, list):
@@ -210,12 +279,47 @@ def sanitize_ops(raw: Any) -> list[dict]:
             continue
         kind = op.get("op")
         op_id = op.get("id")
-        if kind not in ("create", "set", "destroy"):
+        if kind not in OP_KINDS:
             continue
-        if not isinstance(op_id, str) or not (0 < len(op_id) <= 16):
+        if not isinstance(op_id, str) or not _ID_RE.match(op_id):
             continue
         t = _number(op.get("t"))
         item: dict = {"op": kind, "id": op_id, "t": _clamp(t if t is not None else 0.0, 0.0, 60.0)}
+
+        if kind == "world":
+            gravity = _number(op.get("gravity"))
+            if gravity is not None:
+                item["gravity"] = _clamp(gravity, 0.0, 200.0)
+            air = _number(op.get("air"))
+            if air is not None:
+                item["air"] = _clamp(air, 0.0, 5.0)
+            clean.append(item)
+            continue
+
+        if kind == "material":
+            if not _MATERIAL_ID_RE.match(op_id):
+                continue
+            name = op.get("name")
+            if isinstance(name, str):
+                item["name"] = name[:64]
+            density = _number(op.get("density"))
+            if density is not None:
+                item["density"] = _clamp(density, 0.001, 30.0)
+            friction = _number(op.get("friction"))
+            if friction is not None:
+                item["friction"] = _clamp(friction, 0.0, 5.0)
+            bounce = _number(op.get("bounce"))
+            if bounce is not None:
+                item["bounce"] = _clamp(bounce, 0.0, 1.2)
+            liquid = _bool(op.get("liquid"))
+            if liquid is not None:
+                item["liquid"] = liquid
+            color = op.get("color")
+            if isinstance(color, str) and _HEX_COLOR.match(color):
+                item["color"] = color.lower()
+            clean.append(item)
+            continue
+
         for axis in ("x", "y", "z"):
             n = _number(op.get(axis))
             if n is not None:
@@ -232,6 +336,17 @@ def sanitize_ops(raw: Any) -> list[dict]:
         name = op.get("name")
         if isinstance(name, str):
             item["name"] = name[:64]
+        material = op.get("material")
+        if isinstance(material, str) and (material == "" or _MATERIAL_ID_RE.match(material)):
+            item["material"] = material
+        for key in ("anchored", "collide"):
+            b = _bool(op.get(key))
+            if b is not None:
+                item[key] = b
+        for axis in ("vx", "vy", "vz"):
+            n = _number(op.get(axis))
+            if n is not None:
+                item[axis] = _clamp(n, -200.0, 200.0)
         clean.append(item)
     clean.sort(key=lambda o: o["t"])  # sortare stabila: ordinea pastrata la timp egal
     return clean
@@ -295,7 +410,13 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
-async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64, assets: Optional[list[dict]] = None) -> dict:
+async def run_files(
+    files: Any,
+    timeout_ms: int = 2000,
+    mem_mb: int = 64,
+    assets: Optional[list[dict]] = None,
+    scene: Any = None,
+) -> dict:
     clean = validate_files(files)
     if not any(f["name"] == ENTRY_NAME for f in clean):
         raise ValueError(f"Missing the '{ENTRY_NAME}' script (it runs first)")
@@ -321,7 +442,7 @@ async def run_files(files: Any, timeout_ms: int = 2000, mem_mb: int = 64, assets
         )
         try:
             stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(_bundle(clean, assets)),
+                proc.communicate(_bundle(clean, assets, scene)),
                 timeout=timeout_ms / 1000 + 1.5,
             )
         except asyncio.TimeoutError:
@@ -343,16 +464,16 @@ async def run_script(source: str, timeout_ms: int = 2000, mem_mb: int = 64) -> d
 _cache: "OrderedDict[str, dict]" = OrderedDict()
 
 
-async def run_cached_files(files: Any, assets: Optional[list[dict]] = None) -> dict:
+async def run_cached_files(files: Any, assets: Optional[list[dict]] = None, scene: Any = None) -> dict:
     """Ca run_files, dar retine rezultatele recente (jocurile se ruleaza des, scriptul se schimba rar)."""
     clean = validate_files(files)
-    key = _cache_key(clean, assets)
+    key = _cache_key(clean, assets, scene)
     hit = _cache.get(key)
     if hit is not None:
         _cache.move_to_end(key)
         return hit
 
-    result = await run_files(clean, assets=assets)
+    result = await run_files(clean, assets=assets, scene=scene)
     if result["ok"]:
         _cache[key] = result
         while len(_cache) > CACHE_SIZE:
