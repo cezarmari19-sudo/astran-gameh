@@ -3,19 +3,23 @@
 --   userFn  = scriptul "main" al utilizatorului (deja compilat)
 --   emit    = functie a host-ului: emit("ops", json) / emit("error", text)
 --   modules = tabel nume -> functie, cu celelalte fisiere (pentru require).
---             fisierul special "@assets" (daca exista) e JSON cu modelele
+--             fisierul special "__assets" (daca exista) e JSON cu modelele
 --             cumparate din Shop, pus la dispozitie prin Assets.load("id")
+--             fisierul special "__scene" (daca exista) e JSON cu obiectele facute
+--             in Studio; ele apar in workspace ca niste piese (Cube1, Sphere1...)
 --
 -- Scriptul ruleaza pe un ceas VIRTUAL: task.wait() nu asteapta cu adevarat,
--- doar avanseaza timpul si inregistreaza operatiile (create/set/destroy) cu
--- momentul la care s-au intamplat. Clientul le reda apoi in scena 3D.
+-- doar avanseaza timpul si inregistreaza operatiile (create/set/destroy/world/material)
+-- cu momentul la care s-au intamplat. Clientul le reda apoi in scena 3D, unde
+-- fizica (gravitatie, densitate, frecare...) chiar se simuleaza.
 
 local userFn, emit, modules = ...
 
 -- ===== limite =====
 local MAX_OPS = 5000       -- operatii inregistrate
-local MAX_PARTS = 500      -- obiecte simultan in workspace
+local MAX_PARTS = 500      -- obiecte create de script simultan in workspace
 local MAX_CREATED = 5000   -- Instance.new total
+local MAX_MATERIALS = 32   -- Material.new total
 local MAX_TIME = 60        -- secunde virtuale
 local MAX_STEPS = 20000    -- reluari de thread-uri
 local MAX_THREADS = 200    -- thread-uri in asteptare
@@ -207,9 +211,126 @@ local function colorHex(c)
     return sformat("#%02x%02x%02x", floor(c.R * 255 + 0.5), floor(c.G * 255 + 0.5), floor(c.B * 255 + 0.5))
 end
 
+-- ===== lumea fizica: gravitatie si densitatea aerului =====
+-- Valorile implicite trebuie sa fie aceleasi ca in aplicatie (physicsWorld.ts).
+--   Gravity    : m/s^2, 0..200 (implicit 18)
+--   AirDensity : g/cm^3, 0..5  (implicit 0.02; apa = 1)
+local worldGravity = 18
+local worldAir = 0.02
+
+local function clampRange(v, lo, hi, what)
+    v = tonumber(v)
+    if v == nil or v ~= v then
+        error(what .. " must be a number", 3)
+    end
+    if v < lo then
+        return lo
+    end
+    if v > hi then
+        return hi
+    end
+    return v
+end
+
+-- ===== Material =====
+-- Material.new("Lemn") -> Density (g/cm^3, apa = 1), Friction, Bounciness (Elasticity),
+-- Liquid (lichid: nu se ciocneste, obiectele plutesc / se scufunda in el) si Color.
+local MDATA = setmetatable({}, { __mode = "k" }) -- proxy -> date
+local MaterialMT = {}
+local materialCount = 0
+
+local function materialOp(m)
+    local op = {
+        op = "material",
+        id = m.Id,
+        name = m.Name,
+        density = m.Density,
+        friction = m.Friction,
+        bounce = m.Bounciness,
+        liquid = m.Liquid,
+    }
+    if m.Color ~= nil then
+        op.color = colorHex(m.Color)
+    end
+    return op
+end
+
+MaterialMT.__index = function(self, key)
+    local m = MDATA[self]
+    if key == "Name" then
+        return m.Name
+    elseif key == "Density" then
+        return m.Density
+    elseif key == "Friction" then
+        return m.Friction
+    elseif key == "Bounciness" or key == "Elasticity" then
+        return m.Bounciness
+    elseif key == "Liquid" then
+        return m.Liquid
+    elseif key == "Color" then
+        return m.Color
+    elseif key == "ClassName" then
+        return "Material"
+    end
+    error(tostring(key) .. " is not a valid member of Material", 2)
+end
+
+MaterialMT.__newindex = function(self, key, value)
+    local m = MDATA[self]
+    if key == "Name" then
+        m.Name = tostring(value)
+    elseif key == "Density" then
+        m.Density = clampRange(value, 0.001, 30, "Density")
+    elseif key == "Friction" then
+        m.Friction = clampRange(value, 0, 5, "Friction")
+    elseif key == "Bounciness" or key == "Elasticity" then
+        m.Bounciness = clampRange(value, 0, 1.2, "Bounciness")
+    elseif key == "Liquid" then
+        if type(value) ~= "boolean" then
+            error("Liquid must be true or false", 2)
+        end
+        m.Liquid = value
+    elseif key == "Color" then
+        if value ~= nil and getmetatable(value) ~= C3 then
+            error("Color must be a Color3 (or nil)", 2)
+        end
+        m.Color = value
+    else
+        error(tostring(key) .. " is not a valid member of Material", 2)
+    end
+    record(materialOp(m))
+end
+
+MaterialMT.__tostring = function(self)
+    return MDATA[self].Name
+end
+
+local MaterialLib = {}
+
+function MaterialLib.new(name)
+    if materialCount >= MAX_MATERIALS then
+        error("too many materials (max " .. MAX_MATERIALS .. ")", 2)
+    end
+    materialCount = materialCount + 1
+    local self = setmetatable({}, MaterialMT)
+    local m = {
+        Id = "m" .. materialCount,
+        Name = (name ~= nil) and tostring(name) or "Material",
+        Density = 1,
+        Friction = 0.5,
+        Bounciness = 0,
+        Liquid = false,
+    }
+    MDATA[self] = m
+    record(materialOp(m))
+    return self
+end
+
 -- ===== Part =====
 -- Shape (Roblox) -> tipul din scena aplicatiei
 local SHAPES = { Block = "cube", Ball = "sphere", Cylinder = "cylinder", Cone = "cone", Pyramid = "pyramid" }
+-- tipul din scena aplicatiei -> Shape (Roblox), pentru obiectele facute in Studio
+local ROBLOX_OF_TYPE = { cube = "Block", sphere = "Ball", cylinder = "Cylinder", cone = "Cone", pyramid = "Pyramid", tree = "Pyramid" }
 
 local DATA = setmetatable({}, { __mode = "k" }) -- proxy -> date
 local PartMT = {}
@@ -220,7 +341,7 @@ local partCount = 0
 local createdCount = 0
 
 local function partCreateOp(d)
-    return {
+    local op = {
         op = "create",
         id = d.Id,
         type = SHAPES[d.Shape],
@@ -231,6 +352,21 @@ local function partCreateOp(d)
         scale = d.Size.X,
         name = d.Name,
     }
+    if d.Material ~= nil then
+        op.material = MDATA[d.Material].Id
+    end
+    if d.Anchored == false then
+        op.anchored = false
+    end
+    if d.CanCollide ~= nil then
+        op.collide = d.CanCollide
+    end
+    if d.Velocity ~= nil then
+        op.vx = d.Velocity.X
+        op.vy = d.Velocity.Y
+        op.vz = d.Velocity.Z
+    end
+    return op
 end
 
 local function setParent(self, d, parent)
@@ -242,11 +378,13 @@ local function setParent(self, d, parent)
         if d.Alive then
             return
         end
-        if partCount >= MAX_PARTS then
-            error("too many parts in workspace (max " .. MAX_PARTS .. ")", 3)
+        if not d.Scene then
+            if partCount >= MAX_PARTS then
+                error("too many parts in workspace (max " .. MAX_PARTS .. ")", 3)
+            end
+            partCount = partCount + 1
         end
         d.Alive = true
-        partCount = partCount + 1
         children[#children + 1] = self
         record(partCreateOp(d))
     elseif parent == nil then
@@ -254,7 +392,9 @@ local function setParent(self, d, parent)
             return
         end
         d.Alive = false
-        partCount = partCount - 1
+        if not d.Scene then
+            partCount = partCount - 1
+        end
         for i = 1, #children do
             if rawequal(children[i], self) then
                 tremove(children, i)
@@ -284,6 +424,20 @@ PartMT.__index = function(self, key)
         return d.Size
     elseif key == "Shape" then
         return d.Shape
+    elseif key == "Material" then
+        return d.Material
+    elseif key == "Anchored" then
+        return d.Anchored
+    elseif key == "CanCollide" then
+        if d.CanCollide ~= nil then
+            return d.CanCollide
+        end
+        if d.Scene then
+            return d.SceneSolid
+        end
+        return not d.Anchored
+    elseif key == "Velocity" then
+        return d.Velocity or V3.zero
     elseif key == "ClassName" then
         return "Part"
     end
@@ -339,6 +493,38 @@ PartMT.__newindex = function(self, key, value)
         if d.Alive then
             record({ op = "set", id = d.Id, type = shapeType })
         end
+    elseif key == "Material" then
+        if value ~= nil and MDATA[value] == nil then
+            error("Material must be created with Material.new (or nil)", 2)
+        end
+        d.Material = value
+        if d.Alive then
+            record({ op = "set", id = d.Id, material = (value ~= nil) and MDATA[value].Id or "" })
+        end
+    elseif key == "Anchored" then
+        if type(value) ~= "boolean" then
+            error("Anchored must be true or false", 2)
+        end
+        d.Anchored = value
+        if d.Alive then
+            record({ op = "set", id = d.Id, anchored = value })
+        end
+    elseif key == "CanCollide" then
+        if type(value) ~= "boolean" then
+            error("CanCollide must be true or false", 2)
+        end
+        d.CanCollide = value
+        if d.Alive then
+            record({ op = "set", id = d.Id, collide = value })
+        end
+    elseif key == "Velocity" then
+        if getmetatable(value) ~= V3 then
+            error("Velocity must be a Vector3", 2)
+        end
+        d.Velocity = value
+        if d.Alive then
+            record({ op = "set", id = d.Id, vx = value.X, vy = value.Y, vz = value.Z })
+        end
     else
         error(tostring(key) .. " is not a valid member of Part", 2)
     end
@@ -360,6 +546,8 @@ local function newPart()
         Shape = "Block",
         Alive = false,
         Destroyed = false,
+        -- fizica: implicit piesele sunt FIXE (ca inainte); Anchored = false le face mobile
+        Anchored = true,
     }
     return self
 end
@@ -388,6 +576,9 @@ function PartMethods.Clone(self)
     cd.Color = d.Color
     cd.Size = d.Size
     cd.Shape = d.Shape
+    cd.Material = d.Material
+    cd.Anchored = d.Anchored
+    cd.CanCollide = d.CanCollide
     return copy
 end
 
@@ -415,11 +606,35 @@ workspaceObj = setmetatable({}, {
     __index = function(self, key)
         if key == "Name" or key == "ClassName" then
             return "Workspace"
+        elseif key == "Gravity" then
+            return worldGravity
+        elseif key == "AirDensity" then
+            return worldAir
         end
-        return WorkspaceMethods[key]
+        local method = WorkspaceMethods[key]
+        if method ~= nil then
+            return method
+        end
+        -- workspace.Cube1 = obiectul cu numele "Cube1" (facut in Studio sau in script)
+        if type(key) == "string" then
+            for i = 1, #children do
+                if DATA[children[i]].Name == key then
+                    return children[i]
+                end
+            end
+        end
+        return nil
     end,
-    __newindex = function()
-        error("workspace is read-only", 2)
+    __newindex = function(self, key, value)
+        if key == "Gravity" then
+            worldGravity = clampRange(value, 0, 200, "Gravity")
+            record({ op = "world", id = "world", gravity = worldGravity })
+        elseif key == "AirDensity" then
+            worldAir = clampRange(value, 0, 5, "AirDensity")
+            record({ op = "world", id = "world", air = worldAir })
+        else
+            error("workspace is read-only", 2)
+        end
     end,
     __tostring = function()
         return "Workspace"
@@ -559,7 +774,7 @@ function time()
     return now
 end
 
--- ===== decodor JSON minimal (doar cat trebuie pentru "@assets") =====
+-- ===== decodor JSON minimal (doar cat trebuie pentru "__assets" si "__scene") =====
 -- Suporta obiecte, siruri, numere, true/false/null. Suficient pentru datele
 -- trimise de server; nu e un parser JSON general si nu trebuie folosit ca atare.
 local function jsonSkipSpace(s, i)
@@ -695,8 +910,60 @@ local function jsonDecode(s)
     return value
 end
 
+-- ===== obiectele facute in Studio =====
+-- Datele vin de la server, prin fisierul special "__scene" (JSON). Fiecare obiect devine o
+-- piesa deja existenta in workspace (fara operatie "create": clientul o are din scena).
+-- Nume automate: Cube1, Cube2, Sphere1... Le alegi cu workspace.Cube1 sau workspace:FindFirstChild("Cube1").
+local function loadScene()
+    local raw = modules["__scene"]
+    if raw == nil then
+        return
+    end
+
+    local ok, text = pcall(raw)
+    if not ok or type(text) ~= "string" then
+        return
+    end
+
+    local ok2, decoded = pcall(jsonDecode, text)
+    if not ok2 or type(decoded) ~= "table" then
+        return
+    end
+
+    for i = 1, #decoded do
+        local entry = decoded[i]
+        if type(entry) == "table" and type(entry.id) == "string" then
+            local self = setmetatable({}, PartMT)
+
+            local color = C3.new(0.64, 0.64, 0.64)
+            if type(entry.color) == "string" then
+                local okc, c = pcall(C3.fromHex, entry.color)
+                if okc then
+                    color = c
+                end
+            end
+
+            local scale = num(entry.scale, 1)
+            DATA[self] = {
+                Id = entry.id,
+                Name = (type(entry.name) == "string" and entry.name ~= "") and entry.name or "Part",
+                Position = V3.new(entry.x, entry.y, entry.z),
+                Color = color,
+                Size = V3.new(scale * num(entry.sx, 1), scale * num(entry.sy, 1), scale * num(entry.sz, 1)),
+                Shape = ROBLOX_OF_TYPE[entry.type] or "Block",
+                Alive = true,
+                Destroyed = false,
+                Scene = true,
+                SceneSolid = entry.solid ~= false,
+                Anchored = true,
+            }
+            children[#children + 1] = self
+        end
+    end
+end
+
 -- ===== Assets.load("id"): modele cumparate din Shop =====
--- Datele vin de la server, prin fisierul special "@assets" (JSON), niciodata
+-- Datele vin de la server, prin fisierul special "__assets" (JSON), niciodata
 -- generate de scriptul jocului, deci sunt de incredere ca forma (dar tot
 -- verificate mai jos, defensiv, in caz ca formatul se schimba pe viitor).
 local assetsById = nil -- populat lazy, doar daca scriptul chiar foloseste Assets
@@ -706,7 +973,7 @@ local function loadAssetsTable()
         return assetsById
     end
     assetsById = {}
-    local raw = modules["@assets"]
+    local raw = modules["__assets"]
     if raw == nil then
         return assetsById
     end
@@ -723,10 +990,6 @@ local function loadAssetsTable()
 
     for _, entry in pairs(decoded) do
         if type(entry) == "table" and type(entry.id) == "string" and type(entry.object) == "table" then
-            local o = entry.object
-            if type(o.type) == "string" and SHAPES[o.type == "Block" and "Block" or o.type] ~= nil then
-                -- accepta fie numele intern (cube/sphere/...) fie numele Roblox (Block/Ball/...)
-            end
             assetsById[entry.id] = entry
         end
     end
@@ -816,6 +1079,7 @@ end
 Instance = InstanceLib
 Vector3 = V3
 Color3 = C3
+Material = MaterialLib
 task = taskLib
 workspace = workspaceObj
 game = gameObj
@@ -862,5 +1126,6 @@ local function finish()
     )
 end
 
+loadScene()
 main()
 finish()
