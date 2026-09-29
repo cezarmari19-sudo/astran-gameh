@@ -75,6 +75,9 @@ export default function ScriptEditor({ visible, files, onChange, onClose, onSave
   const [dialogErr, setDialogErr] = useState("");
   const [runBusy, setRunBusy] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
+  // Verificarea automata rulata de Save (vezi handleSave), separata de apasarea manuala a Run,
+  // ca eticheta butonului Save sa arate exact ce se intampla ("Checking..." / erorile gasite).
+  const [checking, setChecking] = useState(false);
 
   const activeIdx = Math.min(active, Math.max(0, files.length - 1));
   const file: ScriptFile | undefined = files[activeIdx];
@@ -144,17 +147,36 @@ export default function ScriptEditor({ visible, files, onChange, onClose, onSave
     setActive(0);
   }
 
+  // Verifica scripturile in sandbox si intoarce rezultatul (ok / erori). Folosita atat de
+  // apasarea manuala pe Run, cat si automat de Save, ca sa nu se poata salva un joc cu un
+  // script care nu compileaza sau pica la rulare.
+  async function checkScripts(): Promise<RunResult> {
+    try {
+      const r = await api("/sandbox/run", { method: "POST", body: JSON.stringify({ files }) });
+      return r;
+    } catch (e: any) {
+      return { ok: false, output: [], errors: [e?.message || "Run failed"], ops: [], duration: 0, truncated: false };
+    }
+  }
+
   async function run() {
     setRunBusy(true);
     setResult(null);
-    try {
-      const r = await api("/sandbox/run", { method: "POST", body: JSON.stringify({ files }) });
-      setResult(r);
-    } catch (e: any) {
-      setResult({ ok: false, output: [], errors: [e?.message || "Run failed"], ops: [], duration: 0, truncated: false });
-    } finally {
-      setRunBusy(false);
-    }
+    setResult(await checkScripts());
+    setRunBusy(false);
+  }
+
+  // Save nu salveaza direct: intai verifica scripturile (ca la Run), arata rezultatul, si
+  // continua catre onSave() (salvarea reala a jocului) doar daca verificarea a iesit fara
+  // erori. Daca scripturile sunt goale, nu are ce verifica - salveaza direct.
+  async function handleSave() {
+    if (!onSave) return;
+    if (files.length === 0) { onSave(); return; }
+    setChecking(true);
+    const r = await checkScripts();
+    setResult(r);
+    setChecking(false);
+    if (r.ok) onSave();
   }
 
   return (
@@ -174,13 +196,13 @@ export default function ScriptEditor({ visible, files, onChange, onClose, onSave
             <Text style={styles.runText}>Run</Text>
           </Pressable>
           {onSave ? (
-            <Pressable onPress={onSave} disabled={saving} testID="script-save" style={styles.saveBtn}>
-              {saving ? (
+            <Pressable onPress={handleSave} disabled={saving || checking} testID="script-save" style={styles.saveBtn}>
+              {checking || saving ? (
                 <ActivityIndicator size="small" color={colors.onBrand} />
               ) : (
                 <MaterialCommunityIcons name={saved ? "check-all" : "content-save"} size={18} color={colors.onBrand} />
               )}
-              <Text style={styles.saveText}>{saved ? "Saved" : "Save"}</Text>
+              <Text style={styles.saveText}>{checking ? "Checking..." : saving ? "Saving..." : saved ? "Saved" : "Save"}</Text>
             </Pressable>
           ) : null}
         </View>
@@ -258,7 +280,8 @@ export default function ScriptEditor({ visible, files, onChange, onClose, onSave
                 </Text>
               ) : (
                 <Text style={styles.hint}>
-                  Load another file with require("name"). Tap Save (top right) to save the game together with these scripts.
+                  Load another file with require("name"). Save checks the scripts first (like Run) and only
+                  saves the game if they run without errors.
                 </Text>
               )}
 
