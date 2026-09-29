@@ -7,6 +7,11 @@ Se ataseaza din server.py:
 Fisierele scriptului unui joc se tin in colectia `game_scripts`
 ({game_id, files: [{name, source}], updated_at}), separat de documentul jocului.
 Jocurile vechi, care au doar campul `script`, sunt citite ca fisierul "main".
+
+Obiectele din scena Studio (game["scene"]["objects"]) se trimit intotdeauna
+scriptului, prin fisierul special "__scene" (vezi runner.scene_file), ca
+scriptul sa poata alege prin nume orice obiect facut in Studio (workspace.Cube1)
+si sa-i schimbe fizica (Material, Anchored, CanCollide, Velocity...).
 """
 from __future__ import annotations
 
@@ -144,7 +149,11 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
 
     @router.post("/run")
     async def run_source(body: RunBody, current=Depends(get_current_user)):
-        """Testeaza scripturile din editor (proprietarul vede output-ul si erorile)."""
+        """Testeaza scripturile din editor (proprietarul vede output-ul si erorile).
+
+        Nu foloseste scena unui joc anume (editorul nu ruleaza inca in contextul
+        unui joc salvat), deci workspace nu contine obiecte din Studio aici.
+        """
         check_rate_limit(current["user_id"])
         try:
             if body.files is not None:
@@ -220,4 +229,30 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
 
     @router.post("/games/{game_id}/run")
     async def run_game_script(game_id: str, current=Depends(get_current_user)):
-        """Ruleaza scriptul unui joc si intoarce operatiile
+        """Ruleaza scriptul unui joc si intoarce operatiile (create/set/destroy/world/material)
+        pe care le va reda ecranul de Play. Obiectele din scena Studio a jocului sunt puse la
+        dispozitia scriptului ca piese deja existente in workspace (vezi runner.scene_file),
+        ca proprietarul sa poata scrie, de exemplu, workspace.Cube1.Material = m1.
+
+        Poate fi apelat de oricine intra in joc (nu doar proprietarul) — comportamentul
+        jocului trebuie sa fie acelasi pentru toti jucatorii, ca in Play Mode obisnuit.
+        """
+        check_rate_limit(current["user_id"])
+        g = await get_game(game_id)
+        try:
+            files = await load_files(game_id, g)
+            if not files:
+                return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False}
+
+            asset_doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
+            asset_ids = asset_doc["asset_ids"] if asset_doc and isinstance(asset_doc.get("asset_ids"), list) else []
+            # Assets.load ruleaza in numele proprietarului jocului (nu al jucatorului curent):
+            # proprietarul e cel care a atasat modelele jocului, deci accesul se verifica pe el.
+            assets = await resolve_assets(g["owner_id"], asset_ids)
+
+            scene = g.get("scene")
+            return await run_cached_files(files, assets=assets, scene=scene)
+        except Exception as exc:  # noqa: BLE001
+            raise sandbox_error(exc)
+
+    return router
