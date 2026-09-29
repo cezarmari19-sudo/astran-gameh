@@ -11,14 +11,20 @@ import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gest
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE } from "@/src/studio/sceneShared";
+import { PhysicsWorld, MaterialDef, DEFAULT_MATERIAL, PhysicsShapeType } from "@/src/play/physicsWorld";
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
 
 // ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
-  t: number; op: "create" | "set" | "destroy"; id: string;
+  t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
+  // fizica (vezi backend/astran_sandbox/prelude.luau si runner.sanitize_ops)
+  gravity?: number; air?: number;                          // op: "world"
+  density?: number; friction?: number; bounce?: number; liquid?: boolean; // op: "material"
+  material?: string; anchored?: boolean; collide?: boolean; // pe "create"/"set"
+  vx?: number; vy?: number; vz?: number;
 };
 type MeshState = { x: number; y: number; z: number; scale: number };
 
@@ -31,20 +37,49 @@ function disposeMesh(m: THREE.Mesh) {
   m.geometry.dispose();
   (m.material as THREE.Material).dispose();
 }
-function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, op: ScriptOp) {
+function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: PhysicsWorld, op: ScriptOp) {
+  // "world" si "material" nu au un mesh asociat: schimba starea globala a lumii fizice.
+  if (op.op === "world") {
+    if (op.gravity !== undefined) physics.setGravity(op.gravity);
+    if (op.air !== undefined) physics.setAirDensity(op.air);
+    return;
+  }
+  if (op.op === "material") {
+    const def: MaterialDef = {
+      name: op.name ?? op.id,
+      density: op.density ?? DEFAULT_MATERIAL.density,
+      friction: op.friction ?? DEFAULT_MATERIAL.friction,
+      bounce: op.bounce ?? DEFAULT_MATERIAL.bounce,
+      liquid: op.liquid ?? DEFAULT_MATERIAL.liquid,
+      color: op.color,
+    };
+    physics.setMaterialDef(op.id, def);
+    return;
+  }
+
   if (op.op === "create") {
     const old = meshes.get(op.id);
     if (old) { scene.remove(old); disposeMesh(old); }
     const state: MeshState = { x: op.x ?? 0, y: op.y ?? 0, z: op.z ?? 0, scale: op.scale ?? 1 };
+    const shapeType = (op.type || "cube") as PhysicsShapeType;
     const m = buildMesh({ id: op.id, type: op.type || "cube", x: state.x, y: state.y, z: state.z, color: op.color || "#A3A3A3", scale: state.scale });
     m.userData = state;
     scene.add(m);
     meshes.set(op.id, m);
+    // Implicit piesele create de script sunt FIXE (Anchored = true), la fel ca inainte
+    // de fizica reala - devin mobile doar daca scriptul seteaza explicit Anchored = false.
+    physics.upsert({
+      id: op.id, type: shapeType, x: state.x, y: state.y, z: state.z, scale: state.scale,
+      anchored: op.anchored ?? true, collide: op.collide, materialId: op.material,
+      velocity: (op.vx !== undefined || op.vy !== undefined || op.vz !== undefined)
+        ? { x: op.vx ?? 0, y: op.vy ?? 0, z: op.vz ?? 0 } : undefined,
+    });
     return;
   }
   const m = meshes.get(op.id);
   if (!m) return;
-  if (op.op === "destroy") { scene.remove(m); disposeMesh(m); meshes.delete(op.id); return; }
+  if (op.op === "destroy") { scene.remove(m); disposeMesh(m); meshes.delete(op.id); physics.remove(op.id); return; }
+
   const s = m.userData as MeshState;
   if (op.x !== undefined) s.x = op.x;
   if (op.y !== undefined) s.y = op.y;
@@ -52,7 +87,18 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, op: Script
   if (op.scale !== undefined) s.scale = op.scale;
   if (op.color) (m.material as THREE.MeshStandardMaterial).color.set(op.color);
   if (op.type) { m.geometry.dispose(); m.geometry = geometryFor(op.type); }
-  placeMesh(m);
+  // Corpul mobil isi ia pozitia din fizica in fiecare cadru (vezi bucla de render);
+  // aici doar aplicam pe corpul fizic schimbarile explicite venite din script.
+  if (op.x !== undefined || op.y !== undefined || op.z !== undefined) physics.setPosition(op.id, op.x, op.y, op.z);
+  if (op.scale !== undefined) physics.setScale(op.id, op.scale);
+  if (op.type) physics.setShapeType(op.id, op.type as PhysicsShapeType);
+  if (op.material !== undefined) physics.setMaterial(op.id, op.material);
+  if (op.anchored !== undefined) physics.setAnchored(op.id, op.anchored);
+  if (op.collide !== undefined) physics.setCollide(op.id, op.collide);
+  if (op.vx !== undefined || op.vy !== undefined || op.vz !== undefined) physics.setVelocity(op.id, op.vx, op.vy, op.vz);
+  // Daca e mobil, pozitia vizuala reala vine din fizica la urmatorul cadru - nu suprascriem
+  // aici cu placeMesh() valorile explicite de mai sus, ca sa nu "sara" inainte de primul step.
+  if (physics.isAnchored(op.id)) placeMesh(m);
 }
 
 // ---------- constante de gameplay ----------
@@ -161,6 +207,7 @@ export default function PlayScreen() {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const lightsRef = useRef<Lights | null>(null);
+  const physicsRef = useRef<PhysicsWorld | null>(null);
   // Referinta catre contextul GL, ca sa putem citi dimensiunile REALE ale
   // drawing buffer-ului (in pixeli fizici) de fiecare data cand se schimba
   // orientarea/dimensiunea ecranului - nu doar o data, la creare.
@@ -203,7 +250,12 @@ export default function PlayScreen() {
 
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; if (rafId.current !== null) cancelAnimationFrame(rafId.current); };
+    return () => {
+      alive.current = false;
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+      physicsRef.current?.dispose();
+      physicsRef.current = null;
+    };
   }, []);
 
   // ---------- rotatia ecranului: Play Mode elibereaza orientarea, si o reblocheaza pe portrait la iesire ----------
@@ -259,6 +311,8 @@ export default function PlayScreen() {
           camDist: camDist.current,
         };
       }
+      physicsRef.current?.dispose();
+      physicsRef.current = null;
       setReady(false);
       setGlMountKey(k => k + 1);
     };
@@ -427,7 +481,17 @@ export default function PlayScreen() {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
+    // Lumea fizica: gravitatie/densitatea aerului si materialele pornesc de la valorile
+    // implicite (identice cu backend/astran_sandbox/prelude.luau) si sunt schimbate de
+    // operatiile "world"/"material" primite de la server, redate mai jos in bucla de render.
+    const physics = new PhysicsWorld();
+    physicsRef.current = physics;
+    physics.addGroundPlane();
+
     // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate.
+    // Intra si in fizica, implicit FIXE (Anchored = true) - opresc jucatorul si orice obiect
+    // mobil creat de script, exact ca inainte; devin mobile doar daca scriptul le schimba
+    // explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
     const boxes: AABB[] = [];
     let spawn = { x: 0, y: 0, z: 0 };
     (game.scene?.objects || []).forEach((o: SceneObj) => {
@@ -436,6 +500,7 @@ export default function PlayScreen() {
       if (isVisible) scene.add(buildMesh(o));
       const isSolid = o.solid !== false;
       if (isSolid) boxes.push(aabbFor(o));
+      physics.addStudioObject(o);
     });
     solidBoxesRef.current = boxes;
     spawnPointRef.current = spawn;
@@ -484,8 +549,23 @@ export default function PlayScreen() {
 
       const elapsed = (now - startedAt) / 1000;
       while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
-        applyOp(scene, scriptMeshes, scriptOps[nextOp]);
+        applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
         nextOp += 1;
+      }
+
+      // Avansam simularea fizica (gravitatie, ciocniri, densitate/frecare/elasticitate pe
+      // materialele setate de script) si aducem pozitia/rotatia FIECARUI corp mobil creat
+      // de script inapoi pe mesh-ul lui 3D. Corpurile fixe (Anchored) nu se misca niciodata,
+      // deci nu au nevoie sa fie citite aici.
+      physics.step(dt);
+      for (const [opId, mesh] of scriptMeshes) {
+        if (physics.isAnchored(opId)) continue;
+        const t = physics.getTransform(opId);
+        if (!t) continue;
+        mesh.position.copy(t.position);
+        mesh.quaternion.copy(t.quaternion);
+        const s = mesh.userData as MeshState;
+        s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
       }
 
       // Miscare jucator, relativa la directia camerei (doar swipe/pan controleaza camera).
@@ -701,7 +781,7 @@ export default function PlayScreen() {
 
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
-          <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={e => e.stopPropagation?.()}>
+          <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={(e: any) => e.stopPropagation?.()}>
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={styles.menuTitle}>Settings</Text>
 
