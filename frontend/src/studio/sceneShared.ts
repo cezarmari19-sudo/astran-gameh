@@ -4,6 +4,13 @@ import * as THREE from "three";
 
 export type ObjType = "cube" | "sphere" | "cylinder" | "cone" | "tree" | "spawn";
 
+// "spawn" e un tip generic de marker (nu de gameplay obisnuit): acopera atat Spawn
+// Point-urile cat si Checkpoint-urile, diferentiate prin campul spawnKind de mai jos.
+// Le tratam la fel din punct de vedere al tipului (SPAWN_TYPE) ca sa nu stricam nimic
+// din ce depinde deja de el (fizica, runner-ul Luau, filtrarea din Studio) - doar
+// comportamentul lor in Play difera dupa spawnKind.
+export type SpawnKind = "spawn" | "checkpoint";
+
 export type SceneObj = {
   id: string;
   type: string;
@@ -20,6 +27,14 @@ export type SceneObj = {
   sz?: number;
   visible?: boolean; // implicit true; daca false, nu se randeaza in Play (dar tot exista in Studio, semi-transparent)
   solid?: boolean;   // implicit true pentru obiecte normale, false pentru spawn; controleaza collision in Play
+
+  // ---------- Spawn Points & Checkpoints (doar cand type === "spawn") ----------
+  // Vezi si play/[id].tsx pentru logica de spawn initial / checkpoint activ / respawn,
+  // si studio/create.tsx + studio/Inspector.tsx pentru UI-ul din Game Studio.
+  spawnKind?: SpawnKind; // implicit "spawn" - pastreaza compatibilitatea cu Spawn Point-urile vechi (dinainte de checkpoint-uri si spawn-uri multiple)
+  initial?: boolean;     // doar cand spawnKind === "spawn": acesta e spawn-ul initial al jocului (primul loc unde apare playerul)? Un singur obiect ar trebui sa aiba true la un moment dat - vezi setInitialSpawn() din create.tsx, care garanteaza asta
+  enabled?: boolean;     // implicit true; daca false, punctul nu functioneaza deloc in Play (nu e ales ca spawn initial, nu se activeaza ca checkpoint), indiferent de Visible/Solid
+  teamId?: string;       // rezervat pentru reguli viitoare de spawn pe echipe/grupuri (spawn doar pentru echipa X) - neimplementat inca, dar campul exista ca arhitectura sa nu presupuna un singur spawn "universal"
 };
 
 export type Scene = { objects: SceneObj[]; sky: string; ground: string };
@@ -31,6 +46,11 @@ export const PALETTE = ["#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "
 export const OBJ_TYPES: ObjType[] = ["cube", "sphere", "cylinder", "cone", "tree"];
 export const SPAWN_TYPE: ObjType = "spawn";
 
+// Culorile disctinctive pentru cele doua "specii" de marker spawn - folosite in Studio (disc-ul
+// semi-transparent) si in Play (daca creatorul alege sa le faca Visible).
+export const SPAWN_COLOR = "#CCFF00";
+export const CHECKPOINT_COLOR = "#00E5FF";
+
 const OBJ_ICON: Record<string, string> = {
   cube: "cube-outline",
   sphere: "circle-outline",
@@ -40,8 +60,37 @@ const OBJ_ICON: Record<string, string> = {
   spawn: "map-marker-radius-outline",
 };
 
+const CHECKPOINT_ICON = "flag-checkered";
+
 export function iconFor(type: string): string {
   return OBJ_ICON[type] ?? "cube-outline";
+}
+
+// Normalizeaza spawnKind (implicit "spawn" daca lipseste - Spawn Point-urile vechi, salvate
+// inainte de aceasta functionalitate, nu au campul si trebuie sa se comporte ca inainte).
+export function spawnKindOf(o: Pick<SceneObj, "spawnKind">): SpawnKind {
+  return o.spawnKind === "checkpoint" ? "checkpoint" : "spawn";
+}
+
+export function isCheckpoint(o: Pick<SceneObj, "type" | "spawnKind">): boolean {
+  return o.type === SPAWN_TYPE && spawnKindOf(o) === "checkpoint";
+}
+
+export function isSpawnPoint(o: Pick<SceneObj, "type" | "spawnKind">): boolean {
+  return o.type === SPAWN_TYPE && spawnKindOf(o) === "spawn";
+}
+
+// Icon-ul corect pentru un obiect din scena: Spawn Point si Checkpoint au acelasi `type`
+// ("spawn"), dar icoane diferite dupa spawnKind - de-aia foloseste obiectul intreg, nu doar type.
+export function iconForObj(o: Pick<SceneObj, "type" | "spawnKind">): string {
+  if (o.type === SPAWN_TYPE) return isCheckpoint(o) ? CHECKPOINT_ICON : OBJ_ICON.spawn;
+  return iconFor(o.type);
+}
+
+// Culoarea "de marker" a unui Spawn Point / Checkpoint (ignora obj.color - la fel ca inainte,
+// cand orice spawn era mereu galben-verde; acum verde = spawn, cyan = checkpoint).
+export function spawnMarkerColor(o: Pick<SceneObj, "type" | "spawnKind">): string {
+  return isCheckpoint(o) ? CHECKPOINT_COLOR : SPAWN_COLOR;
 }
 
 export function isSolidDefault(type: string): boolean {
@@ -73,7 +122,7 @@ export function applyTransform(m: THREE.Object3D, o: TransformLike) {
 export function buildMesh(o: SceneObj): THREE.Mesh {
   const isSpawn = o.type === "spawn";
   const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(isSpawn ? "#CCFF00" : o.color),
+    color: new THREE.Color(isSpawn ? spawnMarkerColor(o) : o.color),
     roughness: 0.5,
     metalness: 0.1,
     transparent: isSpawn,
