@@ -16,7 +16,10 @@ import { PrimaryButton } from "@/src/components/ui";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 import AssetPicker from "@/src/components/AssetPicker";
 import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
-import { ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, iconFor, isSolidDefault, buildMesh, applyTransform } from "@/src/studio/sceneShared";
+import {
+  ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
+  iconFor, iconForObj, isSolidDefault, buildMesh, applyTransform, spawnKindOf, spawnMarkerColor,
+} from "@/src/studio/sceneShared";
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -160,16 +163,37 @@ export default function StudioEditor() {
     setSelIds([obj.id]);
   }
 
-  function addSpawn() {
-    const existing = scene.objects.find(o => o.type === SPAWN_TYPE);
-    if (existing) { setSelIds([existing.id]); return; } // un singur spawn point per joc, deocamdata
+  // Adauga un Spawn Point sau un Checkpoint - oricate, spre deosebire de limita de "un singur
+  // spawn point" de dinainte. Primul Spawn Point (nu Checkpoint) adaugat in joc devine automat
+  // spawn-ul initial, ca jocul sa aiba mereu un loc de start valid din prima; poate fi schimbat
+  // oricand din Inspector ("Fa spawn initial" - vezi setInitialSpawn mai jos).
+  function addSpawnPoint(kind: SpawnKind) {
     const tg = cameraTarget.current;
+    const noSpawnYet = kind === "spawn" && !scene.objects.some(o => o.type === SPAWN_TYPE && spawnKindOf(o) === "spawn");
     const obj: SceneObj = {
-      id: uid(), type: SPAWN_TYPE, x: Math.round(tg.x * 2) / 2, y: 0, z: Math.round(tg.z * 2) / 2,
-      color: "#CCFF00", scale: 1, visible: false, solid: false,
+      id: uid(),
+      type: SPAWN_TYPE,
+      spawnKind: kind,
+      x: Math.round(tg.x * 2) / 2, y: 0, z: Math.round(tg.z * 2) / 2,
+      color: kind === "checkpoint" ? "#00E5FF" : "#CCFF00",
+      scale: 1, visible: false, solid: false, enabled: true,
+      initial: noSpawnYet ? true : undefined,
     };
     setScene(s => ({ ...s, objects: [...s.objects, obj] }));
     setSelIds([obj.id]);
+  }
+
+  // Marcheaza un Spawn Point ca fiind spawn-ul initial al jocului; se asigura ca doar unul
+  // singur are initial=true la un moment dat (Checkpoint-urile nu sunt afectate, ele nu au
+  // niciodata initial=true - vezi Inspector, care nu arata butonul pentru ele).
+  function setInitialSpawn(id: string) {
+    setScene(s => ({
+      ...s,
+      objects: s.objects.map(o => {
+        if (o.type !== SPAWN_TYPE || spawnKindOf(o) !== "spawn") return o;
+        return { ...o, initial: o.id === id };
+      }),
+    }));
   }
 
   function updateSel(patch: Partial<SceneObj>) {
@@ -189,7 +213,9 @@ export default function StudioEditor() {
     if (selIds.length !== 1) return;
     const src = scene.objects.find(o => o.id === selIds[0]);
     if (!src) return;
-    const copy: SceneObj = { ...src, id: uid(), x: src.x + 1, z: src.z + 1 };
+    // Un Spawn Point duplicat NU mosteneste initial=true - altfel am avea doua spawn-uri
+    // initiale simultan. Ramane doar ca Spawn Point normal, selectabil manual ca initial.
+    const copy: SceneObj = { ...src, id: uid(), x: src.x + 1, z: src.z + 1, initial: undefined };
     setScene(s => ({ ...s, objects: [...s.objects, copy] }));
     setSelIds([copy.id]);
   }
@@ -286,7 +312,7 @@ export default function StudioEditor() {
         s.add(m);
       } else {
         applyTransform(m, o);
-        (m.material as THREE.MeshStandardMaterial).color.set(o.type === "spawn" ? "#CCFF00" : o.color);
+        (m.material as THREE.MeshStandardMaterial).color.set(o.type === "spawn" ? spawnMarkerColor(o) : o.color);
       }
       m.visible = o.visible !== false || true; // in Studio TOATE obiectele raman vizibile (semi-transparent daca visible=false), ca sa poata fi editate
       const isHidden = o.visible === false;
@@ -451,7 +477,8 @@ export default function StudioEditor() {
   };
 
   const singleSel = selIds.length === 1 ? scene.objects.find(o => o.id === selIds[0]) : undefined;
-  const hasSpawn = scene.objects.some(o => o.type === SPAWN_TYPE);
+  const hasSpawnPoint = scene.objects.some(o => o.type === SPAWN_TYPE && spawnKindOf(o) === "spawn");
+  const hasCheckpoint = scene.objects.some(o => o.type === SPAWN_TYPE && spawnKindOf(o) === "checkpoint");
   const selectedCharacter = myModels.find(m => m.model_id === playerCharacterId);
 
   if (loading) return <SafeAreaView style={styles.center}><ActivityIndicator color={colors.brand} /></SafeAreaView>;
@@ -524,9 +551,13 @@ export default function StudioEditor() {
             <MaterialCommunityIcons name="storefront-outline" size={22} color={colors.brand} />
             <Text style={styles.toolBtnText}>{assetIds.length > 0 ? `shop ${assetIds.length}` : "shop"}</Text>
           </Pressable>
-          <Pressable testID="editor-add-spawn" onPress={addSpawn} style={[styles.toolBtn, hasSpawn && { borderColor: colors.brand }]}>
+          <Pressable testID="editor-add-spawn" onPress={() => addSpawnPoint("spawn")} style={[styles.toolBtn, hasSpawnPoint && { borderColor: colors.brand }]}>
             <MaterialCommunityIcons name="map-marker-radius-outline" size={22} color={colors.brand} />
-            <Text style={styles.toolBtnText}>{hasSpawn ? "spawn ✓" : "spawn"}</Text>
+            <Text style={styles.toolBtnText}>spawn</Text>
+          </Pressable>
+          <Pressable testID="editor-add-checkpoint" onPress={() => addSpawnPoint("checkpoint")} style={[styles.toolBtn, hasCheckpoint && { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="flag-checkered" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>checkpoint</Text>
           </Pressable>
           {OBJ_TYPES.map(k => (
             <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
@@ -557,17 +588,22 @@ export default function StudioEditor() {
           onDuplicate={duplicateSel}
           onFocus={focusSel}
           onClose={() => setSelIds([])}
+          onSetInitial={() => setInitialSpawn(singleSel.id)}
         />
       ) : (
         <View style={styles.objList}>
           <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select, or use Box Select</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingBottom: 8 }}>
-            {scene.objects.map(o => (
-              <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelIds([o.id])} style={[styles.objChip, { borderColor: o.type === "spawn" ? colors.brand : o.color }]}>
-                <MaterialCommunityIcons name={iconFor(o.type) as any} size={14} color={o.type === "spawn" ? colors.brand : o.color} />
-                <Text style={styles.objChipText}>{o.type}</Text>
-              </Pressable>
-            ))}
+            {scene.objects.map(o => {
+              const spawnLike = o.type === SPAWN_TYPE;
+              const label = spawnLike ? (spawnKindOf(o) === "checkpoint" ? "checkpoint" : "spawn") : o.type;
+              return (
+                <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelIds([o.id])} style={[styles.objChip, { borderColor: spawnLike ? colors.brand : o.color }]}>
+                  <MaterialCommunityIcons name={iconForObj(o) as any} size={14} color={spawnLike ? colors.brand : o.color} />
+                  <Text style={styles.objChipText}>{label}</Text>
+                </Pressable>
+              );
+            })}
           </ScrollView>
         </View>
       )}
