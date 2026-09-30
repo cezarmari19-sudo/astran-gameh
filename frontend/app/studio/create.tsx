@@ -13,13 +13,14 @@ import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
-import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
+import CodeStudio from "@/src/components/CodeStudio";
 import AssetPicker from "@/src/components/AssetPicker";
 import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
 import {
   ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
   iconFor, iconForObj, isSolidDefault, buildMesh, applyTransform, spawnKindOf, spawnMarkerColor,
 } from "@/src/studio/sceneShared";
+import { ProjectState } from "@/src/studio/projectTree";
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -27,6 +28,8 @@ const MAX_PLAYERS_MIN = 1;
 const MAX_PLAYERS_MAX = 10000;
 
 type ModelPick = { model_id: string; name: string; part_count: number };
+
+const EMPTY_PROJECT: ProjectState = { files: [], folders: [] };
 
 export default function StudioEditor() {
   const router = useRouter();
@@ -50,10 +53,11 @@ export default function StudioEditor() {
   const [err, setErr] = useState<string | null>(null);
   const [glReady, setGlReady] = useState(false);
 
-  // Scripturi Luau (mai multe fisiere), rulate in sandbox pe server
-  const [scriptFiles, setScriptFiles] = useState<ScriptFile[]>([]);
-  const scriptsDirty = useRef(false);
-  const [showScript, setShowScript] = useState(false);
+  // Code Editor / File Explorer: proiect real de foldere+fisiere (vezi src/studio/projectTree.ts),
+  // salvat separat prin /sandbox/games/{id}/files (backend/astran_sandbox/routes.py).
+  const [project, setProject] = useState<ProjectState>(EMPTY_PROJECT);
+  const projectDirty = useRef(false);
+  const [showCode, setShowCode] = useState(false);
   const createdId = useRef<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -110,8 +114,11 @@ export default function StudioEditor() {
         setPlayerCharacterId(g.player_character_model_id ?? null);
         setScene(g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" });
         try {
-          const sr = await api(`/sandbox/games/${editingId}/files`);
-          setScriptFiles(Array.isArray(sr?.files) ? sr.files : []);
+          const pr = await api(`/sandbox/games/${editingId}/files`);
+          setProject({
+            files: Array.isArray(pr?.files) ? pr.files : [],
+            folders: Array.isArray(pr?.folders) ? pr.folders : [],
+          });
         } catch {}
         try {
           const ar = await api(`/sandbox/games/${editingId}/assets`);
@@ -130,8 +137,8 @@ export default function StudioEditor() {
   }, []);
 
   function leave() {
-    if (!scriptsDirty.current && !assetsDirty.current) { router.back(); return; }
-    Alert.alert("Ieși fără să salvezi?", "Scripturile modificate nu au fost salvate și se vor pierde.", [
+    if (!projectDirty.current && !assetsDirty.current) { router.back(); return; }
+    Alert.alert("Ieși fără să salvezi?", "Codul modificat nu a fost salvat și se va pierde.", [
       { text: "Rămâi", style: "cancel" },
       { text: "Ieși", style: "destructive", onPress: () => router.back() },
     ]);
@@ -139,7 +146,7 @@ export default function StudioEditor() {
 
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (scriptsDirty.current || assetsDirty.current) { leave(); return true; }
+      if (projectDirty.current || assetsDirty.current) { leave(); return true; }
       return false;
     });
     return () => sub.remove();
@@ -240,7 +247,7 @@ export default function StudioEditor() {
   }
 
   async function save() {
-    if (!title || title.length < 2) { setErr("Title too short"); setShowScript(false); setShowMeta(true); return; }
+    if (!title || title.length < 2) { setErr("Title too short"); setShowCode(false); setShowMeta(true); return; }
     const maxPlayers = Math.max(MAX_PLAYERS_MIN, Math.min(MAX_PLAYERS_MAX, parseInt(maxPlayersText, 10) || 20));
     setBusy(true); setErr(null);
     try {
@@ -259,9 +266,12 @@ export default function StudioEditor() {
         gameId = r?.game?.game_id || null;
         createdId.current = gameId;
       }
-      if (gameId && scriptsDirty.current) {
-        await api(`/sandbox/games/${gameId}/files`, { method: "PUT", body: JSON.stringify({ files: scriptFiles }) });
-        scriptsDirty.current = false;
+      if (gameId && projectDirty.current) {
+        await api(`/sandbox/games/${gameId}/files`, {
+          method: "PUT",
+          body: JSON.stringify({ files: project.files, folders: project.folders }),
+        });
+        projectDirty.current = false;
       }
       if (gameId && assetsDirty.current) {
         await api(`/sandbox/games/${gameId}/assets`, { method: "PUT", body: JSON.stringify({ asset_ids: assetIds }) });
@@ -272,7 +282,7 @@ export default function StudioEditor() {
       if (!editingId && gameId) {
         router.replace({ pathname: "/studio/edit/[id]", params: { id: gameId } });
       }
-    } catch (e: any) { setErr(e.message); setShowScript(false); setShowMeta(true); }
+    } catch (e: any) { setErr(e.message); setShowCode(false); setShowMeta(true); }
     finally { setBusy(false); }
   }
 
@@ -543,9 +553,9 @@ export default function StudioEditor() {
       <View style={styles.toolbar}>
         <Text style={styles.toolLabel}>ADD</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 12 }}>
-          <Pressable testID="editor-script" onPress={() => setShowScript(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
+          <Pressable testID="editor-script" onPress={() => setShowCode(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
             <MaterialCommunityIcons name="code-braces" size={22} color={colors.brand} />
-            <Text style={styles.toolBtnText}>{scriptFiles.length > 0 ? `scripts ${scriptFiles.length}` : "scripts"}</Text>
+            <Text style={styles.toolBtnText}>{project.files.length > 0 ? `code ${project.files.length}` : "code"}</Text>
           </Pressable>
           <Pressable testID="editor-assets" onPress={() => setShowAssets(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
             <MaterialCommunityIcons name="storefront-outline" size={22} color={colors.brand} />
@@ -624,11 +634,11 @@ export default function StudioEditor() {
         </View>
       </View>
 
-      <ScriptEditor
-        visible={showScript}
-        files={scriptFiles}
-        onChange={files => { scriptsDirty.current = true; setSaved(false); setScriptFiles(files); }}
-        onClose={() => setShowScript(false)}
+      <CodeStudio
+        visible={showCode}
+        project={project}
+        onChange={next => { projectDirty.current = true; setSaved(false); setProject(next); }}
+        onClose={() => setShowCode(false)}
         onSave={save}
         saving={busy}
         saved={saved}
