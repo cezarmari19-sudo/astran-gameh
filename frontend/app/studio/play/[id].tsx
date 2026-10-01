@@ -7,7 +7,6 @@ import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
 import * as ScreenOrientation from "expo-screen-orientation";
-import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE, spawnKindOf } from "@/src/studio/sceneShared";
@@ -15,6 +14,7 @@ import { PhysicsWorld, MaterialDef, DEFAULT_MATERIAL, PhysicsShapeType } from "@
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
+import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
 // ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
@@ -129,8 +129,6 @@ const CAM_FIRST_PERSON_THRESHOLD = 0.6;
 const CHECKPOINT_RADIUS_FACTOR = 1.4;
 const CHECKPOINT_MIN_RADIUS = 0.6;
 
-type GraphicsQuality = "low" | "medium" | "high";
-
 // Numele afisate in Settings. Valorile interne (low/medium/high) raman
 // neschimbate si controleaza in continuare pixel ratio-ul; se schimba doar textul.
 const QUALITY_LABELS: Record<GraphicsQuality, string> = {
@@ -191,6 +189,8 @@ function LevelPicker({ value, onChange, testIDPrefix }: { value: number; onChang
   );
 }
 
+type TouchXY = { x: number; y: number };
+
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -200,11 +200,15 @@ export default function PlayScreen() {
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  // "quality" = Viziunea 1/2/3 (pixel ratio 1 / 1.4 / 2) - vezi nota din useEffect-ul [quality].
-  const [quality, setQuality] = useState<GraphicsQuality>("medium");
-  const [renderLevel, setRenderLevel] = useState(4); // 4 = 60m, ca inainte
+
+  // Setarile PLAYERULUI (Graphics Quality, Render Distance, etc) - persistente, aceleasi in
+  // orice joc, salvate automat la fiecare schimbare (fara buton de Save). Vezi
+  // src/hooks/usePlayerSettings.ts si backend/astran_sandbox/user_settings_routes.py.
+  const { settings: playerSettings, loaded: settingsLoaded, update: updateSetting } = usePlayerSettings();
+  const quality = playerSettings.graphics_quality;
+  const renderLevel = playerSettings.render_level;
+  const graphicsLevel = playerSettings.graphics_level;
   const renderDistance = RENDER_DISTANCES[renderLevel - 1];
-  const [graphicsLevel, setGraphicsLevel] = useState(5); // 5 = aspectul de dinainte
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
   // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
@@ -228,6 +232,11 @@ export default function PlayScreen() {
   // pentru progresul de checkpoint-uri). null = niciun checkpoint activat inca.
   const activeCheckpointRef = useRef<SpawnRuntime | null>(null);
   const solidBoxesRef = useRef<AABB[]>([]);
+
+  // Asteptam setarile playerului ca sa pornim Play Mode cu ele deja aplicate (cerinta punctul
+  // 4: "incarca setarile -> aplica -> apoi porneste jocul", nu default-uri urmate de un "sarit"
+  // vizual cand ajunge raspunsul). O mica intarziere, o singura data, la intrarea in orice joc.
+  const canStartGL = settingsLoaded && !!game;
 
   // Three.js
   const rendererRef = useRef<Renderer | null>(null);
@@ -254,7 +263,6 @@ export default function PlayScreen() {
   const camDist = useRef(4.5);
   const lastCamAngle = useRef(0);
   const lastCamPolar = useRef(1.15);
-  const lastCamDist = useRef(4.5);
   const firstPerson = useRef(false);
 
   // La remontarea GLView-ului (schimbare de orientare) contextul GL, scena,
@@ -268,12 +276,143 @@ export default function PlayScreen() {
     camAngle: number; camPolar: number; camDist: number;
   } | null>(null);
 
-  // Joystick
+  // ============================================================================================
+  // MULTI-TOUCH REAL: joystick-ul si camera folosesc fiecare propriul touch identifier, complet
+  // independente unul de altul. Nu folosim PanGestureHandler/PinchGestureHandler (ale caror
+  // recognizers pot ajunge sa se excluda reciproc pe doua zone diferite) - citim direct
+  // nativeEvent.touches de la React Native si urmarim manual, pe identifier, exact care deget
+  // controleaza joystick-ul si care controleaza camera. Eliberarea unuia nu afecteaza deloc
+  // celalalt, pentru ca fiecare zona isi tine propriul set de identificatori si ignora orice
+  // touch care nu-i apartine.
+  // ============================================================================================
+
+  // Pozitia absoluta pe ecran a fiecarei zone (masurata prin onLayout) - necesara ca sa
+  // convertim coordonatele absolute (pageX/pageY) ale unui touch in coordonate relative la
+  // zona lui, indiferent cate alte degete sunt active oriunde altundeva pe ecran.
+  const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
+  const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
+
+  // --- Joystick: un singur deget, propriul identifier ---
+  const joyTouchId = useRef<number | null>(null);
   const joyActive = useRef(false);
   const joyVec = useRef({ x: 0, y: 0 });
   const [joyKnob, setJoyKnob] = useState({ x: 0, y: 0 });
   const [joyVisible, setJoyVisible] = useState(false);
   const [joyOrigin, setJoyOrigin] = useState({ x: 80, y: 80 });
+
+  // --- Camera: 1 deget = rotatie, al 2-lea deget (tot in zona camerei) = zoom (pinch) ---
+  const camTouchIds = useRef<number[]>([]);
+  const camTouchPos = useRef<Map<number, TouchXY>>(new Map());
+  const camTouchStartPos = useRef<Map<number, TouchXY>>(new Map());
+  const camPinchStartDist = useRef<number | null>(null);
+  const camPinchStartCamDist = useRef(4.5);
+
+  function touchesOf(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
+    return (evt?.nativeEvent?.touches as any[]) ?? [];
+  }
+
+  const onJoyResponderGrant = (evt: any) => {
+    if (joyTouchId.current !== null) return; // deja avem un deget pe joystick - ignoram orice altul nou in zona asta
+    const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
+    joyTouchId.current = t.identifier;
+    const ox = t.pageX - joyZoneLayout.current.x;
+    const oy = t.pageY - joyZoneLayout.current.y;
+    setJoyOrigin({ x: ox, y: oy });
+    setJoyKnob({ x: 0, y: 0 });
+    setJoyVisible(true);
+    joyActive.current = true;
+  };
+  const onJoyResponderMove = (evt: any) => {
+    if (joyTouchId.current === null) return;
+    const t = touchesOf(evt).find(x => x.identifier === joyTouchId.current);
+    if (!t) return;
+    const zx = t.pageX - joyZoneLayout.current.x;
+    const zy = t.pageY - joyZoneLayout.current.y;
+    const dx0 = zx - joyOrigin.x, dy0 = zy - joyOrigin.y;
+    const dist = Math.min(JOYSTICK_RADIUS, Math.hypot(dx0, dy0));
+    const ang = Math.atan2(dy0, dx0);
+    const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
+    setJoyKnob({ x: kx, y: ky });
+    // ky pozitiv = deget tras in jos fata de centrul joystick-ului (coordonate ecran standard)
+    joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
+  };
+  const onJoyResponderEnd = (evt: any) => {
+    const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
+    // daca evenimentul vine de la un alt deget (nu ar trebui, dar verificam oricum), il ignoram
+    if (changed.length > 0 && joyTouchId.current !== null && !changed.some(c => c.identifier === joyTouchId.current)) return;
+    joyTouchId.current = null;
+    joyActive.current = false;
+    joyVec.current = { x: 0, y: 0 };
+    setJoyKnob({ x: 0, y: 0 });
+    setJoyVisible(false);
+  };
+
+  const onCamResponderGrant = (evt: any) => {
+    if (camTouchIds.current.length >= 2) return; // doar 1 (rotire) sau 2 degete (pinch) - un al treilea se ignora
+    const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
+    camTouchIds.current.push(t.identifier);
+    camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+    camTouchStartPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+
+    if (camTouchIds.current.length === 1) {
+      // primul deget: incepe o rotatie noua, fata de pozitia curenta a camerei
+      lastCamAngle.current = camAngle.current;
+      lastCamPolar.current = camPolar.current;
+    } else if (camTouchIds.current.length === 2) {
+      // al doilea deget a intrat: trecem pe pinch-to-zoom; rotatia se opreste cat timp
+      // sunt 2 degete (la fel ca inainte, cand PanGestureHandler avea maxPointers={1})
+      const [idA, idB] = camTouchIds.current;
+      const a = camTouchPos.current.get(idA)!, b = camTouchPos.current.get(idB)!;
+      camPinchStartDist.current = Math.hypot(a.x - b.x, a.y - b.y);
+      camPinchStartCamDist.current = camDist.current;
+    }
+  };
+  const onCamResponderMove = (evt: any) => {
+    const touches = touchesOf(evt);
+    for (const tid of camTouchIds.current) {
+      const t = touches.find(x => x.identifier === tid);
+      if (t) camTouchPos.current.set(tid, { x: t.pageX, y: t.pageY });
+    }
+
+    if (camTouchIds.current.length === 1) {
+      const tid = camTouchIds.current[0];
+      const cur = camTouchPos.current.get(tid);
+      const start = camTouchStartPos.current.get(tid);
+      if (!cur || !start) return;
+      const translationX = cur.x - start.x;
+      const translationY = cur.y - start.y;
+      camAngle.current = lastCamAngle.current - translationX * 0.008;
+      camPolar.current = Math.max(0.4, Math.min(Math.PI - 0.15, lastCamPolar.current - translationY * 0.006));
+    } else if (camTouchIds.current.length === 2 && camPinchStartDist.current !== null) {
+      const [idA, idB] = camTouchIds.current;
+      const a = camTouchPos.current.get(idA), b = camTouchPos.current.get(idB);
+      if (!a || !b) return;
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const scale = dist / camPinchStartDist.current;
+      camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, camPinchStartCamDist.current / scale));
+    }
+  };
+  const onCamResponderEnd = (evt: any) => {
+    const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
+    for (const c of changed) {
+      const idx = camTouchIds.current.indexOf(c.identifier);
+      if (idx !== -1) {
+        camTouchIds.current.splice(idx, 1);
+        camTouchPos.current.delete(c.identifier);
+        camTouchStartPos.current.delete(c.identifier);
+      }
+    }
+    camPinchStartDist.current = null;
+    if (camTouchIds.current.length === 1) {
+      // a ramas un singur deget (celalalt a fost ridicat in timpul unui pinch) - re-pornim
+      // rotatia de la pozitia curenta a acestui deget, ca sa nu sara camera brusc
+      const tid = camTouchIds.current[0];
+      const pos2 = camTouchPos.current.get(tid);
+      if (pos2) camTouchStartPos.current.set(tid, pos2);
+      lastCamAngle.current = camAngle.current;
+      lastCamPolar.current = camPolar.current;
+    }
+  };
 
   useEffect(() => {
     alive.current = true;
@@ -477,6 +616,9 @@ export default function PlayScreen() {
     glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
+    // Setarile playerului (quality/renderDistance/graphicsLevel) sunt deja incarcate la acest
+    // punct (vezi canStartGL - GLView nu se monteaza decat dupa ce settingsLoaded e true),
+    // deci jocul porneste direct cu ele aplicate, fara un "jump" vizual ulterior.
     renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
     renderer.setSize(w, h);
     rendererRef.current = renderer as any;
@@ -579,7 +721,6 @@ export default function PlayScreen() {
       camPolar.current = preserved.camPolar;
       lastCamPolar.current = preserved.camPolar;
       camDist.current = preserved.camDist;
-      lastCamDist.current = preserved.camDist;
       preservedStateRef.current = null;
     } else {
       // Playerul apare EXACT la pozitia si orientarea Spawn Point-ului initial (punctul 9 din cerinta).
@@ -632,12 +773,9 @@ export default function PlayScreen() {
         s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
       }
 
-      // Miscare jucator, relativa la directia camerei (doar swipe/pan controleaza camera).
+      // Miscare jucator, relativa la directia camerei (doar swipe pe zona camerei o roteste).
       // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
       // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
-      // camForward e vectorul "inainte" al camerei; adaugam +jv.y * camForward (nu -jv.y)
-      // ca "in jos pe joystick" (jv.y pozitiv) sa impinga in directia opusa lui camForward
-      // prin semnul din spatele calcului de mai jos - vezi nota linia urmatoare.
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
@@ -704,48 +842,6 @@ export default function PlayScreen() {
     setReady(true);
   };
 
-  const onJoyStart = (e: any) => {
-    const { x, y } = e.nativeEvent;
-    setJoyOrigin({ x, y });
-    setJoyVisible(true);
-    joyActive.current = true;
-  };
-  const onJoyMove = (e: any) => {
-    if (!joyActive.current) return;
-    const { x, y } = e.nativeEvent;
-    let dx = x - joyOrigin.x, dy = y - joyOrigin.y;
-    const dist = Math.min(JOYSTICK_RADIUS, Math.hypot(dx, dy));
-    const ang = Math.atan2(dy, dx);
-    const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
-    setJoyKnob({ x: kx, y: ky });
-    // ky pozitiv = deget tras in jos fata de centrul joystick-ului (coordonate ecran standard)
-    joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
-  };
-  const onJoyEnd = () => {
-    joyActive.current = false;
-    joyVec.current = { x: 0, y: 0 };
-    setJoyKnob({ x: 0, y: 0 });
-    setJoyVisible(false);
-  };
-  const onJoyStateChange = (e: any) => {
-    const st = e.nativeEvent.state;
-    if (st === State.BEGAN) onJoyStart(e);
-    else if (st === State.END || st === State.CANCELLED || st === State.FAILED) onJoyEnd();
-  };
-
-  const onCamPan = (e: any) => {
-    const { translationX, translationY } = e.nativeEvent;
-    camAngle.current = lastCamAngle.current - translationX * 0.008;
-    camPolar.current = Math.max(0.4, Math.min(Math.PI - 0.15, lastCamPolar.current - translationY * 0.006));
-  };
-  const onCamPanState = (e: any) => {
-    if (e.nativeEvent.oldState === State.ACTIVE) { lastCamAngle.current = camAngle.current; lastCamPolar.current = camPolar.current; }
-  };
-  const onCamPinch = (e: any) => {
-    camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, lastCamDist.current / e.nativeEvent.scale));
-  };
-  const onCamPinchState = (e: any) => { if (e.nativeEvent.oldState === State.ACTIVE) lastCamDist.current = camDist.current; };
-
   // Respawn: foloseste checkpoint-ul activ AL ACESTUI PLAYER daca exista unul (punctul 6 din
   // cerinta); altfel cade pe spawn-ul initial al jocului. Reface si orientarea (ry), nu doar
   // pozitia, la fel ca la intrarea initiala in joc.
@@ -794,7 +890,7 @@ export default function PlayScreen() {
 
   return (
     <View style={styles.root}>
-      {Platform.OS === "web" || !game ? (
+      {Platform.OS === "web" || !canStartGL ? (
         <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
           <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
           <Text style={styles.webText}>{game?.title || ""}</Text>
@@ -806,31 +902,57 @@ export default function PlayScreen() {
         // creeaza un context GL nou, cu suprafata EGL alocata corect la
         // orientarea curenta. Starea jocului (pozitie, unghi camera) e pastrata
         // si restaurata in onContextCreate, ca userul sa nu simta un reset vizual.
+        //
+        // canStartGL tine GLView-ul nemontat pana cand setarile playerului s-au
+        // incarcat (settingsLoaded) - punctul 4 din cerinta: incarca -> aplica ->
+        // abia apoi porneste jocul, nu invers.
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
+      {/* Zona camerei (dreapta): swipe = rotire, al 2-lea deget = zoom. Propriul touch
+          identifier, complet independent de joystick - vezi handler-ele de mai sus. */}
       {ready && Platform.OS !== "web" ? (
-        <PinchGestureHandler onGestureEvent={onCamPinch} onHandlerStateChange={onCamPinchState}>
-          <PanGestureHandler onGestureEvent={onCamPan} onHandlerStateChange={onCamPanState} minPointers={1} maxPointers={1}>
-            <View style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]} />
-          </PanGestureHandler>
-        </PinchGestureHandler>
+        <View
+          style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]}
+          onLayout={e => {
+            const { x, y, width, height } = e.nativeEvent.layout;
+            camZoneLayout.current = { x, y, w: width, h: height };
+          }}
+          onStartShouldSetResponder={() => true}
+          onResponderGrant={onCamResponderGrant}
+          onResponderMove={onCamResponderMove}
+          onResponderRelease={onCamResponderEnd}
+          onResponderTerminate={onCamResponderEnd}
+          onResponderTerminationRequest={() => false}
+        />
       ) : null}
 
+      {/* Zona joystick-ului (stanga-jos): propriul touch identifier, complet independenta
+          de zona camerei - cele doua pot fi active simultan, fiecare cu degetul ei. */}
       {ready && Platform.OS !== "web" ? (
-        <PanGestureHandler onGestureEvent={onJoyMove} onHandlerStateChange={onJoyStateChange} minPointers={1} maxPointers={1}>
-          <View style={styles.joystickZone}>
-            {joyVisible ? (
-              <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
-                <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
-              </View>
-            ) : (
-              <View style={styles.joyHint} pointerEvents="none">
-                <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
-              </View>
-            )}
-          </View>
-        </PanGestureHandler>
+        <View
+          style={styles.joystickZone}
+          onLayout={e => {
+            const { x, y, width, height } = e.nativeEvent.layout;
+            joyZoneLayout.current = { x, y, w: width, h: height };
+          }}
+          onStartShouldSetResponder={() => true}
+          onResponderGrant={onJoyResponderGrant}
+          onResponderMove={onJoyResponderMove}
+          onResponderRelease={onJoyResponderEnd}
+          onResponderTerminate={onJoyResponderEnd}
+          onResponderTerminationRequest={() => false}
+        >
+          {joyVisible ? (
+            <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
+              <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
+            </View>
+          ) : (
+            <View style={styles.joyHint} pointerEvents="none">
+              <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
+            </View>
+          )}
+        </View>
       ) : null}
 
       <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
@@ -868,17 +990,17 @@ export default function PlayScreen() {
               <Text style={styles.settingLabel}>Viziune</Text>
               <View style={styles.qualityRow}>
                 {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
-                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => setQuality(q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
+                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
                     <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
                   </Pressable>
                 ))}
               </View>
 
               <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
-              <LevelPicker value={graphicsLevel} onChange={setGraphicsLevel} testIDPrefix="play-graphics" />
+              <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
 
               <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
-              <LevelPicker value={renderLevel} onChange={setRenderLevel} testIDPrefix="play-render" />
+              <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
 
               <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
                 <Text style={styles.menuCloseBtnText}>Close</Text>
