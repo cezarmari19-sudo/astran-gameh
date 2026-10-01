@@ -10,11 +10,12 @@ import * as ScreenOrientation from "expo-screen-orientation";
 import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
-import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE } from "@/src/studio/sceneShared";
+import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE, spawnKindOf } from "@/src/studio/sceneShared";
 import { PhysicsWorld, MaterialDef, DEFAULT_MATERIAL, PhysicsShapeType } from "@/src/play/physicsWorld";
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
+import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
 // ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
@@ -27,6 +28,19 @@ type ScriptOp = {
   vx?: number; vy?: number; vz?: number;
 };
 type MeshState = { x: number; y: number; z: number; scale: number };
+
+// ---------- Spawn Points & Checkpoints (vezi si sceneShared.ts pentru campurile de pe SceneObj) ----------
+// Reprezentarea "de runtime" a unui Spawn Point/Checkpoint activ (enabled !== false), extrasa
+// o singura data la incarcarea scenei. Nu depinde de niciun numar fix de puncte - poate fi orice
+// numar de Spawn Points/Checkpoints, exact cerinta din Game Studio.
+type SpawnRuntime = {
+  id: string;
+  kind: "spawn" | "checkpoint";
+  initial: boolean;
+  x: number; y: number; z: number;
+  ry: number;    // orientarea (grade) cu care playerul trebuie sa apara la acest punct
+  radius: number; // raza zonei de activare (doar pt checkpoint) / nefolosita pt spawn simplu
+};
 
 function placeMesh(m: THREE.Mesh) {
   const s = m.userData as MeshState;
@@ -110,8 +124,11 @@ const JOYSTICK_RADIUS = 52;
 const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
 const CAM_FIRST_PERSON_THRESHOLD = 0.6;
-
-type GraphicsQuality = "low" | "medium" | "high";
+// Raza zonei de activare a unui Checkpoint, relativa la scala discului sau (vezi geometryFor
+// "spawn" in sceneShared.ts: disc de raza 0.6 * scale). Facuta putin mai mare decat discul
+// vizual, ca activarea sa se simta naturala (nu trebuie calcat exact pe centrul discului).
+const CHECKPOINT_RADIUS_FACTOR = 1.4;
+const CHECKPOINT_MIN_RADIUS = 0.6;
 
 // Numele afisate in Settings. Valorile interne (low/medium/high) raman
 // neschimbate si controleaza in continuare pixel ratio-ul; se schimba doar textul.
@@ -182,11 +199,15 @@ export default function PlayScreen() {
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  // "quality" = Viziunea 1/2/3 (pixel ratio 1 / 1.4 / 2) - vezi nota din useEffect-ul [quality].
-  const [quality, setQuality] = useState<GraphicsQuality>("medium");
-  const [renderLevel, setRenderLevel] = useState(4); // 4 = 60m, ca inainte
+
+  // Setarile PLAYERULUI (Graphics Quality, Render Distance, etc) - persistente, aceleasi in
+  // orice joc, salvate automat la fiecare schimbare (fara buton de Save). Vezi
+  // src/hooks/usePlayerSettings.ts si backend/astran_sandbox/user_settings_routes.py.
+  const { settings: playerSettings, loaded: settingsLoaded, update: updateSetting } = usePlayerSettings();
+  const quality = playerSettings.graphics_quality;
+  const renderLevel = playerSettings.render_level;
+  const graphicsLevel = playerSettings.graphics_level;
   const renderDistance = RENDER_DISTANCES[renderLevel - 1];
-  const [graphicsLevel, setGraphicsLevel] = useState(5); // 5 = aspectul de dinainte
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
   // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
@@ -199,8 +220,22 @@ export default function PlayScreen() {
   const scriptOpsRef = useRef<ScriptOp[]>([]);
   const avatarBodyRef = useRef<AvatarBody>(defaultBody());
   const characterPartsRef = useRef<Part[] | null>(null);
-  const spawnPointRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+  // Spawn-ul initial al jocului (rezolvat o data la incarcarea scenei - vezi onContextCreate).
+  // Are mereu o valoare valida (fallback (0,0,0) daca jocul nu are niciun Spawn Point configurat -
+  // compatibil cu jocurile foarte vechi, dinainte de aceasta functionalitate).
+  const spawnPointRef = useRef<{ x: number; y: number; z: number; ry: number }>({ x: 0, y: 0, z: 0, ry: 0 });
+  // Toate Checkpoint-urile active (enabled !== false) din scena - oricate, nu doar unul.
+  const checkpointsRef = useRef<SpawnRuntime[]>([]);
+  // Checkpoint-ul activ AL ACESTUI PLAYER in sesiunea curenta - independent de alti jucatori,
+  // pentru ca fiecare client isi tine propria stare locala (nu exista sincronizare de server
+  // pentru progresul de checkpoint-uri). null = niciun checkpoint activat inca.
+  const activeCheckpointRef = useRef<SpawnRuntime | null>(null);
   const solidBoxesRef = useRef<AABB[]>([]);
+
+  // Asteptam setarile playerului ca sa pornim Play Mode cu ele deja aplicate (cerinta punctul
+  // 4: "incarca setarile -> aplica -> apoi porneste jocul", nu default-uri urmate de un "sarit"
+  // vizual cand ajunge raspunsul). O mica intarziere, o singura data, la intrarea in orice joc.
+  const canStartGL = settingsLoaded && !!game;
 
   // Three.js
   const rendererRef = useRef<Renderer | null>(null);
@@ -450,6 +485,9 @@ export default function PlayScreen() {
     glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
+    // Setarile playerului (quality/renderDistance/graphicsLevel) sunt deja incarcate la acest
+    // punct (vezi canStartGL - GLView nu se monteaza decat dupa ce settingsLoaded e true),
+    // deci jocul porneste direct cu ele aplicate, fara un "jump" vizual ulterior.
     renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
     renderer.setSize(w, h);
     rendererRef.current = renderer as any;
@@ -492,10 +530,31 @@ export default function PlayScreen() {
     // Intra si in fizica, implicit FIXE (Anchored = true) - opresc jucatorul si orice obiect
     // mobil creat de script, exact ca inainte; devin mobile doar daca scriptul le schimba
     // explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
+    //
+    // Spawn Points si Checkpoint-urile (o.type === SPAWN_TYPE) sunt marker-e speciale: nu intra
+    // niciodata in fizica de obiecte mobile (physics.addStudioObject le ignora oricum), dar de-
+    // acum RESPECTA Visible si Solid ca orice alt obiect din scena (inainte erau mereu invizibile
+    // si fara collision, indiferent de proprietati) - vezi punctul 9 din cerinta.
     const boxes: AABB[] = [];
-    let spawn = { x: 0, y: 0, z: 0 };
+    const spawns: SpawnRuntime[] = [];
     (game.scene?.objects || []).forEach((o: SceneObj) => {
-      if (o.type === SPAWN_TYPE) { spawn = { x: o.x, y: o.y, z: o.z }; return; }
+      if (o.type === SPAWN_TYPE) {
+        if (o.enabled !== false) {
+          spawns.push({
+            id: o.id,
+            kind: spawnKindOf(o),
+            initial: o.initial === true,
+            x: o.x, y: o.y, z: o.z,
+            ry: o.ry ?? 0,
+            radius: Math.max(CHECKPOINT_MIN_RADIUS, 0.6 * (o.scale ?? 1) * CHECKPOINT_RADIUS_FACTOR),
+          });
+        }
+        // Implicit Spawn Point/Checkpoint e invizibil si fara collision (comportamentul de
+        // dinainte); devine vizibil/solid DOAR daca creatorul seteaza explicit Visible/Solid = true.
+        if (o.visible === true) scene.add(buildMesh(o));
+        if (o.solid === true) boxes.push(aabbFor(o));
+        return;
+      }
       const isVisible = o.visible !== false;
       if (isVisible) scene.add(buildMesh(o));
       const isSolid = o.solid !== false;
@@ -503,7 +562,21 @@ export default function PlayScreen() {
       physics.addStudioObject(o);
     });
     solidBoxesRef.current = boxes;
-    spawnPointRef.current = spawn;
+
+    // Rezolvarea spawnului initial: primul Spawn Point (nu Checkpoint) marcat initial=true.
+    // Daca niciunul nu e marcat asa - joc vechi salvat inainte de aceasta functionalitate, sau
+    // configurare incompleta - cade pe primul Spawn Point activ gasit, iar daca jocul nu are
+    // niciun Spawn Point deloc, foloseste (0,0,0) ca inainte de aceasta functionalitate.
+    const spawnKindPoints = spawns.filter(p => p.kind === "spawn");
+    const resolvedInitial = spawnKindPoints.find(p => p.initial) ?? spawnKindPoints[0] ?? null;
+    const initial = resolvedInitial
+      ? { x: resolvedInitial.x, y: resolvedInitial.y, z: resolvedInitial.z, ry: resolvedInitial.ry }
+      : { x: 0, y: 0, z: 0, ry: 0 };
+    spawnPointRef.current = initial;
+    checkpointsRef.current = spawns.filter(p => p.kind === "checkpoint");
+    // Fiecare intrare noua in joc (fiecare montare a acestui ecran) porneste fara niciun
+    // checkpoint activ - playerul trebuie sa il re-activeze parcurgand zona lui din nou.
+    activeCheckpointRef.current = null;
 
     // Daca venim dintr-o remontare (schimbare de orientare), restauram starea
     // jocului din instanta veche in loc sa trimitem jucatorul inapoi la spawn.
@@ -520,8 +593,10 @@ export default function PlayScreen() {
       lastCamDist.current = preserved.camDist;
       preservedStateRef.current = null;
     } else {
-      pos.current.set(spawn.x, spawn.y, spawn.z);
+      // Playerul apare EXACT la pozitia si orientarea Spawn Point-ului initial (punctul 9 din cerinta).
+      pos.current.set(initial.x, initial.y, initial.z);
       velY.current = 0;
+      facingAngle.current = (initial.ry * Math.PI) / 180;
     }
 
     const playerGroup = buildPlayerVisual();
@@ -598,6 +673,18 @@ export default function PlayScreen() {
       if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
       pos.current.y = nextY;
 
+      // Activarea checkpoint-urilor: cand playerul intra in zona unui checkpoint, acesta devine
+      // noul punct de respawn AL ACESTUI PLAYER (vezi activeCheckpointRef mai sus - independent
+      // de alti jucatori). Nu conteaza ordinea in care sunt parcurse - oricare checkpoint activ
+      // a carui zona o calci devine cel curent, exact ca cerinta punctelor 4-5.
+      for (const cp of checkpointsRef.current) {
+        const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
+        if (dx * dx + dz * dz <= cp.radius * cp.radius) {
+          if (activeCheckpointRef.current?.id !== cp.id) activeCheckpointRef.current = cp;
+          break;
+        }
+      }
+
       if (playerGroupRef.current) {
         playerGroupRef.current.position.copy(pos.current);
         playerGroupRef.current.rotation.y = facingAngle.current;
@@ -670,10 +757,14 @@ export default function PlayScreen() {
   };
   const onCamPinchState = (e: any) => { if (e.nativeEvent.oldState === State.ACTIVE) lastCamDist.current = camDist.current; };
 
+  // Respawn: foloseste checkpoint-ul activ AL ACESTUI PLAYER daca exista unul (punctul 6 din
+  // cerinta); altfel cade pe spawn-ul initial al jocului. Reface si orientarea (ry), nu doar
+  // pozitia, la fel ca la intrarea initiala in joc.
   function doRespawn() {
-    const sp = spawnPointRef.current;
-    pos.current.set(sp.x, sp.y, sp.z);
+    const target = activeCheckpointRef.current ?? spawnPointRef.current;
+    pos.current.set(target.x, target.y, target.z);
     velY.current = 0;
+    facingAngle.current = (target.ry * Math.PI) / 180;
     setShowMenu(false);
   }
   async function doLeave() {
@@ -714,7 +805,7 @@ export default function PlayScreen() {
 
   return (
     <View style={styles.root}>
-      {Platform.OS === "web" || !game ? (
+      {Platform.OS === "web" || !canStartGL ? (
         <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
           <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
           <Text style={styles.webText}>{game?.title || ""}</Text>
@@ -726,6 +817,10 @@ export default function PlayScreen() {
         // creeaza un context GL nou, cu suprafata EGL alocata corect la
         // orientarea curenta. Starea jocului (pozitie, unghi camera) e pastrata
         // si restaurata in onContextCreate, ca userul sa nu simta un reset vizual.
+        //
+        // canStartGL tine GLView-ul nemontat pana cand setarile playerului s-au
+        // incarcat (settingsLoaded) - punctul 4 din cerinta: incarca -> aplica ->
+        // abia apoi porneste jocul, nu invers.
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
@@ -788,17 +883,17 @@ export default function PlayScreen() {
               <Text style={styles.settingLabel}>Viziune</Text>
               <View style={styles.qualityRow}>
                 {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
-                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => setQuality(q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
+                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
                     <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
                   </Pressable>
                 ))}
               </View>
 
               <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
-              <LevelPicker value={graphicsLevel} onChange={setGraphicsLevel} testIDPrefix="play-graphics" />
+              <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
 
               <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
-              <LevelPicker value={renderLevel} onChange={setRenderLevel} testIDPrefix="play-render" />
+              <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
 
               <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
                 <Text style={styles.menuCloseBtnText}>Close</Text>
