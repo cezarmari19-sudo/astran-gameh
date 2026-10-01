@@ -29,16 +29,13 @@ type ScriptOp = {
 type MeshState = { x: number; y: number; z: number; scale: number };
 
 // ---------- Spawn Points & Checkpoints (vezi si sceneShared.ts pentru campurile de pe SceneObj) ----------
-// Reprezentarea "de runtime" a unui Spawn Point/Checkpoint activ (enabled !== false), extrasa
-// o singura data la incarcarea scenei. Nu depinde de niciun numar fix de puncte - poate fi orice
-// numar de Spawn Points/Checkpoints, exact cerinta din Game Studio.
 type SpawnRuntime = {
   id: string;
   kind: "spawn" | "checkpoint";
   initial: boolean;
   x: number; y: number; z: number;
-  ry: number;    // orientarea (grade) cu care playerul trebuie sa apara la acest punct
-  radius: number; // raza zonei de activare (doar pt checkpoint) / nefolosita pt spawn simplu
+  ry: number;
+  radius: number;
 };
 
 function placeMesh(m: THREE.Mesh) {
@@ -51,7 +48,6 @@ function disposeMesh(m: THREE.Mesh) {
   (m.material as THREE.Material).dispose();
 }
 function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: PhysicsWorld, op: ScriptOp) {
-  // "world" si "material" nu au un mesh asociat: schimba starea globala a lumii fizice.
   if (op.op === "world") {
     if (op.gravity !== undefined) physics.setGravity(op.gravity);
     if (op.air !== undefined) physics.setAirDensity(op.air);
@@ -79,8 +75,6 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
     m.userData = state;
     scene.add(m);
     meshes.set(op.id, m);
-    // Implicit piesele create de script sunt FIXE (Anchored = true), la fel ca inainte
-    // de fizica reala - devin mobile doar daca scriptul seteaza explicit Anchored = false.
     physics.upsert({
       id: op.id, type: shapeType, x: state.x, y: state.y, z: state.z, scale: state.scale,
       anchored: op.anchored ?? true, collide: op.collide, materialId: op.material,
@@ -100,8 +94,6 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
   if (op.scale !== undefined) s.scale = op.scale;
   if (op.color) (m.material as THREE.MeshStandardMaterial).color.set(op.color);
   if (op.type) { m.geometry.dispose(); m.geometry = geometryFor(op.type); }
-  // Corpul mobil isi ia pozitia din fizica in fiecare cadru (vezi bucla de render);
-  // aici doar aplicam pe corpul fizic schimbarile explicite venite din script.
   if (op.x !== undefined || op.y !== undefined || op.z !== undefined) physics.setPosition(op.id, op.x, op.y, op.z);
   if (op.scale !== undefined) physics.setScale(op.id, op.scale);
   if (op.type) physics.setShapeType(op.id, op.type as PhysicsShapeType);
@@ -109,8 +101,6 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
   if (op.anchored !== undefined) physics.setAnchored(op.id, op.anchored);
   if (op.collide !== undefined) physics.setCollide(op.id, op.collide);
   if (op.vx !== undefined || op.vy !== undefined || op.vz !== undefined) physics.setVelocity(op.id, op.vx, op.vy, op.vz);
-  // Daca e mobil, pozitia vizuala reala vine din fizica la urmatorul cadru - nu suprascriem
-  // aici cu placeMesh() valorile explicite de mai sus, ca sa nu "sara" inainte de primul step.
   if (physics.isAnchored(op.id)) placeMesh(m);
 }
 
@@ -123,28 +113,17 @@ const JOYSTICK_RADIUS = 52;
 const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
 const CAM_FIRST_PERSON_THRESHOLD = 0.6;
-// Raza zonei de activare a unui Checkpoint, relativa la scala discului sau (vezi geometryFor
-// "spawn" in sceneShared.ts: disc de raza 0.6 * scale). Facuta putin mai mare decat discul
-// vizual, ca activarea sa se simta naturala (nu trebuie calcat exact pe centrul discului).
 const CHECKPOINT_RADIUS_FACTOR = 1.4;
 const CHECKPOINT_MIN_RADIUS = 0.6;
 
-// Numele afisate in Settings. Valorile interne (low/medium/high) raman
-// neschimbate si controleaza in continuare pixel ratio-ul; se schimba doar textul.
 const QUALITY_LABELS: Record<GraphicsQuality, string> = {
   low: "Viziunea 1",
   medium: "Viziunea 2",
   high: "Viziunea 3",
 };
 
-// ---------- Render: 10 niveluri de distanta de randare (metri) ----------
-// Nivelul 4 = 60m, adica valoarea de dinainte. Vechile 30/60/100/150 sunt nivelurile 2/4/6/8.
 const RENDER_DISTANCES = [20, 30, 45, 60, 80, 100, 125, 150, 200, 250];
 
-// ---------- Grafica: 10 niveluri de calitate a iluminarii ----------
-// Nivelul 5 = exact aspectul de dinainte (ambient 0.55 + directionala 1.1).
-// Sub 5: iluminare mai plata. Peste 5: mai bogata (lumina de cer/sol + lumina de umplere).
-// Nu foloseste pixel ratio: acela ramane la "Viziune" (vezi nota din useEffect-ul [quality]).
 type Lights = {
   ambient: THREE.AmbientLight;
   dir: THREE.DirectionalLight;
@@ -152,16 +131,16 @@ type Lights = {
   fill: THREE.DirectionalLight;
 };
 const GRAPHICS_LEVELS: { ambient: number; dir: number; hemi: number; fill: number }[] = [
-  { ambient: 1.0,  dir: 0.0,  hemi: 0.0,  fill: 0.0 },  // 1
-  { ambient: 0.85, dir: 0.45, hemi: 0.0,  fill: 0.0 },  // 2
-  { ambient: 0.7,  dir: 0.8,  hemi: 0.0,  fill: 0.0 },  // 3
-  { ambient: 0.6,  dir: 1.0,  hemi: 0.0,  fill: 0.0 },  // 4
-  { ambient: 0.55, dir: 1.1,  hemi: 0.0,  fill: 0.0 },  // 5 (ca inainte)
-  { ambient: 0.45, dir: 1.1,  hemi: 0.25, fill: 0.0 },  // 6
-  { ambient: 0.4,  dir: 1.15, hemi: 0.3,  fill: 0.25 }, // 7
-  { ambient: 0.35, dir: 1.2,  hemi: 0.35, fill: 0.35 }, // 8
-  { ambient: 0.3,  dir: 1.25, hemi: 0.4,  fill: 0.45 }, // 9
-  { ambient: 0.25, dir: 1.3,  hemi: 0.45, fill: 0.55 }, // 10
+  { ambient: 1.0,  dir: 0.0,  hemi: 0.0,  fill: 0.0 },
+  { ambient: 0.85, dir: 0.45, hemi: 0.0,  fill: 0.0 },
+  { ambient: 0.7,  dir: 0.8,  hemi: 0.0,  fill: 0.0 },
+  { ambient: 0.6,  dir: 1.0,  hemi: 0.0,  fill: 0.0 },
+  { ambient: 0.55, dir: 1.1,  hemi: 0.0,  fill: 0.0 },
+  { ambient: 0.45, dir: 1.1,  hemi: 0.25, fill: 0.0 },
+  { ambient: 0.4,  dir: 1.15, hemi: 0.3,  fill: 0.25 },
+  { ambient: 0.35, dir: 1.2,  hemi: 0.35, fill: 0.35 },
+  { ambient: 0.3,  dir: 1.25, hemi: 0.4,  fill: 0.45 },
+  { ambient: 0.25, dir: 1.3,  hemi: 0.45, fill: 0.55 },
 ];
 function applyGraphicsLevel(lights: Lights, level: number) {
   const cfg = GRAPHICS_LEVELS[Math.max(1, Math.min(10, level)) - 1];
@@ -171,7 +150,6 @@ function applyGraphicsLevel(lights: Lights, level: number) {
   lights.fill.intensity = cfg.fill;
 }
 
-// Selector cu 10 puncte: casutele 1..valoare sunt aprinse, cea aleasa e plina.
 function LevelPicker({ value, onChange, testIDPrefix }: { value: number; onChange: (n: number) => void; testIDPrefix: string }) {
   return (
     <View style={styles.levelRow}>
@@ -201,9 +179,6 @@ export default function PlayScreen() {
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Setarile PLAYERULUI (Graphics Quality, Render Distance, etc) - persistente, aceleasi in
-  // orice joc, salvate automat la fiecare schimbare (fara buton de Save). Vezi
-  // src/hooks/usePlayerSettings.ts si backend/astran_sandbox/user_settings_routes.py.
   const { settings: playerSettings, loaded: settingsLoaded, update: updateSetting } = usePlayerSettings();
   const quality = playerSettings.graphics_quality;
   const renderLevel = playerSettings.render_level;
@@ -211,42 +186,24 @@ export default function PlayScreen() {
   const renderDistance = RENDER_DISTANCES[renderLevel - 1];
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
-  // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
-  // orientare a device-ului (nu la orice mica variatie de screenW/screenH,
-  // gen bare de sistem). Vezi useEffect-ul de mai jos, bazat pe evenimentul
-  // nativ de orientare, nu pe screenW/screenH.
   const [glMountKey, setGlMountKey] = useState(0);
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
   const avatarBodyRef = useRef<AvatarBody>(defaultBody());
   const characterPartsRef = useRef<Part[] | null>(null);
-  // Spawn-ul initial al jocului (rezolvat o data la incarcarea scenei - vezi onContextCreate).
-  // Are mereu o valoare valida (fallback (0,0,0) daca jocul nu are niciun Spawn Point configurat -
-  // compatibil cu jocurile foarte vechi, dinainte de aceasta functionalitate).
   const spawnPointRef = useRef<{ x: number; y: number; z: number; ry: number }>({ x: 0, y: 0, z: 0, ry: 0 });
-  // Toate Checkpoint-urile active (enabled !== false) din scena - oricate, nu doar unul.
   const checkpointsRef = useRef<SpawnRuntime[]>([]);
-  // Checkpoint-ul activ AL ACESTUI PLAYER in sesiunea curenta - independent de alti jucatori,
-  // pentru ca fiecare client isi tine propria stare locala (nu exista sincronizare de server
-  // pentru progresul de checkpoint-uri). null = niciun checkpoint activat inca.
   const activeCheckpointRef = useRef<SpawnRuntime | null>(null);
   const solidBoxesRef = useRef<AABB[]>([]);
 
-  // Asteptam setarile playerului ca sa pornim Play Mode cu ele deja aplicate (cerinta punctul
-  // 4: "incarca setarile -> aplica -> apoi porneste jocul", nu default-uri urmate de un "sarit"
-  // vizual cand ajunge raspunsul). O mica intarziere, o singura data, la intrarea in orice joc.
   const canStartGL = settingsLoaded && !!game;
 
-  // Three.js
   const rendererRef = useRef<Renderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const lightsRef = useRef<Lights | null>(null);
   const physicsRef = useRef<PhysicsWorld | null>(null);
-  // Referinta catre contextul GL, ca sa putem citi dimensiunile REALE ale
-  // drawing buffer-ului (in pixeli fizici) de fiecare data cand se schimba
-  // orientarea/dimensiunea ecranului - nu doar o data, la creare.
   const glRef = useRef<any>(null);
   const playerGroupRef = useRef<THREE.Group | null>(null);
   const playerHalfHeight = useRef(PLAYER_HALF_HEIGHT_DEFAULT);
@@ -257,7 +214,6 @@ export default function PlayScreen() {
   const velY = useRef(0);
   const facingAngle = useRef(0);
 
-  // Camera: DOAR swipe + pinch. Fara giroscop/inclinare.
   const camAngle = useRef(0.0);
   const camPolar = useRef(1.15);
   const camDist = useRef(4.5);
@@ -265,30 +221,28 @@ export default function PlayScreen() {
   const lastCamPolar = useRef(1.15);
   const firstPerson = useRef(false);
 
-  // La remontarea GLView-ului (schimbare de orientare) contextul GL, scena,
-  // camera si renderer-ul se recreeaza de la zero. Ca sa nu se vada un reset
-  // (jucatorul sarind la spawn, camera revenind la unghiul implicit), pastram
-  // aici pozitia curenta si unghiul camerei INAINTE de remontare, si le
-  // restauram in noul onContextCreate. Ref, nu state: nu trebuie sa declanseze
-  // re-render, doar sa supravietuiasca intre demontare/montare.
   const preservedStateRef = useRef<{
     pos: THREE.Vector3; velY: number; facingAngle: number;
     camAngle: number; camPolar: number; camDist: number;
   } | null>(null);
 
   // ============================================================================================
-  // MULTI-TOUCH REAL: joystick-ul si camera folosesc fiecare propriul touch identifier, complet
-  // independente unul de altul. Nu folosim PanGestureHandler/PinchGestureHandler (ale caror
-  // recognizers pot ajunge sa se excluda reciproc pe doua zone diferite) - citim direct
-  // nativeEvent.touches de la React Native si urmarim manual, pe identifier, exact care deget
-  // controleaza joystick-ul si care controleaza camera. Eliberarea unuia nu afecteaza deloc
-  // celalalt, pentru ca fiecare zona isi tine propriul set de identificatori si ignora orice
-  // touch care nu-i apartine.
+  // MULTI-TOUCH REAL
+  // ============================================================================================
+  // IMPORTANT: folosim onTouchStart/onTouchMove/onTouchEnd/onTouchCancel (evenimentele RAW de
+  // touch), NU onStartShouldSetResponder/onResponderGrant ("Gesture Responder System" al RN).
+  // Responder System-ul are o regula fixa: la un moment dat exista UN SINGUR responder activ,
+  // global, in toata aplicatia - primul deget care atinge ecranul "castiga" acel responder, iar
+  // al doilea deget (chiar daca atinge o alta zona) nu primeste propriul flux de evenimente
+  // decat daca primul renunta la responder (negociere explicita de transfer, nu simultaneitate
+  // reala). Asta era cauza exacta a bug-ului: joystick SAU camera, niciodata ambele.
+  //
+  // onTouchStart/onTouchMove/onTouchEnd sunt un nivel mai jos: RN le livreaza fiecarei View
+  // in parte pe baza hit-testing-ului PER DEGET (exact ca touch events din DOM), fara nicio
+  // negociere de "un singur proprietar". Doua View-uri separate, in zone fara suprapunere,
+  // primesc fiecare propriul flux de evenimente, pentru propriul deget, simultan.
   // ============================================================================================
 
-  // Pozitia absoluta pe ecran a fiecarei zone (masurata prin onLayout) - necesara ca sa
-  // convertim coordonatele absolute (pageX/pageY) ale unui touch in coordonate relative la
-  // zona lui, indiferent cate alte degete sunt active oriunde altundeva pe ecran.
   const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
   const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
 
@@ -307,13 +261,18 @@ export default function PlayScreen() {
   const camPinchStartDist = useRef<number | null>(null);
   const camPinchStartCamDist = useRef(4.5);
 
-  function touchesOf(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
+  function allTouches(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
     return (evt?.nativeEvent?.touches as any[]) ?? [];
   }
+  function changedTouches(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
+    return (evt?.nativeEvent?.changedTouches as any[]) ?? [];
+  }
 
-  const onJoyResponderGrant = (evt: any) => {
+  // ---------- Joystick ----------
+  const onJoyTouchStart = (evt: any) => {
     if (joyTouchId.current !== null) return; // deja avem un deget pe joystick - ignoram orice altul nou in zona asta
-    const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
+    const t = changedTouches(evt)[0];
+    if (!t) return;
     joyTouchId.current = t.identifier;
     const ox = t.pageX - joyZoneLayout.current.x;
     const oy = t.pageY - joyZoneLayout.current.y;
@@ -322,9 +281,9 @@ export default function PlayScreen() {
     setJoyVisible(true);
     joyActive.current = true;
   };
-  const onJoyResponderMove = (evt: any) => {
+  const onJoyTouchMove = (evt: any) => {
     if (joyTouchId.current === null) return;
-    const t = touchesOf(evt).find(x => x.identifier === joyTouchId.current);
+    const t = allTouches(evt).find(x => x.identifier === joyTouchId.current);
     if (!t) return;
     const zx = t.pageX - joyZoneLayout.current.x;
     const zy = t.pageY - joyZoneLayout.current.y;
@@ -333,13 +292,12 @@ export default function PlayScreen() {
     const ang = Math.atan2(dy0, dx0);
     const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
     setJoyKnob({ x: kx, y: ky });
-    // ky pozitiv = deget tras in jos fata de centrul joystick-ului (coordonate ecran standard)
     joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
   };
-  const onJoyResponderEnd = (evt: any) => {
-    const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
-    // daca evenimentul vine de la un alt deget (nu ar trebui, dar verificam oricum), il ignoram
-    if (changed.length > 0 && joyTouchId.current !== null && !changed.some(c => c.identifier === joyTouchId.current)) return;
+  const onJoyTouchEnd = (evt: any) => {
+    const changed = changedTouches(evt);
+    if (joyTouchId.current === null) return;
+    if (!changed.some(c => c.identifier === joyTouchId.current)) return; // nu e degetul nostru
     joyTouchId.current = null;
     joyActive.current = false;
     joyVec.current = { x: 0, y: 0 };
@@ -347,28 +305,28 @@ export default function PlayScreen() {
     setJoyVisible(false);
   };
 
-  const onCamResponderGrant = (evt: any) => {
-    if (camTouchIds.current.length >= 2) return; // doar 1 (rotire) sau 2 degete (pinch) - un al treilea se ignora
-    const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
-    camTouchIds.current.push(t.identifier);
-    camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-    camTouchStartPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-
+  // ---------- Camera ----------
+  const onCamTouchStart = (evt: any) => {
+    const changed = changedTouches(evt);
+    for (const t of changed) {
+      if (camTouchIds.current.length >= 2) break; // doar 1 (rotire) sau 2 degete (pinch)
+      if (camTouchIds.current.includes(t.identifier)) continue;
+      camTouchIds.current.push(t.identifier);
+      camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+      camTouchStartPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+    }
     if (camTouchIds.current.length === 1) {
-      // primul deget: incepe o rotatie noua, fata de pozitia curenta a camerei
       lastCamAngle.current = camAngle.current;
       lastCamPolar.current = camPolar.current;
     } else if (camTouchIds.current.length === 2) {
-      // al doilea deget a intrat: trecem pe pinch-to-zoom; rotatia se opreste cat timp
-      // sunt 2 degete (la fel ca inainte, cand PanGestureHandler avea maxPointers={1})
       const [idA, idB] = camTouchIds.current;
       const a = camTouchPos.current.get(idA)!, b = camTouchPos.current.get(idB)!;
       camPinchStartDist.current = Math.hypot(a.x - b.x, a.y - b.y);
       camPinchStartCamDist.current = camDist.current;
     }
   };
-  const onCamResponderMove = (evt: any) => {
-    const touches = touchesOf(evt);
+  const onCamTouchMove = (evt: any) => {
+    const touches = allTouches(evt);
     for (const tid of camTouchIds.current) {
       const t = touches.find(x => x.identifier === tid);
       if (t) camTouchPos.current.set(tid, { x: t.pageX, y: t.pageY });
@@ -392,8 +350,8 @@ export default function PlayScreen() {
       camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, camPinchStartCamDist.current / scale));
     }
   };
-  const onCamResponderEnd = (evt: any) => {
-    const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
+  const onCamTouchEnd = (evt: any) => {
+    const changed = changedTouches(evt);
     for (const c of changed) {
       const idx = camTouchIds.current.indexOf(c.identifier);
       if (idx !== -1) {
@@ -404,8 +362,6 @@ export default function PlayScreen() {
     }
     camPinchStartDist.current = null;
     if (camTouchIds.current.length === 1) {
-      // a ramas un singur deget (celalalt a fost ridicat in timpul unui pinch) - re-pornim
-      // rotatia de la pozitia curenta a acestui deget, ca sa nu sara camera brusc
       const tid = camTouchIds.current[0];
       const pos2 = camTouchPos.current.get(tid);
       if (pos2) camTouchStartPos.current.set(tid, pos2);
@@ -424,7 +380,6 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // ---------- rotatia ecranului: Play Mode elibereaza orientarea, si o reblocheaza pe portrait la iesire ----------
   useEffect(() => {
     if (Platform.OS === "web") return;
     ScreenOrientation.unlockAsync().catch(() => {});
@@ -433,27 +388,6 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // ---------- remontare GLView la FIECARE schimbare reala de orientare ----------
-  // Pe Android, expo-gl leaga suprafata EGL de dimensiunile View-ului la
-  // momentul montarii. Redimensionarea view-ului FARA remontare nu garanteaza
-  // realocarea completa a acelei suprafete pe toate device-urile, iar randarea
-  // ajunge sa foloseasca un buffer cu dimensiunea/orientarea veche.
-  //
-  // IMPORTANT: nu putem detecta asta comparand doar screenW > screenH (boolean
-  // "e landscape?"), pentru ca useWindowDimensions() intoarce ACEEASI pereche
-  // de valori atat pentru LANDSCAPE_LEFT cat si pentru LANDSCAPE_RIGHT (e doar
-  // telefonul intors 180 fata de axa lunga, dimensiunile logice raman identice).
-  // Asta inseamna ca o rotire directa stanga<->dreapta (fara sa treci prin
-  // portret) nu schimba deloc acel boolean, deci nu declansa remontarea -
-  // exact cauza bug-ului: suprafata EGL ramanea legata de orientarea veche,
-  // iar randarea acoperea doar partea din ecran care se suprapune cu vechea
-  // orientare, restul ramanand nedesenat (negru).
-  //
-  // Solutia tehnica corecta e sa ascultam evenimentul NATIV de orientare
-  // (expo-screen-orientation), care distinge toate cele 4 stari posibile
-  // (PORTRAIT_UP, PORTRAIT_DOWN, LANDSCAPE_LEFT, LANDSCAPE_RIGHT) si sa
-  // remontam GLView-ul de fiecare data cand aceasta valoare se schimba,
-  // indiferent daca e o schimbare portret<->landscape sau landscape<->landscape.
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -461,12 +395,8 @@ export default function PlayScreen() {
     let cancelled = false;
 
     const remountFor = (orientation: ScreenOrientation.Orientation) => {
-      if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
+      if (currentOrientationRef.current === orientation) return;
       currentOrientationRef.current = orientation;
-      // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
-      // context GL (vezi inceputul lui onContextCreate). La primul apel
-      // (montarea initiala a ecranului) inca nu exista o scena activa - nu
-      // salvam nimic, jucatorul porneste normal din spawn.
       if (sceneRef.current) {
         preservedStateRef.current = {
           pos: pos.current.clone(),
@@ -484,8 +414,6 @@ export default function PlayScreen() {
     };
 
     (async () => {
-      // Citim orientarea curenta o data, la montare, ca sa avem o valoare de
-      // start (fara sa declansam remontare - e chiar prima montare a GLView).
       try {
         const initial = await ScreenOrientation.getOrientationAsync();
         if (!cancelled) currentOrientationRef.current = initial;
@@ -502,7 +430,6 @@ export default function PlayScreen() {
     };
   }, []);
 
-  // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -616,9 +543,6 @@ export default function PlayScreen() {
     glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
-    // Setarile playerului (quality/renderDistance/graphicsLevel) sunt deja incarcate la acest
-    // punct (vezi canStartGL - GLView nu se monteaza decat dupa ce settingsLoaded e true),
-    // deci jocul porneste direct cu ele aplicate, fara un "jump" vizual ulterior.
     renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
     renderer.setSize(w, h);
     rendererRef.current = renderer as any;
@@ -650,22 +574,10 @@ export default function PlayScreen() {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
-    // Lumea fizica: gravitatie/densitatea aerului si materialele pornesc de la valorile
-    // implicite (identice cu backend/astran_sandbox/prelude.luau) si sunt schimbate de
-    // operatiile "world"/"material" primite de la server, redate mai jos in bucla de render.
     const physics = new PhysicsWorld();
     physicsRef.current = physics;
     physics.addGroundPlane();
 
-    // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate.
-    // Intra si in fizica, implicit FIXE (Anchored = true) - opresc jucatorul si orice obiect
-    // mobil creat de script, exact ca inainte; devin mobile doar daca scriptul le schimba
-    // explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
-    //
-    // Spawn Points si Checkpoint-urile (o.type === SPAWN_TYPE) sunt marker-e speciale: nu intra
-    // niciodata in fizica de obiecte mobile (physics.addStudioObject le ignora oricum), dar de-
-    // acum RESPECTA Visible si Solid ca orice alt obiect din scena (inainte erau mereu invizibile
-    // si fara collision, indiferent de proprietati) - vezi punctul 9 din cerinta.
     const boxes: AABB[] = [];
     const spawns: SpawnRuntime[] = [];
     (game.scene?.objects || []).forEach((o: SceneObj) => {
@@ -680,8 +592,6 @@ export default function PlayScreen() {
             radius: Math.max(CHECKPOINT_MIN_RADIUS, 0.6 * (o.scale ?? 1) * CHECKPOINT_RADIUS_FACTOR),
           });
         }
-        // Implicit Spawn Point/Checkpoint e invizibil si fara collision (comportamentul de
-        // dinainte); devine vizibil/solid DOAR daca creatorul seteaza explicit Visible/Solid = true.
         if (o.visible === true) scene.add(buildMesh(o));
         if (o.solid === true) boxes.push(aabbFor(o));
         return;
@@ -694,10 +604,6 @@ export default function PlayScreen() {
     });
     solidBoxesRef.current = boxes;
 
-    // Rezolvarea spawnului initial: primul Spawn Point (nu Checkpoint) marcat initial=true.
-    // Daca niciunul nu e marcat asa - joc vechi salvat inainte de aceasta functionalitate, sau
-    // configurare incompleta - cade pe primul Spawn Point activ gasit, iar daca jocul nu are
-    // niciun Spawn Point deloc, foloseste (0,0,0) ca inainte de aceasta functionalitate.
     const spawnKindPoints = spawns.filter(p => p.kind === "spawn");
     const resolvedInitial = spawnKindPoints.find(p => p.initial) ?? spawnKindPoints[0] ?? null;
     const initial = resolvedInitial
@@ -705,12 +611,8 @@ export default function PlayScreen() {
       : { x: 0, y: 0, z: 0, ry: 0 };
     spawnPointRef.current = initial;
     checkpointsRef.current = spawns.filter(p => p.kind === "checkpoint");
-    // Fiecare intrare noua in joc (fiecare montare a acestui ecran) porneste fara niciun
-    // checkpoint activ - playerul trebuie sa il re-activeze parcurgand zona lui din nou.
     activeCheckpointRef.current = null;
 
-    // Daca venim dintr-o remontare (schimbare de orientare), restauram starea
-    // jocului din instanta veche in loc sa trimitem jucatorul inapoi la spawn.
     const preserved = preservedStateRef.current;
     if (preserved) {
       pos.current.copy(preserved.pos);
@@ -723,7 +625,6 @@ export default function PlayScreen() {
       camDist.current = preserved.camDist;
       preservedStateRef.current = null;
     } else {
-      // Playerul apare EXACT la pozitia si orientarea Spawn Point-ului initial (punctul 9 din cerinta).
       pos.current.set(initial.x, initial.y, initial.z);
       velY.current = 0;
       facingAngle.current = (initial.ry * Math.PI) / 180;
@@ -744,10 +645,6 @@ export default function PlayScreen() {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
 
-      // NOTA: aspectul camerei se seteaza la creare (onContextCreate). Schimbarile
-      // de orientare remonteaza GLView-ul (vezi glMountKey si listener-ul de
-      // orientare de mai sus), deci camera se recreeaza cu aspectul corect.
-
       const now = Date.now();
       const dt = Math.min(0.05, (now - lastFrame) / 1000);
       lastFrame = now;
@@ -758,10 +655,6 @@ export default function PlayScreen() {
         nextOp += 1;
       }
 
-      // Avansam simularea fizica (gravitatie, ciocniri, densitate/frecare/elasticitate pe
-      // materialele setate de script) si aducem pozitia/rotatia FIECARUI corp mobil creat
-      // de script inapoi pe mesh-ul lui 3D. Corpurile fixe (Anchored) nu se misca niciodata,
-      // deci nu au nevoie sa fie citite aici.
       physics.step(dt);
       for (const [opId, mesh] of scriptMeshes) {
         if (physics.isAnchored(opId)) continue;
@@ -773,9 +666,6 @@ export default function PlayScreen() {
         s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
       }
 
-      // Miscare jucator, relativa la directia camerei (doar swipe pe zona camerei o roteste).
-      // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
-      // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
@@ -800,10 +690,6 @@ export default function PlayScreen() {
       if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
       pos.current.y = nextY;
 
-      // Activarea checkpoint-urilor: cand playerul intra in zona unui checkpoint, acesta devine
-      // noul punct de respawn AL ACESTUI PLAYER (vezi activeCheckpointRef mai sus - independent
-      // de alti jucatori). Nu conteaza ordinea in care sunt parcurse - oricare checkpoint activ
-      // a carui zona o calci devine cel curent, exact ca cerinta punctelor 4-5.
       for (const cp of checkpointsRef.current) {
         const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
         if (dx * dx + dz * dz <= cp.radius * cp.radius) {
@@ -842,9 +728,6 @@ export default function PlayScreen() {
     setReady(true);
   };
 
-  // Respawn: foloseste checkpoint-ul activ AL ACESTUI PLAYER daca exista unul (punctul 6 din
-  // cerinta); altfel cade pe spawn-ul initial al jocului. Reface si orientarea (ry), nu doar
-  // pozitia, la fel ca la intrarea initiala in joc.
   function doRespawn() {
     const target = activeCheckpointRef.current ?? spawnPointRef.current;
     pos.current.set(target.x, target.y, target.z);
@@ -863,12 +746,6 @@ export default function PlayScreen() {
     const cam = cameraRef.current;
     if (!r) return;
     r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
-    // NOTA (Viziune): three.js seteaza viewport-ul GL la size * pixelRatio, dar
-    // bufferul expo-gl are dimensiune fixa. La 1.4 / 2 viewport-ul depaseste
-    // bufferul, deci se vede doar o parte din scena, marita (personajul se muta
-    // spre coltul din dreapta-sus). Comportamentul e pastrat intentionat ca
-    // "Viziunea 1/2/3", la cererea utilizatorului. NU folosi pixelRatio pentru
-    // calitate grafica - pentru asta exista setarea Grafica (iluminare).
     if (cam) {
       const size = new THREE.Vector2();
       r.getSize(size);
@@ -896,21 +773,11 @@ export default function PlayScreen() {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        // key={glMountKey}: GLView se remonteaza la fiecare schimbare REALA de
-        // orientare a device-ului (inclusiv landscape-stanga <-> landscape-dreapta),
-        // detectata prin evenimentul nativ, nu prin screenW/screenH. Remontarea
-        // creeaza un context GL nou, cu suprafata EGL alocata corect la
-        // orientarea curenta. Starea jocului (pozitie, unghi camera) e pastrata
-        // si restaurata in onContextCreate, ca userul sa nu simta un reset vizual.
-        //
-        // canStartGL tine GLView-ul nemontat pana cand setarile playerului s-au
-        // incarcat (settingsLoaded) - punctul 4 din cerinta: incarca -> aplica ->
-        // abia apoi porneste jocul, nu invers.
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
-      {/* Zona camerei (dreapta): swipe = rotire, al 2-lea deget = zoom. Propriul touch
-          identifier, complet independent de joystick - vezi handler-ele de mai sus. */}
+      {/* Zona camerei (dreapta): swipe = rotire, al 2-lea deget = zoom. onTouch* (nu
+          Responder System) - vezi comentariul mare de mai sus din componenta. */}
       {ready && Platform.OS !== "web" ? (
         <View
           style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]}
@@ -918,17 +785,15 @@ export default function PlayScreen() {
             const { x, y, width, height } = e.nativeEvent.layout;
             camZoneLayout.current = { x, y, w: width, h: height };
           }}
-          onStartShouldSetResponder={() => true}
-          onResponderGrant={onCamResponderGrant}
-          onResponderMove={onCamResponderMove}
-          onResponderRelease={onCamResponderEnd}
-          onResponderTerminate={onCamResponderEnd}
-          onResponderTerminationRequest={() => false}
+          onTouchStart={onCamTouchStart}
+          onTouchMove={onCamTouchMove}
+          onTouchEnd={onCamTouchEnd}
+          onTouchCancel={onCamTouchEnd}
         />
       ) : null}
 
-      {/* Zona joystick-ului (stanga-jos): propriul touch identifier, complet independenta
-          de zona camerei - cele doua pot fi active simultan, fiecare cu degetul ei. */}
+      {/* Zona joystick-ului (stanga-jos): onTouch* propriu, complet independent de zona
+          camerei - cele doua functioneaza simultan, fiecare cu degetul ei. */}
       {ready && Platform.OS !== "web" ? (
         <View
           style={styles.joystickZone}
@@ -936,12 +801,10 @@ export default function PlayScreen() {
             const { x, y, width, height } = e.nativeEvent.layout;
             joyZoneLayout.current = { x, y, w: width, h: height };
           }}
-          onStartShouldSetResponder={() => true}
-          onResponderGrant={onJoyResponderGrant}
-          onResponderMove={onJoyResponderMove}
-          onResponderRelease={onJoyResponderEnd}
-          onResponderTerminate={onJoyResponderEnd}
-          onResponderTerminationRequest={() => false}
+          onTouchStart={onJoyTouchStart}
+          onTouchMove={onJoyTouchMove}
+          onTouchEnd={onJoyTouchEnd}
+          onTouchCancel={onJoyTouchEnd}
         >
           {joyVisible ? (
             <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
