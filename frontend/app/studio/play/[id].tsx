@@ -7,6 +7,7 @@ import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import * as THREE from "three";
 import * as ScreenOrientation from "expo-screen-orientation";
+import { PanGestureHandler, PinchGestureHandler, State } from "react-native-gesture-handler";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE, spawnKindOf } from "@/src/studio/sceneShared";
@@ -20,15 +21,13 @@ import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSetting
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
-  // fizica (vezi backend/astran_sandbox/prelude.luau si runner.sanitize_ops)
-  gravity?: number; air?: number;                          // op: "world"
-  density?: number; friction?: number; bounce?: number; liquid?: boolean; // op: "material"
-  material?: string; anchored?: boolean; collide?: boolean; // pe "create"/"set"
+  gravity?: number; air?: number;
+  density?: number; friction?: number; bounce?: number; liquid?: boolean;
+  material?: string; anchored?: boolean; collide?: boolean;
   vx?: number; vy?: number; vz?: number;
 };
 type MeshState = { x: number; y: number; z: number; scale: number };
 
-// ---------- Spawn Points & Checkpoints (vezi si sceneShared.ts pentru campurile de pe SceneObj) ----------
 type SpawnRuntime = {
   id: string;
   kind: "spawn" | "checkpoint";
@@ -167,8 +166,6 @@ function LevelPicker({ value, onChange, testIDPrefix }: { value: number; onChang
   );
 }
 
-type TouchXY = { x: number; y: number };
-
 export default function PlayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -219,6 +216,7 @@ export default function PlayScreen() {
   const camDist = useRef(4.5);
   const lastCamAngle = useRef(0);
   const lastCamPolar = useRef(1.15);
+  const lastCamDist = useRef(4.5);
   const firstPerson = useRef(false);
 
   const preservedStateRef = useRef<{
@@ -227,148 +225,31 @@ export default function PlayScreen() {
   } | null>(null);
 
   // ============================================================================================
-  // MULTI-TOUCH REAL
-  // ============================================================================================
-  // IMPORTANT: folosim onTouchStart/onTouchMove/onTouchEnd/onTouchCancel (evenimentele RAW de
-  // touch), NU onStartShouldSetResponder/onResponderGrant ("Gesture Responder System" al RN).
-  // Responder System-ul are o regula fixa: la un moment dat exista UN SINGUR responder activ,
-  // global, in toata aplicatia - primul deget care atinge ecranul "castiga" acel responder, iar
-  // al doilea deget (chiar daca atinge o alta zona) nu primeste propriul flux de evenimente
-  // decat daca primul renunta la responder (negociere explicita de transfer, nu simultaneitate
-  // reala). Asta era cauza exacta a bug-ului: joystick SAU camera, niciodata ambele.
+  // MULTI-TOUCH REAL, de data asta prin react-native-gesture-handler cu `simultaneousHandlers`.
   //
-  // onTouchStart/onTouchMove/onTouchEnd sunt un nivel mai jos: RN le livreaza fiecarei View
-  // in parte pe baza hit-testing-ului PER DEGET (exact ca touch events din DOM), fara nicio
-  // negociere de "un singur proprietar". Doua View-uri separate, in zone fara suprapunere,
-  // primesc fiecare propriul flux de evenimente, pentru propriul deget, simultan.
+  // Istoricul problemei, pe scurt (ca sa nu se repete greseala):
+  // 1) PanGestureHandler separat pe fiecare zona, fara nimic suplimentar -> cele doua
+  //    recognizers s-au exclus reciproc (joystick SAU camera, niciodata ambele).
+  // 2) onTouchStart/onTouchMove brute (fara gesture-handler) -> parea sa rezolve teoretic,
+  //    dar tot trec prin acelasi mecanism nativ de negociere a gesturilor (UIKit/Android),
+  //    care tot favorizeaza un singur "castigator" intre doua componente diferite -> a produs
+  //    chiar un bug mai grav (joystick-ul s-a blocat cand intra al doilea deget).
+  // 3) SOLUTIA CORECTA: react-native-gesture-handler are un API facut exact pentru asta -
+  //    prop-ul `simultaneousHandlers`. Ii spunem explicit fiecarui handler cu care alt
+  //    handler are voie sa recunoasca gestul IN PARALEL, prin referinte incrucisate. Asta
+  //    configureaza mecanismul nativ de recunoastere simultana (shouldRecognizeSimultaneouslyWith
+  //    pe iOS) sa trateze joystick-ul si camera ca independente, nu ca sa se excluda.
   // ============================================================================================
+  const joyPanRef = useRef<any>(null);
+  const camPanRef = useRef<any>(null);
+  const camPinchRef = useRef<any>(null);
 
-  const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
-  const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
-
-  // --- Joystick: un singur deget, propriul identifier ---
-  const joyTouchId = useRef<number | null>(null);
+  // Joystick
   const joyActive = useRef(false);
   const joyVec = useRef({ x: 0, y: 0 });
   const [joyKnob, setJoyKnob] = useState({ x: 0, y: 0 });
   const [joyVisible, setJoyVisible] = useState(false);
   const [joyOrigin, setJoyOrigin] = useState({ x: 80, y: 80 });
-
-  // --- Camera: 1 deget = rotatie, al 2-lea deget (tot in zona camerei) = zoom (pinch) ---
-  const camTouchIds = useRef<number[]>([]);
-  const camTouchPos = useRef<Map<number, TouchXY>>(new Map());
-  const camTouchStartPos = useRef<Map<number, TouchXY>>(new Map());
-  const camPinchStartDist = useRef<number | null>(null);
-  const camPinchStartCamDist = useRef(4.5);
-
-  function allTouches(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
-    return (evt?.nativeEvent?.touches as any[]) ?? [];
-  }
-  function changedTouches(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
-    return (evt?.nativeEvent?.changedTouches as any[]) ?? [];
-  }
-
-  // ---------- Joystick ----------
-  const onJoyTouchStart = (evt: any) => {
-    if (joyTouchId.current !== null) return; // deja avem un deget pe joystick - ignoram orice altul nou in zona asta
-    const t = changedTouches(evt)[0];
-    if (!t) return;
-    joyTouchId.current = t.identifier;
-    const ox = t.pageX - joyZoneLayout.current.x;
-    const oy = t.pageY - joyZoneLayout.current.y;
-    setJoyOrigin({ x: ox, y: oy });
-    setJoyKnob({ x: 0, y: 0 });
-    setJoyVisible(true);
-    joyActive.current = true;
-  };
-  const onJoyTouchMove = (evt: any) => {
-    if (joyTouchId.current === null) return;
-    const t = allTouches(evt).find(x => x.identifier === joyTouchId.current);
-    if (!t) return;
-    const zx = t.pageX - joyZoneLayout.current.x;
-    const zy = t.pageY - joyZoneLayout.current.y;
-    const dx0 = zx - joyOrigin.x, dy0 = zy - joyOrigin.y;
-    const dist = Math.min(JOYSTICK_RADIUS, Math.hypot(dx0, dy0));
-    const ang = Math.atan2(dy0, dx0);
-    const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
-    setJoyKnob({ x: kx, y: ky });
-    joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
-  };
-  const onJoyTouchEnd = (evt: any) => {
-    const changed = changedTouches(evt);
-    if (joyTouchId.current === null) return;
-    if (!changed.some(c => c.identifier === joyTouchId.current)) return; // nu e degetul nostru
-    joyTouchId.current = null;
-    joyActive.current = false;
-    joyVec.current = { x: 0, y: 0 };
-    setJoyKnob({ x: 0, y: 0 });
-    setJoyVisible(false);
-  };
-
-  // ---------- Camera ----------
-  const onCamTouchStart = (evt: any) => {
-    const changed = changedTouches(evt);
-    for (const t of changed) {
-      if (camTouchIds.current.length >= 2) break; // doar 1 (rotire) sau 2 degete (pinch)
-      if (camTouchIds.current.includes(t.identifier)) continue;
-      camTouchIds.current.push(t.identifier);
-      camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-      camTouchStartPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-    }
-    if (camTouchIds.current.length === 1) {
-      lastCamAngle.current = camAngle.current;
-      lastCamPolar.current = camPolar.current;
-    } else if (camTouchIds.current.length === 2) {
-      const [idA, idB] = camTouchIds.current;
-      const a = camTouchPos.current.get(idA)!, b = camTouchPos.current.get(idB)!;
-      camPinchStartDist.current = Math.hypot(a.x - b.x, a.y - b.y);
-      camPinchStartCamDist.current = camDist.current;
-    }
-  };
-  const onCamTouchMove = (evt: any) => {
-    const touches = allTouches(evt);
-    for (const tid of camTouchIds.current) {
-      const t = touches.find(x => x.identifier === tid);
-      if (t) camTouchPos.current.set(tid, { x: t.pageX, y: t.pageY });
-    }
-
-    if (camTouchIds.current.length === 1) {
-      const tid = camTouchIds.current[0];
-      const cur = camTouchPos.current.get(tid);
-      const start = camTouchStartPos.current.get(tid);
-      if (!cur || !start) return;
-      const translationX = cur.x - start.x;
-      const translationY = cur.y - start.y;
-      camAngle.current = lastCamAngle.current - translationX * 0.008;
-      camPolar.current = Math.max(0.4, Math.min(Math.PI - 0.15, lastCamPolar.current - translationY * 0.006));
-    } else if (camTouchIds.current.length === 2 && camPinchStartDist.current !== null) {
-      const [idA, idB] = camTouchIds.current;
-      const a = camTouchPos.current.get(idA), b = camTouchPos.current.get(idB);
-      if (!a || !b) return;
-      const dist = Math.hypot(a.x - b.x, a.y - b.y);
-      const scale = dist / camPinchStartDist.current;
-      camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, camPinchStartCamDist.current / scale));
-    }
-  };
-  const onCamTouchEnd = (evt: any) => {
-    const changed = changedTouches(evt);
-    for (const c of changed) {
-      const idx = camTouchIds.current.indexOf(c.identifier);
-      if (idx !== -1) {
-        camTouchIds.current.splice(idx, 1);
-        camTouchPos.current.delete(c.identifier);
-        camTouchStartPos.current.delete(c.identifier);
-      }
-    }
-    camPinchStartDist.current = null;
-    if (camTouchIds.current.length === 1) {
-      const tid = camTouchIds.current[0];
-      const pos2 = camTouchPos.current.get(tid);
-      if (pos2) camTouchStartPos.current.set(tid, pos2);
-      lastCamAngle.current = camAngle.current;
-      lastCamPolar.current = camPolar.current;
-    }
-  };
 
   useEffect(() => {
     alive.current = true;
@@ -623,6 +504,7 @@ export default function PlayScreen() {
       camPolar.current = preserved.camPolar;
       lastCamPolar.current = preserved.camPolar;
       camDist.current = preserved.camDist;
+      lastCamDist.current = preserved.camDist;
       preservedStateRef.current = null;
     } else {
       pos.current.set(initial.x, initial.y, initial.z);
@@ -728,6 +610,47 @@ export default function PlayScreen() {
     setReady(true);
   };
 
+  const onJoyStart = (e: any) => {
+    const { x, y } = e.nativeEvent;
+    setJoyOrigin({ x, y });
+    setJoyVisible(true);
+    joyActive.current = true;
+  };
+  const onJoyMove = (e: any) => {
+    if (!joyActive.current) return;
+    const { x, y } = e.nativeEvent;
+    let dx = x - joyOrigin.x, dy = y - joyOrigin.y;
+    const dist = Math.min(JOYSTICK_RADIUS, Math.hypot(dx, dy));
+    const ang = Math.atan2(dy, dx);
+    const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
+    setJoyKnob({ x: kx, y: ky });
+    joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
+  };
+  const onJoyEnd = () => {
+    joyActive.current = false;
+    joyVec.current = { x: 0, y: 0 };
+    setJoyKnob({ x: 0, y: 0 });
+    setJoyVisible(false);
+  };
+  const onJoyStateChange = (e: any) => {
+    const st = e.nativeEvent.state;
+    if (st === State.BEGAN) onJoyStart(e);
+    else if (st === State.END || st === State.CANCELLED || st === State.FAILED) onJoyEnd();
+  };
+
+  const onCamPan = (e: any) => {
+    const { translationX, translationY } = e.nativeEvent;
+    camAngle.current = lastCamAngle.current - translationX * 0.008;
+    camPolar.current = Math.max(0.4, Math.min(Math.PI - 0.15, lastCamPolar.current - translationY * 0.006));
+  };
+  const onCamPanState = (e: any) => {
+    if (e.nativeEvent.oldState === State.ACTIVE) { lastCamAngle.current = camAngle.current; lastCamPolar.current = camPolar.current; }
+  };
+  const onCamPinch = (e: any) => {
+    camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, lastCamDist.current / e.nativeEvent.scale));
+  };
+  const onCamPinchState = (e: any) => { if (e.nativeEvent.oldState === State.ACTIVE) lastCamDist.current = camDist.current; };
+
   function doRespawn() {
     const target = activeCheckpointRef.current ?? spawnPointRef.current;
     pos.current.set(target.x, target.y, target.z);
@@ -776,46 +699,52 @@ export default function PlayScreen() {
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
-      {/* Zona camerei (dreapta): swipe = rotire, al 2-lea deget = zoom. onTouch* (nu
-          Responder System) - vezi comentariul mare de mai sus din componenta. */}
+      {/* Zona camerei (dreapta): pan = rotire, pinch = zoom. simultaneousHandlers catre
+          joyPanRef - vezi comentariul mare de mai sus din componenta pentru de ce exista. */}
       {ready && Platform.OS !== "web" ? (
-        <View
-          style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]}
-          onLayout={e => {
-            const { x, y, width, height } = e.nativeEvent.layout;
-            camZoneLayout.current = { x, y, w: width, h: height };
-          }}
-          onTouchStart={onCamTouchStart}
-          onTouchMove={onCamTouchMove}
-          onTouchEnd={onCamTouchEnd}
-          onTouchCancel={onCamTouchEnd}
-        />
+        <PinchGestureHandler
+          ref={camPinchRef}
+          simultaneousHandlers={[joyPanRef, camPanRef]}
+          onGestureEvent={onCamPinch}
+          onHandlerStateChange={onCamPinchState}
+        >
+          <PanGestureHandler
+            ref={camPanRef}
+            simultaneousHandlers={[joyPanRef, camPinchRef]}
+            onGestureEvent={onCamPan}
+            onHandlerStateChange={onCamPanState}
+            minPointers={1}
+            maxPointers={1}
+          >
+            <View style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]} />
+          </PanGestureHandler>
+        </PinchGestureHandler>
       ) : null}
 
-      {/* Zona joystick-ului (stanga-jos): onTouch* propriu, complet independent de zona
-          camerei - cele doua functioneaza simultan, fiecare cu degetul ei. */}
+      {/* Zona joystick-ului (stanga-jos): simultaneousHandlers catre camPanRef/camPinchRef -
+          acelasi mecanism, in ambele directii, ca cele doua zone sa recunoasca gesturile
+          in paralel, nu exclusiv. */}
       {ready && Platform.OS !== "web" ? (
-        <View
-          style={styles.joystickZone}
-          onLayout={e => {
-            const { x, y, width, height } = e.nativeEvent.layout;
-            joyZoneLayout.current = { x, y, w: width, h: height };
-          }}
-          onTouchStart={onJoyTouchStart}
-          onTouchMove={onJoyTouchMove}
-          onTouchEnd={onJoyTouchEnd}
-          onTouchCancel={onJoyTouchEnd}
+        <PanGestureHandler
+          ref={joyPanRef}
+          simultaneousHandlers={[camPanRef, camPinchRef]}
+          onGestureEvent={onJoyMove}
+          onHandlerStateChange={onJoyStateChange}
+          minPointers={1}
+          maxPointers={1}
         >
-          {joyVisible ? (
-            <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
-              <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
-            </View>
-          ) : (
-            <View style={styles.joyHint} pointerEvents="none">
-              <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
-            </View>
-          )}
-        </View>
+          <View style={styles.joystickZone}>
+            {joyVisible ? (
+              <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
+                <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
+              </View>
+            ) : (
+              <View style={styles.joyHint} pointerEvents="none">
+                <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
+              </View>
+            )}
+          </View>
+        </PanGestureHandler>
       ) : null}
 
       <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
