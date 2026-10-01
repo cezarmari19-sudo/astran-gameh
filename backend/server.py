@@ -69,6 +69,13 @@ except Exception as exc:  # noqa: BLE001
     make_avatar_router = None
     log.warning("Avatar disabled: %s", exc)
 
+# Setari persistente de player (Graphics Quality, Render Distance, etc) - optional, la fel.
+try:
+    from astran_sandbox.user_settings_routes import make_user_settings_router
+except Exception as exc:  # noqa: BLE001
+    make_user_settings_router = None
+    log.warning("User settings disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -1043,6 +1050,10 @@ if make_clothes_router is not None:
 # Avatar Editor: /api/avatar/me, /api/avatar/slots
 if make_avatar_router is not None:
     api.include_router(make_avatar_router(get_current_user, db))
+
+# Setari de player: /api/settings/me (GET/PUT) - vezi astran_sandbox/user_settings_routes.py
+if make_user_settings_router is not None:
+    api.include_router(make_user_settings_router(get_current_user, db))
 
 app.include_router(api)
 
