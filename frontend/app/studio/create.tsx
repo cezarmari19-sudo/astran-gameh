@@ -15,6 +15,7 @@ import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import CodeStudio from "@/src/components/CodeStudio";
 import AssetPicker from "@/src/components/AssetPicker";
+import GameAccessManager from "@/src/components/GameAccessManager";
 import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
 import {
   ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
@@ -52,6 +53,15 @@ export default function StudioEditor() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [glReady, setGlReady] = useState(false);
+
+  // GROUPS: Group curent al jocului (doar nume/logo - vine din /games/{id}, niciodata tokenul)
+  // si campul pentru a atasa/schimba Group-ul prin token privat (vezi save()).
+  const [groupName, setGroupName] = useState<string | null>(null);
+  const [groupTokenInput, setGroupTokenInput] = useState("");
+  const [groupCleared, setGroupCleared] = useState(false);
+
+  // GAME COLLABORATION: modal de gestionare Editors/Testers - doar pentru jocuri deja create.
+  const [showAccess, setShowAccess] = useState(false);
 
   // Code Editor / File Explorer: proiect real de foldere+fisiere (vezi src/studio/projectTree.ts),
   // salvat separat prin /sandbox/games/{id}/files (backend/astran_sandbox/routes.py).
@@ -112,6 +122,7 @@ export default function StudioEditor() {
         setThumbnail(g.thumbnail_url || null);
         setMaxPlayersText(String(g.max_players ?? 20));
         setPlayerCharacterId(g.player_character_model_id ?? null);
+        setGroupName(g.group_name || null);
         setScene(g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" });
         try {
           const pr = await api(`/sandbox/games/${editingId}/files`);
@@ -258,13 +269,27 @@ export default function StudioEditor() {
       if (playerCharacterId) { body.player_character_model_id = playerCharacterId; body.player_character_source = "shop_model"; }
       else body.clear_player_character = true;
 
+      // GROUPS: trimitem group_token DOAR daca userul a scris ceva in campul "Attach Group"
+      // in aceasta sesiune, sau clear_group daca a apasat X pe grupul curent - altfel asocierea
+      // existenta ramane neschimbata (nu vrem sa o stergem accidental la fiecare Save).
+      if (groupCleared) body.clear_group = true;
+      else if (groupTokenInput.trim()) body.group_token = groupTokenInput.trim();
+
       let gameId: string | null = editingId || createdId.current;
+      let savedGame: any = null;
       if (gameId) {
-        await api(`/games/${gameId}`, { method: "PATCH", body: JSON.stringify(body) });
+        const r = await api(`/games/${gameId}`, { method: "PATCH", body: JSON.stringify(body) });
+        savedGame = r?.game;
       } else {
         const r = await api("/games", { method: "POST", body: JSON.stringify(body) });
         gameId = r?.game?.game_id || null;
+        savedGame = r?.game;
         createdId.current = gameId;
+      }
+      if (savedGame) {
+        setGroupName(savedGame.group_name || null);
+        setGroupTokenInput("");
+        setGroupCleared(false);
       }
       if (gameId && projectDirty.current) {
         await api(`/sandbox/games/${gameId}/files`, {
@@ -651,6 +676,10 @@ export default function StudioEditor() {
         onClose={() => setShowAssets(false)}
       />
 
+      {editingId ? (
+        <GameAccessManager visible={showAccess} gameId={editingId} onClose={() => setShowAccess(false)} />
+      ) : null}
+
       <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, justifyContent: "flex-end" }}>
           <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }} onPress={() => setShowMeta(false)} />
@@ -703,6 +732,36 @@ export default function StudioEditor() {
               <Text style={styles.characterPickText}>{selectedCharacter ? selectedCharacter.name : "Personal avatar (default)"}</Text>
               <MaterialCommunityIcons name="chevron-right" size={18} color={colors.onSurface3} />
             </Pressable>
+
+            <Text style={styles.lab}>Group</Text>
+            {groupName && !groupCleared ? (
+              <View style={styles.groupPill}>
+                <MaterialCommunityIcons name="account-group" size={16} color={colors.brand} />
+                <Text style={styles.groupPillText}>{groupName}</Text>
+                <Pressable testID="editor-clear-group" onPress={() => { setGroupCleared(true); setGroupName(null); }}>
+                  <MaterialCommunityIcons name="close-circle" size={18} color={colors.onSurface3} />
+                </Pressable>
+              </View>
+            ) : (
+              <TextInput
+                testID="editor-group-token"
+                value={groupTokenInput}
+                onChangeText={text => { setGroupTokenInput(text); setGroupCleared(false); }}
+                style={styles.input}
+                placeholder="Group Token (optional)"
+                placeholderTextColor={colors.onSurface3}
+                autoCapitalize="none"
+              />
+            )}
+            <Text style={styles.hintSmall}>Leave empty to publish under your personal account. Paste your Group's private token to publish under that Group.</Text>
+
+            {editingId ? (
+              <Pressable testID="editor-manage-access" onPress={() => setShowAccess(true)} style={styles.characterPick}>
+                <MaterialCommunityIcons name="account-key-outline" size={20} color={colors.brand} />
+                <Text style={styles.characterPickText}>Access & Collaboration</Text>
+                <MaterialCommunityIcons name="chevron-right" size={18} color={colors.onSurface3} />
+              </Pressable>
+            ) : null}
 
             <Pressable onPress={() => setIsPublic(v => !v)} style={styles.toggle} testID="editor-toggle-public">
               <MaterialCommunityIcons name={isPublic ? "eye" : "eye-off"} size={20} color={isPublic ? colors.brand : colors.onSurface3} />
@@ -789,6 +848,8 @@ const styles = StyleSheet.create({
   ageBtnText: { color: colors.onSurface2, fontWeight: "700" },
   characterPick: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 6, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   characterPickText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+  groupPill: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6, padding: 12, backgroundColor: colors.brandTint, borderRadius: radius.md, borderWidth: 1, borderColor: colors.brand },
+  groupPillText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
   toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   switch: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.surface3, padding: 3 },
   switchOn: { backgroundColor: colors.brand },
