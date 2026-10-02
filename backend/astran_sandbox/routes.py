@@ -32,7 +32,7 @@ NU accepta punct - e un contract fixat in binarul compilat, pe care nu il pot sc
 fara o recompilare pe server (build.sh). De-aia:
     - Un fisier de proiect cu path "scripts/player/movement.lua" devine, DOAR pentru
       sandbox, modulul Luau "scripts/player/movement" (extensia se scoate) - vezi
-      luau_bundle() mai jos. E exact conventia require() din Lua, care oricum nu568
+      luau_bundle() mai jos. E exact conventia require() din Lua, care oricum nu
       foloseste extensii.
     - Fisierul de la radacina "main.lua" e "main" pentru sandbox - deci e in
       continuare fisierul care ruleaza primul (ENTRY_NAME din runner.py ramane "main").
@@ -45,6 +45,18 @@ fara o recompilare pe server (build.sh). De-aia:
 Jocurile vechi (game_scripts cu {name, source} fara extensie, sau game["script"] ca
 string simplu) se migreaza automat LA CITIRE in noul model (vezi _migrate_legacy_files),
 nimic manual necesar; la urmatorul Save se rescriu deja in formatul nou.
+
+============================================================================
+PERMISIUNI (Game Collaboration / Tester) - vezi game_permissions.py
+============================================================================
+Accesul NU mai e doar "owner sau nimic": un Editor poate avea acces total sau restrans
+pe anumite foldere/fisiere (allowed_paths/denied_paths), cu permisiuni granulare
+(create/edit/delete fisiere, delete foldere). Un Tester NU ajunge niciodata aici - vede
+doar Play Mode (server.py), niciodata Code Editor-ul.
+
+Pentru un Editor cu acces restrans, Save NU inlocuieste tot proiectul (ca la owner) -
+se schimba DOAR domeniul lui, restul ramane neatins, chiar daca el nu l-a trimis in
+payload (altfel ar putea sterge fisiere din afara domeniului lui doar omitandu-le).
 """
 from __future__ import annotations
 
@@ -52,6 +64,7 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
@@ -67,6 +80,13 @@ from .runner import (
     run_files,
     validate_files,
 )
+
+try:
+    from .game_permissions import get_game_access, path_allowed, filter_project_to_scope
+except Exception:  # noqa: BLE001 - modulul de permisiuni e optional, ca restul modulelor sandbox
+    get_game_access = None
+    path_allowed = None
+    filter_project_to_scope = None
 
 log = logging.getLogger("astran.sandbox")
 
@@ -90,6 +110,27 @@ _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,%d}$" % MAX_PATH_SEGMENT_CHAR
 # Extensiile care chiar ajung in sandbox-ul Luau (vezi luau_bundle()). Orice alta
 # extensie e continut de proiect pur organizational/editabil, nu executabil.
 LUAU_EXTENSIONS = (".lua", ".luau")
+
+
+@dataclass
+class _FallbackAccess:
+    """Folosit DOAR daca game_permissions.py nu s-a putut incarca deloc - pastreaza
+    exact comportamentul dinainte de Faza 2 (doar owner-ul are acces de editare)."""
+    role: str = "none"
+    can_view_code: bool = False
+    can_create_files: bool = False
+    can_edit_files: bool = False
+    can_delete_files: bool = False
+    can_delete_folders: bool = False
+    can_change_settings: bool = False
+    can_publish: bool = False
+    can_play: bool = False
+    allowed_paths: Optional[list] = None
+    denied_paths: list = dc_field(default_factory=list)
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == "owner"
 
 
 # ---------- validarea unui path (fisier sau folder) ----------
@@ -324,8 +365,19 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=404, detail="Game not found")
         return g
 
-    def is_owner(g: dict, current: dict) -> bool:
-        return g["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
+    async def get_access(g: dict, current: dict):
+        """Punct unic de acces, folosit de toate endpoint-urile de mai jos. Daca modulul
+        de permisiuni n-a putut fi incarcat, se pastreaza exact comportamentul dinainte
+        de Faza 2 (doar owner-ul editeaza; jocul ramane jucabil daca e public)."""
+        if get_game_access is not None:
+            return await get_game_access(db, g, current)
+        if g["owner_id"] == current["user_id"] or current.get("is_platform_admin"):
+            return _FallbackAccess(
+                role="owner", can_view_code=True, can_create_files=True, can_edit_files=True,
+                can_delete_files=True, can_delete_folders=True, can_change_settings=True,
+                can_publish=True, can_play=True,
+            )
+        return _FallbackAccess(role="none", can_play=bool(g.get("is_public")))
 
     async def load_project(game_id: str, g: dict) -> tuple[list[dict], list[str]]:
         """Intoarce (files, folders) in formatul nou {path, source} / [path...],
@@ -369,35 +421,97 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
 
     @router.get("/games/{game_id}/files")
     async def get_files(game_id: str, current=Depends(get_current_user)):
-        """Proiectul complet al unui joc: fisiere (cu path si continut) si folderele
-        goale explicite. Doar proprietarul poate citi codul (vezi get_game in server.py
-        pentru cum se ascunde "script" de la non-proprietari - la fel se aplica si aici)."""
+        """Proiectul (sau partea din el la care are acces) pentru un joc: fisiere (cu
+        path si continut) si folderele goale explicite. Owner-ul vede tot; un Editor
+        restrans vede DOAR domeniul lui (allowed_paths/denied_paths); un Tester nu
+        ajunge aici deloc (can_view_code=False)."""
         g = await get_game(game_id)
-        if not is_owner(g, current):
-            raise HTTPException(status_code=403, detail="Not the owner")
+        access = await get_access(g, current)
+        if not access.can_view_code:
+            raise HTTPException(status_code=403, detail="No access to this project's code")
         files, folders = await load_project(game_id, g)
+        if filter_project_to_scope is not None:
+            files, folders = filter_project_to_scope(files, folders, access)
         return {"files": files, "folders": folders}
 
     @router.put("/games/{game_id}/files")
     async def save_files(game_id: str, body: SaveProjectBody, current=Depends(get_current_user)):
-        """Salveaza intregul proiect (inlocuieste structura veche - fisiere + foldere).
+        """Salveaza proiectul.
 
-        Doua validari distincte, cu scopuri diferite:
+        Owner (sau platform admin): comportament NESCHIMBAT - inlocuieste toata
+        structura (fisiere + foldere), ca inainte de Faza 2.
+
+        Editor cu acces (eventual restrans pe foldere): se schimba DOAR domeniul lui.
+        Restul proiectului ramane EXACT neschimbat, chiar daca el nu l-a trimis deloc
+        in payload - altfel un Editor fara DELETE pe /server/ ar putea sterge /server/
+        doar omitandu-l din ce trimite. Fiecare schimbare (fisier nou/modificat/sters,
+        folder sters) e verificata impotriva permisiunilor lui GRANULARE - orice
+        incalcare respinge TOT request-ul (atomic), niciodata o salvare partiala.
+
+        Doua validari distincte, cu scopuri diferite, raman neschimbate:
         1. validate_project: structura arborelui in sine (path-uri valide, fara duplicate,
            fara conflicte fisier/folder, in limitele generale ale proiectului).
         2. validate_files (runner.py, NESCHIMBATA): doar subsetul .lua/.luau, cu EXACT
-           regulile pe care sandbox-ul le impune (nume rezervate __scene/__assets, limita
-           de 32 fisiere, 20000/100000 caractere) - ca un proiect cu multe fisiere de alt
-           tip sa nu poata ocoli limitele reale ale sandbox-ului doar redenumind extensia.
+           regulile pe care sandbox-ul le impune.
         """
         g = await get_game(game_id)
-        if not is_owner(g, current):
-            raise HTTPException(status_code=403, detail="Not the owner")
-        try:
-            files, folders = validate_project([f.dict() for f in body.files], body.folders)
-            validate_files(luau_bundle(files))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        access = await get_access(g, current)
+        if not access.can_view_code:
+            raise HTTPException(status_code=403, detail="No access to this project's code")
+
+        submitted_files = [f.dict() for f in body.files]
+        submitted_folders = list(body.folders)
+
+        if access.is_owner:
+            try:
+                files, folders = validate_project(submitted_files, submitted_folders)
+                validate_files(luau_bundle(files))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            if path_allowed is None:
+                raise HTTPException(status_code=403, detail="No permission to edit this project")
+
+            old_files, old_folders = await load_project(game_id, g)
+
+            for f in submitted_files:
+                if not path_allowed(f["path"], access):
+                    raise HTTPException(status_code=403, detail=f"No access to path: {f['path']}")
+            for fld in submitted_folders:
+                if not path_allowed(fld, access):
+                    raise HTTPException(status_code=403, detail=f"No access to path: {fld}")
+
+            old_in_scope = {f["path"]: f["source"] for f in old_files if path_allowed(f["path"], access)}
+            new_in_scope = {f["path"]: f["source"] for f in submitted_files}
+            old_folders_in_scope = {fo for fo in old_folders if path_allowed(fo, access)}
+            new_folders_in_scope = set(submitted_folders)
+
+            added = [p for p in new_in_scope if p not in old_in_scope]
+            removed = [p for p in old_in_scope if p not in new_in_scope]
+            changed = [p for p in new_in_scope if p in old_in_scope and new_in_scope[p] != old_in_scope[p]]
+            added_folders = [fo for fo in new_folders_in_scope if fo not in old_folders_in_scope]
+            removed_folders = [fo for fo in old_folders_in_scope if fo not in new_folders_in_scope]
+
+            if added and not access.can_create_files:
+                raise HTTPException(status_code=403, detail="No permission to create files")
+            if changed and not access.can_edit_files:
+                raise HTTPException(status_code=403, detail="No permission to edit files")
+            if removed and not access.can_delete_files:
+                raise HTTPException(status_code=403, detail="No permission to delete files")
+            if added_folders and not access.can_create_files:
+                raise HTTPException(status_code=403, detail="No permission to create folders")
+            if removed_folders and not access.can_delete_folders:
+                raise HTTPException(status_code=403, detail="No permission to delete folders")
+
+            # Merge: tot ce e in afara domeniului editorului ramane exact ca inainte.
+            merged_files = [f for f in old_files if not path_allowed(f["path"], access)] + submitted_files
+            merged_folders = list({*[fo for fo in old_folders if not path_allowed(fo, access)], *submitted_folders})
+
+            try:
+                files, folders = validate_project(merged_files, merged_folders)
+                validate_files(luau_bundle(files))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
         await ensure_index()
         await db.game_scripts.update_one(
@@ -405,18 +519,22 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             {"$set": {"game_id": game_id, "files": files, "folders": folders, "updated_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
-        return {"ok": True, "files": files, "folders": folders}
+        out_files, out_folders = (files, folders)
+        if not access.is_owner and filter_project_to_scope is not None:
+            out_files, out_folders = filter_project_to_scope(files, folders, access)
+        return {"ok": True, "files": out_files, "folders": out_folders}
 
     @router.get("/games/{game_id}/assets")
     async def get_game_assets(game_id: str, current=Depends(get_current_user)):
-        """Id-urile modelelor din Shop atasate unui joc (doar proprietarul)."""
+        """Id-urile modelelor din Shop atasate unui joc (owner sau Editor cu acces)."""
         g = await get_game(game_id)
-        if not is_owner(g, current):
-            raise HTTPException(status_code=403, detail="Not the owner")
+        access = await get_access(g, current)
+        if not access.can_view_code:
+            raise HTTPException(status_code=403, detail="No access to this project")
         await ensure_index()
         doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
         asset_ids = doc["asset_ids"] if doc and isinstance(doc.get("asset_ids"), list) else []
-        resolved = await resolve_assets(current["user_id"], asset_ids)
+        resolved = await resolve_assets(g["owner_id"], asset_ids)
         # pastram si id-urile care nu s-au putut rezolva (ex: itemul a fost sters), ca sa le poata scoate din lista
         resolved_ids = {a["id"] for a in resolved}
         missing = [aid for aid in asset_ids if aid not in resolved_ids]
@@ -424,10 +542,12 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
 
     @router.put("/games/{game_id}/assets")
     async def save_game_assets(game_id: str, body: SaveAssetsBody, current=Depends(get_current_user)):
-        """Salveaza lista de modele din Shop atasate unui joc (inlocuieste lista veche)."""
+        """Salveaza lista de modele din Shop atasate unui joc (inlocuieste lista veche) -
+        necesita can_edit_files SAU can_change_settings (owner le are mereu pe amandoua)."""
         g = await get_game(game_id)
-        if not is_owner(g, current):
-            raise HTTPException(status_code=403, detail="Not the owner")
+        access = await get_access(g, current)
+        if not (access.can_edit_files or access.can_change_settings):
+            raise HTTPException(status_code=403, detail="No permission to change attached assets")
         asset_ids = list(dict.fromkeys(body.asset_ids))[:MAX_GAME_ASSETS]  # dedupe, pastreaza ordinea
         await ensure_index()
         await db.game_assets.update_one(
@@ -445,11 +565,17 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         workspace (vezi runner.scene_file), ca proprietarul sa poata scrie, de exemplu,
         workspace.Cube1.Material = m1.
 
-        Poate fi apelat de oricine intra in joc (nu doar proprietarul) — comportamentul
-        jocului trebuie sa fie acelasi pentru toti jucatorii, ca in Play Mode obisnuit.
+        Poate fi apelat de oricine are voie sa INTRE in joc (owner, Editor, Tester, sau
+        oricine daca jocul e public) — comportamentul jocului trebuie sa fie acelasi
+        pentru toti jucatorii, ca in Play Mode obisnuit. Verificarea reala de acces la
+        JOIN se face in server.py (/games/{id}/play); aici e un al doilea strat de
+        siguranta (item 15 - nu te bazezi doar pe un singur punct de control).
         """
         check_rate_limit(current["user_id"])
         g = await get_game(game_id)
+        access = await get_access(g, current)
+        if not access.can_play:
+            raise HTTPException(status_code=403, detail="No access to play this game")
         try:
             project_files, _folders = await load_project(game_id, g)
             files = luau_bundle(project_files)
