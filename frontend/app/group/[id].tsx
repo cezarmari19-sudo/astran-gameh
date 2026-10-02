@@ -1,10 +1,9 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert, Modal, TextInput } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert, Modal, TextInput, Share } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Image } from "expo-image";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import * as Clipboard from "expo-clipboard";
 import { api } from "@/src/api/client";
 import { useAuth } from "@/src/context/AuthContext";
 import { colors, radius, spacing } from "@/src/theme";
@@ -53,8 +52,9 @@ export default function GroupPage() {
     try { const r = await api(`/groups/${id}/token`); setToken(r.token); setShowToken(true); }
     catch (e: any) { Alert.alert("Error", e.message); }
   }
-  async function copyToken() {
-    if (token) { await Clipboard.setStringAsync(token); Alert.alert("Copied", "Group token copied to clipboard."); }
+  async function shareToken() {
+    if (!token) return;
+    try { await Share.share({ message: token }); } catch {}
   }
   async function regenerateToken() {
     try { const r = await api(`/groups/${id}/token/regenerate`, { method: "POST" }); setToken(r.token); }
@@ -151,10 +151,10 @@ export default function GroupPage() {
         <Pressable style={styles.backdrop} onPress={() => setShowToken(false)}>
           <View style={styles.tokenBox}>
             <Text style={styles.sheetTitle}>Group Token</Text>
-            <Text style={styles.tokenHint}>Share this only with people you trust to publish games under your Group. Anyone with it can attach a game to this Group.</Text>
+            <Text style={styles.tokenHint}>Share this only with people you trust to publish games under your Group. Anyone with it can attach a game to this Group. Long-press the token below to copy it.</Text>
             <Text selectable style={styles.tokenText}>{token}</Text>
             <View style={{ flexDirection: "row", gap: 8, marginTop: 14 }}>
-              <View style={{ flex: 1 }}><SecondaryButton label="Copy" icon="content-copy" onPress={copyToken} /></View>
+              <View style={{ flex: 1 }}><SecondaryButton label="Share" icon="share-variant-outline" onPress={shareToken} /></View>
               <View style={{ flex: 1 }}><SecondaryButton label="Regenerate" icon="refresh" onPress={regenerateToken} /></View>
             </View>
           </View>
