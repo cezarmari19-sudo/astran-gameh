@@ -178,6 +178,9 @@ class GameCreateBody(BaseModel):
     is_public: bool = True
     thumbnail_url: Optional[str] = None
     category: str = "adventure"
+    # GENRE/SUBGENRE: "category" de mai sus e deja folosit ca Genre (lista fixa existenta in
+    # UI: adventure/shooter/...); subgenre e liber, optional, NU inventa o valoare daca lipseste.
+    subgenre: Optional[str] = Field(default=None, max_length=40)
     allow_join_via_friends: bool = True
     scene: Optional[dict] = None
     script: str = Field(default="", max_length=20000)
@@ -195,6 +198,7 @@ class GameUpdateBody(BaseModel):
     is_public: Optional[bool] = None
     thumbnail_url: Optional[str] = None
     category: Optional[str] = None
+    subgenre: Optional[str] = Field(default=None, max_length=40)
     scene: Optional[dict] = None
     script: Optional[str] = Field(default=None, max_length=20000)
     max_players: Optional[int] = Field(default=None, ge=MAX_PLAYERS_MIN, le=MAX_PLAYERS_MAX)
@@ -215,6 +219,7 @@ class GamePublic(BaseModel):
     is_public: bool
     thumbnail_url: Optional[str] = None
     category: str
+    subgenre: Optional[str] = None
     player_count: int = 0
     total_plays: int = 0
     likes: int = 0
@@ -381,6 +386,19 @@ def _user_public(user: dict) -> dict:
     }
 
 
+def _user_public_minimal(user: dict) -> dict:
+    """Profilul public al ALTCUIVA (ex: creatorul unui joc) - fara email/balanta/limba,
+    care sunt private. Folosit de GET /users/{user_id} mai jos."""
+    return {
+        "user_id": user["user_id"],
+        "username": user["username"],
+        "display_name": user.get("display_name") or user["username"],
+        "avatar_url": user.get("avatar_url"),
+        "is_platform_owner": user.get("is_platform_owner", False),
+        "created_at": user.get("created_at", now_utc()),
+    }
+
+
 @api.get("/")
 async def root():
     return {"service": "astran-game", "version": "0.1.0", "status": "ok"}
@@ -529,15 +547,26 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
     return {"users": users}
 
 
+@api.get("/users/{user_id}")
+async def get_user_public(user_id: str, current=Depends(get_current_user)):
+    """Profil public minimal - folosit de pagina de joc pentru a face creatorul clickabil,
+    si de orice alt loc care trebuie sa arate 'cine e acest user' fara date private."""
+    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user": _user_public_minimal(u)}
+
+
 def _game_defaults(doc: dict) -> dict:
-    """Completeaza campurile noi (max_players, player_character, group) pentru jocurile
-    salvate inainte de ele, si expune created_at/updated_at cu semantica ceruta:
+    """Completeaza campurile noi (max_players, player_character, group, subgenre) pentru
+    jocurile salvate inainte de ele, si expune created_at/updated_at cu semantica ceruta:
     PRIMA, respectiv ULTIMA, publicare PUBLICA a jocului - nu data la care a fost creat
     randul in baza de date (acel moment intern ramane in 'record_created_at', folosit
     pentru sortarea interna - vezi my_games/discover, neschimbate)."""
     doc.setdefault("max_players", MAX_PLAYERS_DEFAULT)
     doc.setdefault("player_character_model_id", None)
     doc.setdefault("group_id", None)
+    doc.setdefault("subgenre", None)
     doc["record_created_at"] = doc.get("created_at")
     doc["created_at"] = doc.get("published_created_at")
     doc["updated_at"] = doc.get("published_updated_at")
@@ -561,6 +590,27 @@ async def _attach_group_info(games: list[dict]) -> list[dict]:
         gi = by_id.get(g.get("group_id"))
         g["group_name"] = gi["name"] if gi else None
         g["group_logo_url"] = gi.get("logo_url") if gi else None
+    return games
+
+
+async def _attach_live_player_counts(games: list[dict]) -> list[dict]:
+    """'Playing' REAL: suma player_count din instantele DESCHISE ale fiecarui joc.
+
+    Campul static games.player_count nu e actualizat nicaieri de cand jocurile pot avea
+    mai multe server instances (vezi play_game/reap_empty_instances) - afisarea lui directa
+    ar fi o statistica falsa (ramane la valoarea de la creare). Aici calculam valoarea reala,
+    intr-un singur query de agregare pentru tot batch-ul (nu N+1)."""
+    ids = [g["game_id"] for g in games]
+    if not ids:
+        return games
+    pipeline = [
+        {"$match": {"game_id": {"$in": ids}, "status": "open"}},
+        {"$group": {"_id": "$game_id", "total": {"$sum": "$player_count"}}},
+    ]
+    rows = await db.game_instances.aggregate(pipeline).to_list(len(ids))
+    live = {r["_id"]: r["total"] for r in rows}
+    for g in games:
+        g["player_count"] = live.get(g["game_id"], 0)
     return games
 
 
@@ -589,6 +639,7 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "is_public": body.is_public,
         "thumbnail_url": body.thumbnail_url,
         "category": body.category,
+        "subgenre": body.subgenre,
         "group_id": group_id,
         "player_count": 0,
         "total_plays": 0,
@@ -604,8 +655,10 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "player_character_model_id": body.player_character_model_id,
     }
     await db.games.insert_one(doc)
-    [out] = await _attach_group_info([_game_defaults({k: v for k, v in doc.items() if k != "_id"})])
-    return {"game": out}
+    out_list = await _attach_live_player_counts(
+        await _attach_group_info([_game_defaults({k: v for k, v in doc.items() if k != "_id"})])
+    )
+    return {"game": out_list[0]}
 
 
 @api.patch("/games/{game_id}")
@@ -627,7 +680,7 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     group_touched = bool(body.clear_group) or (body.group_token is not None)
     publish_touched = "is_public" in updates
     settings_touched = group_touched or character_touched or bool(
-        {"title", "description", "category", "age_category", "thumbnail_url", "max_players"} & updates.keys()
+        {"title", "description", "category", "subgenre", "age_category", "thumbnail_url", "max_players"} & updates.keys()
     )
     build_touched = bool({"scene", "script"} & updates.keys())
 
@@ -671,8 +724,8 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     if updates:
         await db.games.update_one({"game_id": game_id}, {"$set": updates})
     g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    [out] = await _attach_group_info([_game_defaults(g2)])
-    return {"game": out}
+    out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g2)]))
+    return {"game": out_list[0]}
 
 
 @api.delete("/games/{game_id}")
@@ -699,20 +752,27 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
         q["age_category"] = "under_18"
     sort_map = {
         "for_you": [("total_plays", -1), ("likes", -1)],
-        "trending": [("player_count", -1), ("total_plays", -1)],
+        # NOTA: "trending" sorta dupa games.player_count, care nu mai e actualizat (vezi
+        # _attach_live_player_counts) - ar fi fost mereu 0 pentru toate jocurile, deci sortarea
+        # nu facea nimic. total_plays e proxy-ul real disponibil pentru "activitate recenta".
+        "trending": [("total_plays", -1), ("likes", -1)],
         "new": [("created_at", -1)],
         "popular": [("likes", -1), ("total_plays", -1)],
     }
     sort = sort_map.get(section, sort_map["for_you"])
     cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
-    games = await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(30)])
+    games = await _attach_live_player_counts(
+        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(30)])
+    )
     return {"section": section, "games": games}
 
 
 @api.get("/games/mine")
 async def my_games(current=Depends(get_current_user)):
     cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0, "script": 0}).sort("created_at", -1)
-    games = await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
+    games = await _attach_live_player_counts(
+        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
+    )
     return {"games": games}
 
 
@@ -726,7 +786,7 @@ async def recently_played(current=Depends(get_current_user)):
     games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0, "script": 0}).to_list(50)
     idx = {g["game_id"]: g for g in games}
     ordered = [idx[gid] for gid in game_ids if gid in idx]
-    ordered = await _attach_group_info([_game_defaults(g) for g in ordered])
+    ordered = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in ordered]))
     return {"games": ordered}
 
 
@@ -739,8 +799,8 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Age-restricted content")
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         g.pop("script", None)
-    [out] = await _attach_group_info([_game_defaults(g)])
-    return {"game": out}
+    out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g)]))
+    return {"game": out_list[0]}
 
 
 # ---------- Server instances ----------
