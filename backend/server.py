@@ -84,6 +84,15 @@ except Exception as exc:  # noqa: BLE001
     make_group_router = None
     log.warning("Groups disabled: %s", exc)
 
+# GAME COLLABORATION / TESTERS: acces de Editor (granular, pe fisiere/foldere) si Tester
+# pentru un joc - complet separat de Groups (vezi astran_sandbox/game_permissions.py).
+try:
+    from astran_sandbox.game_permissions import get_game_access, make_game_permissions_router
+except Exception as exc:  # noqa: BLE001
+    get_game_access = None
+    make_game_permissions_router = None
+    log.warning("Game collaboration/testers disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -604,14 +613,38 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g:
         raise HTTPException(status_code=404, detail="Game not found")
-    if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
-        raise HTTPException(status_code=403, detail="Not the owner")
+
+    is_owner_actor = g["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
+
     updates = {
         k: v for k, v in body.dict(exclude={"clear_player_character", "group_token", "clear_group"}).items()
         if v is not None
     }
+    character_touched = bool(body.clear_player_character) or ("player_character_model_id" in updates)
     if body.clear_player_character:
         updates["player_character_model_id"] = None
+
+    group_touched = bool(body.clear_group) or (body.group_token is not None)
+    publish_touched = "is_public" in updates
+    settings_touched = group_touched or character_touched or bool(
+        {"title", "description", "category", "age_category", "thumbnail_url", "max_players"} & updates.keys()
+    )
+    build_touched = bool({"scene", "script"} & updates.keys())
+
+    # SECURITY (item 15): verificare in BACKEND, camp cu camp - un Editor nu primeste
+    # niciodata mai mult decat i s-a acordat explicit (vezi game_permissions.py).
+    if not is_owner_actor:
+        if get_game_access is None:
+            raise HTTPException(status_code=403, detail="Not the owner")
+        access = await get_game_access(db, g, current)
+        if access.role != "editor":
+            raise HTTPException(status_code=403, detail="Not the owner")
+        if settings_touched and not access.can_change_settings:
+            raise HTTPException(status_code=403, detail="No permission to change game settings")
+        if build_touched and not access.can_edit_files:
+            raise HTTPException(status_code=403, detail="No permission to edit the game")
+        if publish_touched and not access.can_publish:
+            raise HTTPException(status_code=403, detail="No permission to publish this game")
 
     # GROUPS: asociere/dezasociere DOAR prin tokenul privat, validat aici.
     if body.clear_group:
@@ -644,6 +677,8 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
 
 @api.delete("/games/{game_id}")
 async def delete_game(game_id: str, current=Depends(get_current_user)):
+    # Stergerea jocului ramane EXCLUSIV a Owner-ului (sau platform admin) - niciun nivel
+    # de Editor, oricat de "full", nu primeste aceasta actiune (ireversibila, distructiva).
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -651,6 +686,8 @@ async def delete_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Not the owner")
     await db.games.delete_one({"game_id": game_id})
     await db.game_instances.delete_many({"game_id": game_id})
+    await db.game_collaborators.delete_many({"game_id": game_id})
+    await db.game_testers.delete_many({"game_id": game_id})
     return {"ok": True}
 
 
@@ -730,6 +767,17 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
+
+    # SECURITY (items 12/13/15): un joc PRIVAT (draft, inca nepublicat) se poate juca
+    # doar de owner, de un Editor, sau de un Tester caruia i s-a dat acces explicit -
+    # niciodata doar pentru ca cineva "stie" game_id-ul. Jocurile publice raman neschimbate.
+    if not g.get("is_public") and g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+        if get_game_access is None:
+            raise HTTPException(status_code=403, detail="This game is private")
+        access = await get_game_access(db, g, current)
+        if not access.can_play:
+            raise HTTPException(status_code=403, detail="This game is private")
+
     g = _game_defaults(g)
     max_players = g["max_players"]
 
@@ -1150,6 +1198,11 @@ if make_user_settings_router is not None:
 # GROUPS: /api/groups (create, page, membri, roluri, mute/ban, token privat, chat de grup)
 if make_group_router is not None:
     api.include_router(make_group_router(get_current_user, db, _user_public))
+
+# GAME COLLABORATION / TESTERS: /api/games/{id}/collaborators, /api/games/{id}/testers,
+# /api/games/{id}/my-access
+if make_game_permissions_router is not None:
+    api.include_router(make_game_permissions_router(get_current_user, db, _user_public))
 
 app.include_router(api)
 
