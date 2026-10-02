@@ -12,6 +12,13 @@ import { colors, radius, spacing } from "@/src/theme";
 
 const { width: SW } = Dimensions.get("window");
 
+function formatDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
 export default function GameDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -33,6 +40,9 @@ export default function GameDetail() {
   if (err) return <SafeAreaView style={styles.center}><Text style={{ color: colors.error }} testID="game-error">{err}</Text></SafeAreaView>;
   if (!game) return <SafeAreaView style={styles.center}><ActivityIndicator color={colors.brand} /></SafeAreaView>;
 
+  const createdLabel = formatDate(game.created_at);
+  const updatedLabel = formatDate(game.updated_at);
+
   return (
     <View style={styles.root}>
       <View style={styles.hero}>
@@ -52,15 +62,47 @@ export default function GameDetail() {
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
         <Text style={styles.title} testID="game-title">{game.title}</Text>
+
         <View style={styles.metaRow}>
           <MaterialCommunityIcons name="account" size={14} color={colors.brand} />
           <Text style={styles.creator}>{game.owner_username}</Text>
+          {game.group_name ? (
+            <>
+              <Text style={styles.metaSep}>·</Text>
+              <MaterialCommunityIcons name="account-group" size={14} color={colors.brand} />
+              <Pressable onPress={() => game.group_id && router.push({ pathname: "/group/[id]", params: { id: game.group_id } })}>
+                <Text style={styles.creator}>{game.group_name}</Text>
+              </Pressable>
+            </>
+          ) : null}
         </View>
+
         <View style={styles.stats}>
           <Stat icon="account-multiple" value={game.player_count} label="Playing" />
-          <Stat icon="play-circle" value={game.total_plays} label="Plays" />
+          <Stat icon="play-circle" value={game.total_plays} label="Visits" />
           <Stat icon="heart" value={game.likes} label="Likes" />
+          <Stat icon="server" value={game.max_players} label="Server Size" />
         </View>
+
+        {(createdLabel || updatedLabel) ? (
+          <View style={styles.datesRow}>
+            {createdLabel ? (
+              <View style={styles.dateBox}>
+                <Text style={styles.dateLabel}>CREATED</Text>
+                <Text style={styles.dateValue}>{createdLabel}</Text>
+              </View>
+            ) : null}
+            {updatedLabel ? (
+              <View style={styles.dateBox}>
+                <Text style={styles.dateLabel}>UPDATED</Text>
+                <Text style={styles.dateValue}>{updatedLabel}</Text>
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <Text style={styles.draftHint}>This game hasn't been published publicly yet.</Text>
+        )}
+
         <Text style={styles.desc}>{game.description}</Text>
       </ScrollView>
 
@@ -96,8 +138,13 @@ const styles = StyleSheet.create({
   ageBadgeText: { color: "#fff", fontWeight: "900", fontSize: 12 },
   title: { color: colors.onSurface, fontSize: 28, fontWeight: "900", letterSpacing: -0.5 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6 },
+  metaSep: { color: colors.onSurface3, marginHorizontal: 4 },
   creator: { color: colors.brand, fontSize: 13, fontWeight: "700" },
-  stats: { flexDirection: "row", justifyContent: "space-around", marginTop: 20, marginBottom: 20, padding: spacing.lg, backgroundColor: colors.surface2, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  stats: { flexDirection: "row", justifyContent: "space-around", marginTop: 20, marginBottom: 16, padding: spacing.lg, backgroundColor: colors.surface2, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  datesRow: { flexDirection: "row", gap: 10, marginBottom: 20 },
+  dateBox: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, padding: 12 },
+  dateLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+  dateValue: { color: colors.onSurface, fontSize: 13, fontWeight: "700", marginTop: 4 },
+  draftHint: { color: colors.onSurface3, fontSize: 12, fontStyle: "italic", marginBottom: 20 },
   desc: { color: colors.onSurface2, fontSize: 14, lineHeight: 21 },
-  footer: { position: "absolute", left: 0, right: 0, bottom: 0, padding: spacing.lg, backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border },
 });
