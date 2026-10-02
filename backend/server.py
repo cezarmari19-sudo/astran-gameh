@@ -76,6 +76,14 @@ except Exception as exc:  # noqa: BLE001
     make_user_settings_router = None
     log.warning("User settings disabled: %s", exc)
 
+# GROUPS: Grupuri (Owner/Admin/Member, mute/ban, token privat, chat de grup) - optional,
+# la fel ca celelalte module sandbox (daca lipseste, restul API-ului merge normal).
+try:
+    from astran_sandbox.group_routes import make_group_router
+except Exception as exc:  # noqa: BLE001
+    make_group_router = None
+    log.warning("Groups disabled: %s", exc)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -167,6 +175,8 @@ class GameCreateBody(BaseModel):
     max_players: int = Field(default=MAX_PLAYERS_DEFAULT, ge=MAX_PLAYERS_MIN, le=MAX_PLAYERS_MAX)
     # daca setat, jucatorii intra in joc cu acest model (din Studio) in loc de avatarul lor personal
     player_character_model_id: Optional[str] = Field(default=None, max_length=64)
+    # GROUPS: token privat al unui Group (optional) - daca e valid, jocul se publica sub acel Group
+    group_token: Optional[str] = Field(default=None, max_length=64)
 
 
 class GameUpdateBody(BaseModel):
@@ -181,6 +191,9 @@ class GameUpdateBody(BaseModel):
     max_players: Optional[int] = Field(default=None, ge=MAX_PLAYERS_MIN, le=MAX_PLAYERS_MAX)
     player_character_model_id: Optional[str] = Field(default=None, max_length=64)
     clear_player_character: Optional[bool] = None  # true = revine la avatarul personal al jucatorului
+    # GROUPS: schimba/elimina asocierea cu un Group (vezi create_game/update_game mai jos)
+    group_token: Optional[str] = Field(default=None, max_length=64)
+    clear_group: Optional[bool] = None
 
 
 class GamePublic(BaseModel):
@@ -196,11 +209,17 @@ class GamePublic(BaseModel):
     player_count: int = 0
     total_plays: int = 0
     likes: int = 0
-    created_at: datetime
-    updated_at: datetime
+    # Prima, respectiv ultima, PUBLICARE PUBLICA a jocului (nu data crearii randului in DB).
+    # None daca jocul nu a fost niciodata publicat public (draft/private) - vezi _game_defaults.
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     status: str = "active"
     max_players: int = MAX_PLAYERS_DEFAULT
     player_character_model_id: Optional[str] = None
+    # GROUPS
+    group_id: Optional[str] = None
+    group_name: Optional[str] = None
+    group_logo_url: Optional[str] = None
 
 
 class FriendRequestBody(BaseModel):
@@ -271,6 +290,7 @@ async def startup():
     await db.games.create_index("game_id", unique=True)
     await db.games.create_index([("owner_id", 1), ("created_at", -1)])
     await db.games.create_index([("age_category", 1), ("is_public", 1), ("total_plays", -1)])
+    await db.games.create_index("group_id")  # GROUPS: lookup rapid al jocurilor unui Group
     await db.friendships.create_index([("user_a", 1), ("user_b", 1)], unique=True)
     await db.friend_requests.create_index([("from_id", 1), ("to_id", 1)], unique=True)
     await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
@@ -501,15 +521,55 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
 
 
 def _game_defaults(doc: dict) -> dict:
-    """Completeaza campurile noi (max_players, player_character) pentru jocurile salvate inainte de ele."""
+    """Completeaza campurile noi (max_players, player_character, group) pentru jocurile
+    salvate inainte de ele, si expune created_at/updated_at cu semantica ceruta:
+    PRIMA, respectiv ULTIMA, publicare PUBLICA a jocului - nu data la care a fost creat
+    randul in baza de date (acel moment intern ramane in 'record_created_at', folosit
+    pentru sortarea interna - vezi my_games/discover, neschimbate)."""
     doc.setdefault("max_players", MAX_PLAYERS_DEFAULT)
     doc.setdefault("player_character_model_id", None)
+    doc.setdefault("group_id", None)
+    doc["record_created_at"] = doc.get("created_at")
+    doc["created_at"] = doc.get("published_created_at")
+    doc["updated_at"] = doc.get("published_updated_at")
     return doc
+
+
+async def _attach_group_info(games: list[dict]) -> list[dict]:
+    """GROUPS: adauga group_name/group_logo_url (niciodata tokenul) pe fiecare joc care
+    are group_id - un singur query batch, nu N+1, indiferent cate jocuri sunt in lista."""
+    ids = {g["group_id"] for g in games if g.get("group_id")}
+    if not ids:
+        for g in games:
+            g.setdefault("group_name", None)
+            g.setdefault("group_logo_url", None)
+        return games
+    groups = await db.groups.find(
+        {"group_id": {"$in": list(ids)}}, {"_id": 0, "group_id": 1, "name": 1, "logo_url": 1}
+    ).to_list(len(ids))
+    by_id = {gr["group_id"]: gr for gr in groups}
+    for g in games:
+        gi = by_id.get(g.get("group_id"))
+        g["group_name"] = gi["name"] if gi else None
+        g["group_logo_url"] = gi.get("logo_url") if gi else None
+    return games
 
 
 @api.post("/games")
 async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
     gid = new_id("game_")
+
+    # GROUPS: asociere DOAR prin tokenul privat, validat aici - niciodata prin group_id public.
+    group_id = None
+    if body.group_token:
+        grp = await db.groups.find_one({"token": body.group_token}, {"_id": 0, "group_id": 1})
+        if not grp:
+            raise HTTPException(status_code=400, detail="Invalid Group token")
+        group_id = grp["group_id"]
+
+    # Created/Updated afisate = prima/ultima publicare PUBLICA, nu momentul crearii randului.
+    published_ts = now_utc() if body.is_public else None
+
     doc = {
         "game_id": gid,
         "owner_id": current["user_id"],
@@ -520,11 +580,13 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "is_public": body.is_public,
         "thumbnail_url": body.thumbnail_url,
         "category": body.category,
+        "group_id": group_id,
         "player_count": 0,
         "total_plays": 0,
         "likes": 0,
-        "created_at": now_utc(),
-        "updated_at": now_utc(),
+        "created_at": now_utc(),  # moment intern de creare a randului (sortare interna)
+        "published_created_at": published_ts,
+        "published_updated_at": published_ts,
         "status": "active",
         "allow_join_via_friends": body.allow_join_via_friends,
         "scene": body.scene or {"objects": [], "sky": "#0F1012", "ground": "#1A1D21"},
@@ -533,7 +595,8 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "player_character_model_id": body.player_character_model_id,
     }
     await db.games.insert_one(doc)
-    return {"game": {k: v for k, v in doc.items() if k != "_id"}}
+    [out] = await _attach_group_info([_game_defaults({k: v for k, v in doc.items() if k != "_id"})])
+    return {"game": out}
 
 
 @api.patch("/games/{game_id}")
@@ -543,14 +606,40 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
         raise HTTPException(status_code=404, detail="Game not found")
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         raise HTTPException(status_code=403, detail="Not the owner")
-    updates = {k: v for k, v in body.dict(exclude={"clear_player_character"}).items() if v is not None}
+    updates = {
+        k: v for k, v in body.dict(exclude={"clear_player_character", "group_token", "clear_group"}).items()
+        if v is not None
+    }
     if body.clear_player_character:
         updates["player_character_model_id"] = None
+
+    # GROUPS: asociere/dezasociere DOAR prin tokenul privat, validat aici.
+    if body.clear_group:
+        updates["group_id"] = None
+    elif body.group_token is not None:
+        if body.group_token == "":
+            updates["group_id"] = None
+        else:
+            grp = await db.groups.find_one({"token": body.group_token}, {"_id": 0, "group_id": 1})
+            if not grp:
+                raise HTTPException(status_code=400, detail="Invalid Group token")
+            updates["group_id"] = grp["group_id"]
+
+    # Created/Updated (afisate) NU sunt editabile manual - nu exista camp pentru ele in body.
+    # "Updated" se schimba doar cand jocul (re)devine public prin acest request; "Created"
+    # se seteaza o singura data, la prima publicare publica, si ramane neschimbat dupa.
+    resulting_public = updates.get("is_public", g.get("is_public", False))
+    if updates and resulting_public:
+        now = now_utc()
+        updates["published_updated_at"] = now
+        if not g.get("published_created_at"):
+            updates["published_created_at"] = now
+
     if updates:
-        updates["updated_at"] = now_utc()
         await db.games.update_one({"game_id": game_id}, {"$set": updates})
     g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    return {"game": _game_defaults(g2)}
+    [out] = await _attach_group_info([_game_defaults(g2)])
+    return {"game": out}
 
 
 @api.delete("/games/{game_id}")
@@ -579,14 +668,14 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
     }
     sort = sort_map.get(section, sort_map["for_you"])
     cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
-    games = [_game_defaults(g) for g in await cursor.to_list(30)]
+    games = await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(30)])
     return {"section": section, "games": games}
 
 
 @api.get("/games/mine")
 async def my_games(current=Depends(get_current_user)):
     cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0, "script": 0}).sort("created_at", -1)
-    games = [_game_defaults(g) for g in await cursor.to_list(100)]
+    games = await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
     return {"games": games}
 
 
@@ -598,8 +687,10 @@ async def recently_played(current=Depends(get_current_user)):
     if not game_ids:
         return {"games": []}
     games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0, "script": 0}).to_list(50)
-    idx = {g["game_id"]: _game_defaults(g) for g in games}
-    return {"games": [idx[gid] for gid in game_ids if gid in idx]}
+    idx = {g["game_id"]: g for g in games}
+    ordered = [idx[gid] for gid in game_ids if gid in idx]
+    ordered = await _attach_group_info([_game_defaults(g) for g in ordered])
+    return {"games": ordered}
 
 
 @api.get("/games/{game_id}")
@@ -611,7 +702,8 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Age-restricted content")
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         g.pop("script", None)
-    return {"game": _game_defaults(g)}
+    [out] = await _attach_group_info([_game_defaults(g)])
+    return {"game": out}
 
 
 # ---------- Server instances ----------
@@ -1054,6 +1146,10 @@ if make_avatar_router is not None:
 # Setari de player: /api/settings/me (GET/PUT) - vezi astran_sandbox/user_settings_routes.py
 if make_user_settings_router is not None:
     api.include_router(make_user_settings_router(get_current_user, db))
+
+# GROUPS: /api/groups (create, page, membri, roluri, mute/ban, token privat, chat de grup)
+if make_group_router is not None:
+    api.include_router(make_group_router(get_current_user, db, _user_public))
 
 app.include_router(api)
 
