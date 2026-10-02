@@ -61,6 +61,7 @@ export default function ProfileScreen() {
         </View>
 
         <Row icon="account-outline" label="Avatar" onPress={() => router.push("/(tabs)/avatar" as any)} testID="profile-avatar" />
+        <Row icon="account-group-outline" label="Groups" onPress={() => router.push("/group")} testID="profile-groups" />
         <Row icon="wallet-outline" label={t("wallet")} onPress={() => router.push("/wallet")} testID="profile-wallet" />
         <Row icon="cog-outline" label={t("settings")} onPress={() => router.push("/settings")} testID="profile-settings" />
         <Row icon="translate" label={t("language")} onPress={() => router.push("/language")} testID="profile-language" />
