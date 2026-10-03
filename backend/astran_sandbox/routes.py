@@ -91,6 +91,11 @@ except Exception:  # noqa: BLE001 - modulul de permisiuni e optional, ca restul 
 log = logging.getLogger("astran.sandbox")
 
 RUNS_PER_MINUTE = 30
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+# Cat de des se curata recent_runs de utilizatori inactivi (vezi check_rate_limit mai
+# jos) - nu la fiecare request, ca sa nu coste un scan complet al dictionarului de
+# fiecare data cand cineva ruleaza un script.
+RATE_LIMIT_SWEEP_INTERVAL_SECONDS = 300.0
 
 # ---------- limitele proiectului (Code Editor / File Explorer) ----------
 # Astea sunt limitele intregului proiect (toate tipurile de fisiere la un loc), mult
@@ -299,15 +304,28 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
     router = APIRouter(prefix="/sandbox", tags=["sandbox"])
     recent_runs: dict[str, deque] = defaultdict(deque)
     index_ready = False
+    last_sweep = time.monotonic()
 
     def check_rate_limit(user_id: str) -> None:
+        nonlocal last_sweep
         now = time.monotonic()
         hits = recent_runs[user_id]
-        while hits and now - hits[0] > 60:
+        while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
             hits.popleft()
         if len(hits) >= RUNS_PER_MINUTE:
             raise HTTPException(status_code=429, detail="Too many script runs, try again in a minute")
         hits.append(now)
+
+        # Curatare periodica: fara ea, recent_runs ar creste la nesfarsit cu cate o
+        # intrare pentru FIECARE user care a rulat vreodata un script, chiar mult dupa
+        # ce fereastra lui de 60s a expirat - un memory leak lent, dar real, pe un
+        # server care ruleaza luni/ani. Scanam dictionarul doar rar (nu la fiecare
+        # request), ca sa nu coste un scan complet de fiecare data.
+        if now - last_sweep > RATE_LIMIT_SWEEP_INTERVAL_SECONDS:
+            last_sweep = now
+            stale = [uid for uid, h in recent_runs.items() if not h or now - h[-1] > RATE_LIMIT_WINDOW_SECONDS]
+            for uid in stale:
+                del recent_runs[uid]
 
     def sandbox_error(exc: Exception) -> HTTPException:
         if isinstance(exc, HTTPException):
