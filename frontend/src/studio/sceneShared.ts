@@ -37,7 +37,50 @@ export type SceneObj = {
   teamId?: string;       // rezervat pentru reguli viitoare de spawn pe echipe/grupuri (spawn doar pentru echipa X) - neimplementat inca, dar campul exista ca arhitectura sa nu presupuna un singur spawn "universal"
 };
 
-export type Scene = { objects: SceneObj[]; sky: string; ground: string };
+// BASEPLATE: groundWidth/groundDepth sunt proprietati REALE ale scenei (ca sky/ground),
+// NU un obiect din `objects[]` - intentionat, ca sa nu poata fi niciodata prins accidental
+// in selectie multipla, duplicare, rotatie sau scalare uniforma ca un cub oarecare. Se
+// editeaza DOAR printr-un panou dedicat (vezi BaseplateInspector din studio/create.tsx).
+// Lipsa lor (jocuri vechi) cade pe DEFAULT_GROUND_WIDTH/DEPTH de mai jos - comportament
+// identic cu gridul fix de dinainte de aceasta functionalitate.
+export type Scene = {
+  objects: SceneObj[];
+  sky: string;
+  ground: string;
+  groundWidth?: number;
+  groundDepth?: number;
+};
+
+export const GROUND_MIN = 4;
+export const GROUND_MAX = 2000;
+export const DEFAULT_GROUND_WIDTH = 100;
+export const DEFAULT_GROUND_DEPTH = 100;
+
+export function groundWidthOf(s: Pick<Scene, "groundWidth">): number {
+  const v = s.groundWidth;
+  return typeof v === "number" && v > 0 ? v : DEFAULT_GROUND_WIDTH;
+}
+
+export function groundDepthOf(s: Pick<Scene, "groundDepth">): number {
+  const v = s.groundDepth;
+  return typeof v === "number" && v > 0 ? v : DEFAULT_GROUND_DEPTH;
+}
+
+export function clampGroundSize(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_GROUND_WIDTH;
+  return Math.max(GROUND_MIN, Math.min(GROUND_MAX, Math.round(v)));
+}
+
+// Geometria reala a Baseplate-ului - un segment pe unitate (pastreaza densitatea gridului
+// de dinainte: 20x20 unitati = 20x20 segmente), plafonat ca sa nu generam zeci de mii de
+// triunghiuri pentru un Baseplate foarte mare.
+const MAX_GRID_SEGMENTS = 200;
+
+export function buildGroundGeometry(width: number, depth: number): THREE.PlaneGeometry {
+  const segX = Math.max(1, Math.min(MAX_GRID_SEGMENTS, Math.round(width)));
+  const segZ = Math.max(1, Math.min(MAX_GRID_SEGMENTS, Math.round(depth)));
+  return new THREE.PlaneGeometry(width, depth, segX, segZ);
+}
 
 export const PALETTE = ["#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "#FF9500", "#B266FF", "#FFFFFF", "#666666"];
 
