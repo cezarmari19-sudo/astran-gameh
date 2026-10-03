@@ -38,6 +38,10 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")       # id de obiect (din script sau din scena Studio)
 _MATERIAL_ID_RE = re.compile(r"^m[0-9]{1,4}$")         # id de material: m1, m2, ...
 
+import logging
+
+log = logging.getLogger("astran.sandbox.runner")
+
 
 class SandboxUnavailable(RuntimeError):
     """Binarul luau-sandbox nu este instalat pe server."""
@@ -251,6 +255,99 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
+# ---------- jail OS suplimentar (bubblewrap) ----------
+#
+# Tot ce e mai jos e un strat de izolare IN PLUS fata de cel existent (rlimit + env
+# gol), nu un inlocuitor: Luau insusi nu ofera scriptului nicio cale spre OS (fara
+# io/os.execute/require real - vezi host.cpp), deci un script "normal", care respecta
+# doar limbajul, e oricum blocat. Stratul de aici e pentru cazul (rar) al unui bug de
+# corupere de memorie chiar in interpretorul/compilatorul Luau: daca un script ar
+# reusi, printr-un asemenea bug, sa execute cod nativ, acest cod s-ar trezi intr-un
+# proces fara retea, intr-un filesystem minimal READ-ONLY (doar binarul si preludiul),
+# rulat ca utilizatorul neprivilegiat "nobody" - nu in filesystem-ul real al
+# serverului (unde sunt .env, codul sursa, etc).
+#
+# Daca `bwrap` (bubblewrap) nu e instalat SAU namespace-urile neprivilegiate sunt
+# blocate de kernel/politica containerului, scriptele tot ruleaza normal - izolate
+# exact ca pana acum (rlimit + env gol) - doar fara acest strat suplimentar. Vezi
+# astran_sandbox/Dockerfile pentru cum se instaleaza bubblewrap la build.
+
+_bwrap_checked = False
+_bwrap_path: Optional[str] = None
+
+
+async def _check_bwrap() -> Optional[str]:
+    """Verifica o singura data (prima rulare) daca bubblewrap chiar functioneaza in
+    acest mediu - nu doar daca binarul exista pe disc. Rezultatul e memorat pentru
+    restul vietii procesului (nu se schimba intre doua request-uri)."""
+    global _bwrap_checked, _bwrap_path
+    if _bwrap_checked:
+        return _bwrap_path
+    _bwrap_checked = True
+
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        log.warning(
+            "bubblewrap (bwrap) nu e instalat - sandbox-ul Luau ruleaza fara jail-ul "
+            "suplimentar de OS (fara namespace de retea, fara filesystem minimal "
+            "read-only). Scriptul Luau tot nu are nicio cale spre io/os.execute/require "
+            "(vezi host.cpp) - lipseste doar acest strat in plus pentru un eventual bug "
+            "de memorie in interpretorul Luau insusi. Instaleaza bubblewrap (vezi "
+            "astran_sandbox/Dockerfile) ca sa activezi acest strat."
+        )
+        return None
+
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            bwrap, "--unshare-all", "--die-with-parent",
+            "--ro-bind", "/bin", "/bin",
+            "--", "/bin/true",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _out, err = await asyncio.wait_for(probe.communicate(), timeout=5.0)
+        if probe.returncode != 0:
+            raise RuntimeError((err or b"").decode("utf-8", "replace")[:300] or f"exit code {probe.returncode}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "bubblewrap e instalat dar nu functioneaza in acest mediu (%s) - probabil "
+            "namespace-urile neprivilegiate sunt blocate aici. Sandbox-ul ruleaza fara "
+            "jail-ul suplimentar de OS, la fel ca atunci cand bwrap lipseste.", exc,
+        )
+        return None
+
+    _bwrap_path = bwrap
+    log.info("bubblewrap activ: sandbox-ul Luau ruleaza izolat la nivel de OS (fara retea, filesystem read-only).")
+    return bwrap
+
+
+def _bwrap_wrap(bwrap: str, binary: str, prelude: Path, cmd: list[str]) -> list[str]:
+    """Infasoara comanda luau-sandbox cu bubblewrap: fara retea si fara niciun alt
+    namespace comun cu gazda (--unshare-all), filesystem READ-ONLY cu DOAR binarul si
+    preludiul vizibile (nimic din restul serverului - .env, codul sursa, baza de date
+    - nu exista in acest filesystem), /tmp propriu si gol, rulat ca "nobody"
+    (uid/gid 65534), si omorat automat daca procesul Python-ului moare primul."""
+    binary_abs = os.path.abspath(binary)
+    prelude_abs = str(prelude.resolve())
+    return [
+        bwrap,
+        "--ro-bind", binary_abs, binary_abs,
+        "--ro-bind", prelude_abs, prelude_abs,
+        "--tmpfs", "/tmp",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--chdir", "/",
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--uid", "65534",
+        "--gid", "65534",
+        "--",
+        *cmd,
+    ]
+
+
 # ---------- rezultat ----------
 
 def _number(v: Any) -> Optional[float]:
@@ -425,14 +522,20 @@ async def run_files(
     if binary is None or not PRELUDE.is_file():
         raise SandboxUnavailable("luau-sandbox is not built on this server (run astran_sandbox/build.sh)")
 
+    base_cmd = [
+        binary,
+        "--timeout", str(timeout_ms),
+        "--mem", str(mem_mb),
+        "--prelude", str(PRELUDE),
+        "--entry", ENTRY_NAME,
+        "-",
+    ]
+    bwrap = await _check_bwrap()
+    cmd = _bwrap_wrap(bwrap, binary, PRELUDE, base_cmd) if bwrap else base_cmd
+
     async with _get_semaphore():
         proc = await asyncio.create_subprocess_exec(
-            binary,
-            "--timeout", str(timeout_ms),
-            "--mem", str(mem_mb),
-            "--prelude", str(PRELUDE),
-            "--entry", ENTRY_NAME,
-            "-",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
