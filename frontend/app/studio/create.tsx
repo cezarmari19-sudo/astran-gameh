@@ -32,6 +32,13 @@ type ModelPick = { model_id: string; name: string; part_count: number };
 
 const EMPTY_PROJECT: ProjectState = { files: [], folders: [] };
 
+// ---------- camera liberă (poziție + yaw/pitch) - DOAR pentru Studio, Play Mode e neatins ----------
+const ROTATE_SPEED = 0.006;      // sensibilitate swipe -> rotire cameră (nemodificat ca "feel" fata de orbit)
+const MAX_PITCH = 1.4;           // ~80°, evita flip-ul camerei quando privesti drept in sus/jos
+const MOVE_SPEED = 6;            // unitati pe secunda la deplasare cu D-pad/tastatura
+const DOLLY_SPEED = 10;          // viteza de deplasare inainte/inapoi din pinch
+type MoveKey = "forward" | "back" | "left" | "right" | "up" | "down";
+
 export default function StudioEditor() {
   const router = useRouter();
   const { t } = useI18n();
@@ -42,6 +49,7 @@ export default function StudioEditor() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState("adventure");
+  const [subgenre, setSubgenre] = useState("");
   const [ageCategory, setAgeCategory] = useState<"under_18" | "adult_18">("under_18");
   const [isPublic, setIsPublic] = useState(true);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
@@ -89,19 +97,42 @@ export default function StudioEditor() {
   const alive = useRef(true);
   const canvasSize = useRef({ w: 1, h: 1 });
 
-  // Camera orbit
-  const cameraTarget = useRef(new THREE.Vector3(0, 0, 0));
-  const cameraAngle = useRef(0.6);
-  const cameraPolar = useRef(0.85);
-  const cameraDistance = useRef(9);
-  const lastAngle = useRef(0.6);
-  const lastPolar = useRef(0.85);
-  const lastDistance = useRef(9);
+  // --- Camera liberă: poziție în lume + unghiuri de privire (yaw = orizontal, pitch = vertical) ---
+  const cameraPos = useRef(new THREE.Vector3(0, 6, 10));
+  const yaw = useRef(0);
+  const pitch = useRef(0);
+  const lastYaw = useRef(0);
+  const lastPitch = useRef(0);
+  const pinchStartPos = useRef(new THREE.Vector3());
+  // Taste/butoane de mișcare active în acest moment (Studio only - Play Mode nu e atins)
+  const activeMoves = useRef<Set<MoveKey>>(new Set());
+  const lastFrameTime = useRef<number>(0);
 
-  // Box Select
-  const [selectMode, setSelectMode] = useState(false);
-  const [boxRect, setBoxRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
-  const boxStart = useRef<{ x: number; y: number } | null>(null);
+  function forwardVector(): THREE.Vector3 {
+    return new THREE.Vector3(
+      Math.sin(yaw.current) * Math.cos(pitch.current),
+      Math.sin(pitch.current),
+      Math.cos(yaw.current) * Math.cos(pitch.current),
+    );
+  }
+
+  // Strafe orizontal (stânga/dreapta) - independent de pitch, ca într-un editor 3D real:
+  // nu vrei să "cazi" când te uiți în sus/jos și apeși stânga/dreapta.
+  function rightVector(): THREE.Vector3 {
+    return new THREE.Vector3(Math.cos(yaw.current), 0, -Math.sin(yaw.current));
+  }
+
+  // Orientează camera spre un punct din lume, fără să-i schimbe poziția - folosit de
+  // Focus (pe obiectul selectat) și de Reset View (spre originea scenei).
+  function lookAtPoint(point: THREE.Vector3) {
+    const dir = point.clone().sub(cameraPos.current);
+    const len = dir.length();
+    if (len < 0.0001) return;
+    dir.normalize();
+    yaw.current = Math.atan2(dir.x, dir.z);
+    pitch.current = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, Math.asin(Math.max(-1, Math.min(1, dir.y)))));
+    updateCameraPosition();
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -118,6 +149,7 @@ export default function StudioEditor() {
         const r = await api(`/games/${editingId}`);
         const g = r.game;
         setTitle(g.title); setDescription(g.description || ""); setCategory(g.category || "adventure");
+        setSubgenre(g.subgenre || "");
         setAgeCategory(g.age_category); setIsPublic(g.is_public);
         setThumbnail(g.thumbnail_url || null);
         setMaxPlayersText(String(g.max_players ?? 20));
@@ -147,6 +179,34 @@ export default function StudioEditor() {
     }).catch(() => {});
   }, []);
 
+  // --- Tastatură desktop/web (WASD + Space/Ctrl) - inert pe mobil; pe web devine activ doar
+  // când viewport-ul 3D rulează acolo (momentan Studio arată un placeholder pe web, vezi mai jos) ---
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    const KEY_MAP: Record<string, MoveKey> = {
+      KeyW: "forward", ArrowUp: "forward",
+      KeyS: "back", ArrowDown: "back",
+      KeyA: "left", ArrowLeft: "left",
+      KeyD: "right", ArrowRight: "right",
+      Space: "up",
+      ControlLeft: "down", ControlRight: "down",
+    };
+    const onDown = (e: KeyboardEvent) => {
+      const mv = KEY_MAP[e.code];
+      if (mv) { activeMoves.current.add(mv); e.preventDefault(); }
+    };
+    const onUp = (e: KeyboardEvent) => {
+      const mv = KEY_MAP[e.code];
+      if (mv) activeMoves.current.delete(mv);
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
+  }, []);
+
   function leave() {
     if (!projectDirty.current && !assetsDirty.current) { router.back(); return; }
     Alert.alert("Ieși fără să salvezi?", "Codul modificat nu a fost salvat și se va pierde.", [
@@ -164,14 +224,17 @@ export default function StudioEditor() {
   }, []);
 
   function addObject(type: ObjType) {
-    const tg = cameraTarget.current;
+    // Obiectele noi apar în fața camerei (pe planul orizontal la care privește momentan),
+    // nu mereu lângă același punct fix - util acum că te poți deplasa liber prin scenă.
+    const fwd = forwardVector();
+    const spawnPoint = cameraPos.current.clone().addScaledVector(new THREE.Vector3(fwd.x, 0, fwd.z).normalize() || fwd, 4);
     const snap = (v: number) => Math.round(v * 2) / 2;
     const obj: SceneObj = {
       id: uid(),
       type,
-      x: snap(tg.x + (Math.random() - 0.5) * 4),
+      x: snap(spawnPoint.x + (Math.random() - 0.5) * 2),
       y: 0,
-      z: snap(tg.z + (Math.random() - 0.5) * 4),
+      z: snap(spawnPoint.z + (Math.random() - 0.5) * 2),
       color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
       scale: 1,
       visible: true,
@@ -186,13 +249,17 @@ export default function StudioEditor() {
   // spawn-ul initial, ca jocul sa aiba mereu un loc de start valid din prima; poate fi schimbat
   // oricand din Inspector ("Fa spawn initial" - vezi setInitialSpawn mai jos).
   function addSpawnPoint(kind: SpawnKind) {
-    const tg = cameraTarget.current;
+    const fwd = forwardVector();
+    const horiz = new THREE.Vector2(fwd.x, fwd.z);
+    if (horiz.lengthSq() < 0.0001) horiz.set(0, 1);
+    horiz.normalize();
+    const spawnPoint = new THREE.Vector2(cameraPos.current.x, cameraPos.current.z).addScaledVector(horiz, 4);
     const noSpawnYet = kind === "spawn" && !scene.objects.some(o => o.type === SPAWN_TYPE && spawnKindOf(o) === "spawn");
     const obj: SceneObj = {
       id: uid(),
       type: SPAWN_TYPE,
       spawnKind: kind,
-      x: Math.round(tg.x * 2) / 2, y: 0, z: Math.round(tg.z * 2) / 2,
+      x: Math.round(spawnPoint.x * 2) / 2, y: 0, z: Math.round(spawnPoint.y * 2) / 2,
       color: kind === "checkpoint" ? "#00E5FF" : "#CCFF00",
       scale: 1, visible: false, solid: false, enabled: true,
       initial: noSpawnYet ? true : undefined,
@@ -263,8 +330,9 @@ export default function StudioEditor() {
     setBusy(true); setErr(null);
     try {
       const body: any = {
-        title, description, age_category: ageCategory, is_public: isPublic, category, thumbnail_url: thumbnail,
-        scene, max_players: maxPlayers,
+        title, description, age_category: ageCategory, is_public: isPublic, category,
+        subgenre: subgenre.trim() || null,
+        thumbnail_url: thumbnail, scene, max_players: maxPlayers,
       };
       if (playerCharacterId) { body.player_character_model_id = playerCharacterId; body.player_character_source = "shop_model"; }
       else body.clear_player_character = true;
@@ -368,29 +436,41 @@ export default function StudioEditor() {
     });
   }, [scene, selIds, glReady]);
 
+  // Aplica rotatia camerei (pozitie + lookAt derivat din yaw/pitch) catre obiectul three.js real.
   function updateCameraPosition() {
     const cam = cameraRef.current;
     if (!cam) return;
-    const r = cameraDistance.current;
-    const theta = cameraAngle.current;
-    const phi = cameraPolar.current;
-    const tg = cameraTarget.current;
-    cam.position.x = tg.x + r * Math.sin(phi) * Math.cos(theta);
-    cam.position.z = tg.z + r * Math.sin(phi) * Math.sin(theta);
-    cam.position.y = tg.y + r * Math.cos(phi);
-    cam.lookAt(tg);
+    cam.position.copy(cameraPos.current);
+    const lookTarget = cameraPos.current.clone().add(forwardVector());
+    cam.lookAt(lookTarget);
+  }
+
+  // Deplaseaza camera in functie de butoanele/tastele tinute apasate, in directia in care
+  // priveste (nu muta obiectele) - apelata in fiecare frame din bucla de render de mai jos.
+  function applyMovement(dt: number) {
+    if (activeMoves.current.size === 0) return;
+    const fwd = forwardVector();
+    const right = rightVector();
+    const step = MOVE_SPEED * dt;
+    const moves = activeMoves.current;
+    if (moves.has("forward")) cameraPos.current.addScaledVector(fwd, step);
+    if (moves.has("back")) cameraPos.current.addScaledVector(fwd, -step);
+    if (moves.has("right")) cameraPos.current.addScaledVector(right, step);
+    if (moves.has("left")) cameraPos.current.addScaledVector(right, -step);
+    if (moves.has("up")) cameraPos.current.y += step;
+    if (moves.has("down")) cameraPos.current.y -= step;
+    updateCameraPosition();
   }
 
   function focusSel() {
     const o = scene.objects.find(x => x.id === selIds[selIds.length - 1]);
     if (!o) return;
-    cameraTarget.current.set(o.x, o.y + 0.5 * o.scale * (o.sy ?? 1), o.z);
-    updateCameraPosition();
+    lookAtPoint(new THREE.Vector3(o.x, o.y + 0.5 * o.scale * (o.sy ?? 1), o.z));
   }
 
   function resetView() {
-    cameraTarget.current.set(0, 0, 0);
-    updateCameraPosition();
+    cameraPos.current.set(0, 6, 10);
+    lookAtPoint(new THREE.Vector3(0, 0, 0));
   }
 
   const onContextCreate = async (gl: any) => {
@@ -402,7 +482,7 @@ export default function StudioEditor() {
     sceneRef.current = s;
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100);
     cameraRef.current = camera;
-    updateCameraPosition();
+    resetView();
     s.add(new THREE.AmbientLight(0xffffff, 0.5));
     const dir = new THREE.DirectionalLight(0xffffff, 1.1);
     dir.position.set(5, 8, 4);
@@ -417,9 +497,14 @@ export default function StudioEditor() {
     Object.keys(meshMap.current).forEach(k => delete meshMap.current[k]);
     selBoxes.current = [];
 
+    lastFrameTime.current = 0;
     const render = () => {
       if (!alive.current) return;
       rafId.current = requestAnimationFrame(render);
+      const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+      const dt = lastFrameTime.current ? Math.min((now - lastFrameTime.current) / 1000, 0.1) : 0;
+      lastFrameTime.current = now;
+      applyMovement(dt);
       renderer.render(s, camera);
       gl.endFrameEXP();
     };
@@ -455,6 +540,10 @@ export default function StudioEditor() {
   };
 
   // --- Box Select: tragi un deget, se deseneaza un dreptunghi, la final selectam ce cade in el ---
+  const [selectMode, setSelectMode] = useState(false);
+  const [boxRect, setBoxRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const boxStart = useRef<{ x: number; y: number } | null>(null);
+
   const onBoxPanEvent = (e: any) => {
     if (!selectMode) return;
     const { x, y, state } = e.nativeEvent;
@@ -480,36 +569,41 @@ export default function StudioEditor() {
     }
   };
 
-  // --- Orbit camera (dezactivat cat timp Box Select e activ, ca sa nu se roteasca in timp ce tragi dreptunghiul) ---
+  // --- Rotire cameră prin swipe (dezactivat cat timp Box Select e activ) - acum ajustează
+  // direct yaw/pitch ale camerei libere, nu un unghi de orbit în jurul unei ținte ---
   const onPanGestureEvent = (e: any) => {
     if (selectMode) { onBoxPanEvent(e); return; }
     const { translationX, translationY } = e.nativeEvent;
-    cameraAngle.current = lastAngle.current - translationX * 0.008;
-    let newPolar = lastPolar.current - translationY * 0.008;
-    newPolar = Math.max(0.2, Math.min(Math.PI - 0.2, newPolar));
-    cameraPolar.current = newPolar;
+    yaw.current = lastYaw.current - translationX * ROTATE_SPEED;
+    pitch.current = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, lastPitch.current - translationY * ROTATE_SPEED));
     updateCameraPosition();
   };
   const onPanHandlerStateChange = (e: any) => {
     if (selectMode) { onBoxPanStateChange(e); return; }
     if (e.nativeEvent.oldState === State.ACTIVE) {
-      lastAngle.current = cameraAngle.current;
-      lastPolar.current = cameraPolar.current;
+      lastYaw.current = yaw.current;
+      lastPitch.current = pitch.current;
     }
   };
 
+  // --- Pinch: acum deplaseaza camera inainte/inapoi pe directia privirii (dolly), nu mai
+  // schimba o "distanta de orbit" care nu mai exista in modelul de camera libera ---
   const onPinchGestureEvent = (e: any) => {
     const scaleFactor = e.nativeEvent.scale;
-    let newDist = lastDistance.current / scaleFactor;
-    newDist = Math.max(3, Math.min(25, newDist));
-    cameraDistance.current = newDist;
+    const delta = (scaleFactor - 1) * DOLLY_SPEED;
+    cameraPos.current.copy(pinchStartPos.current).addScaledVector(forwardVector(), delta);
     updateCameraPosition();
   };
   const onPinchHandlerStateChange = (e: any) => {
-    if (e.nativeEvent.oldState === State.ACTIVE) {
-      lastDistance.current = cameraDistance.current;
+    if (e.nativeEvent.state === State.BEGAN) {
+      pinchStartPos.current.copy(cameraPos.current);
     }
   };
+
+  // --- Butoane de mișcare (D-pad + Up/Down): apasă și ții - mișcarea continuă e aplicată
+  // în bucla de render (applyMovement), nu aici - acestea doar pornesc/opresc direcția ---
+  function startMove(k: MoveKey) { activeMoves.current.add(k); }
+  function stopMove(k: MoveKey) { activeMoves.current.delete(k); }
 
   const singleSel = selIds.length === 1 ? scene.objects.find(o => o.id === selIds[0]) : undefined;
   const hasSpawnPoint = scene.objects.some(o => o.type === SPAWN_TYPE && spawnKindOf(o) === "spawn");
@@ -559,12 +653,71 @@ export default function StudioEditor() {
                     ) : null}
                     <View style={styles.hintPill} pointerEvents="none">
                       <MaterialCommunityIcons name="gesture-swipe" size={14} color={colors.onSurface3} />
-                      <Text style={styles.hintText}>{selectMode ? "Drag to box-select objects" : "Tap to select · Drag to rotate · Pinch to zoom"}</Text>
+                      <Text style={styles.hintText}>{selectMode ? "Drag to box-select objects" : "Swipe to look around · Tap to select · Pinch to move forward/back"}</Text>
                     </View>
                   </View>
                 </TapGestureHandler>
               </PanGestureHandler>
             </PinchGestureHandler>
+
+            {/* D-pad: deplasare pe planul orizontal, în direcția în care privește camera */}
+            <View style={styles.dpad} pointerEvents="box-none">
+              <Pressable
+                testID="editor-move-forward"
+                onPressIn={() => startMove("forward")}
+                onPressOut={() => stopMove("forward")}
+                style={[styles.dpadBtn, { top: 0, left: 46 }]}
+              >
+                <MaterialCommunityIcons name="chevron-up" size={26} color={colors.onSurface} />
+              </Pressable>
+              <Pressable
+                testID="editor-move-left"
+                onPressIn={() => startMove("left")}
+                onPressOut={() => stopMove("left")}
+                style={[styles.dpadBtn, { top: 46, left: 0 }]}
+              >
+                <MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} />
+              </Pressable>
+              <Pressable
+                testID="editor-move-right"
+                onPressIn={() => startMove("right")}
+                onPressOut={() => stopMove("right")}
+                style={[styles.dpadBtn, { top: 46, left: 92 }]}
+              >
+                <MaterialCommunityIcons name="chevron-right" size={26} color={colors.onSurface} />
+              </Pressable>
+              <Pressable
+                testID="editor-move-back"
+                onPressIn={() => startMove("back")}
+                onPressOut={() => stopMove("back")}
+                style={[styles.dpadBtn, { top: 92, left: 46 }]}
+              >
+                <MaterialCommunityIcons name="chevron-down" size={26} color={colors.onSurface} />
+              </Pressable>
+            </View>
+
+            {/* Up / Down: deplasare pe verticală (axa lumii, nu direcția privirii) */}
+            <View style={styles.vpad} pointerEvents="box-none">
+              <Pressable
+                testID="editor-move-up"
+                onPressIn={() => startMove("up")}
+                onPressOut={() => stopMove("up")}
+                style={[styles.dpadBtn, { top: 0 }]}
+              >
+                <MaterialCommunityIcons name="chevron-up" size={22} color={colors.onSurface} />
+                <Text style={styles.vpadLabel}>UP</Text>
+              </Pressable>
+              <Pressable
+                testID="editor-move-down"
+                onPressIn={() => startMove("down")}
+                onPressOut={() => stopMove("down")}
+                style={[styles.dpadBtn, { top: 92 }]}
+              >
+                <MaterialCommunityIcons name="chevron-down" size={22} color={colors.onSurface} />
+                <Text style={styles.vpadLabel}>DOWN</Text>
+              </Pressable>
+            </View>
+
             <Pressable testID="editor-select-mode" onPress={() => { setSelectMode(v => !v); setSelIds([]); }} style={[styles.viewBtn, { right: 54 }, selectMode && { borderColor: colors.brand, borderWidth: 1 }]}>
               <MaterialCommunityIcons name="selection-drag" size={20} color={selectMode ? colors.brand : colors.onSurface} />
             </Pressable>
@@ -700,7 +853,7 @@ export default function StudioEditor() {
             <TextInput testID="editor-title" value={title} onChangeText={setTitle} style={styles.input} placeholder="Neon Runner" placeholderTextColor={colors.onSurface3} />
             <Text style={styles.lab}>{t("game_desc")}</Text>
             <TextInput testID="editor-desc" value={description} onChangeText={setDescription} multiline style={[styles.input, { height: 80 }]} placeholder="..." placeholderTextColor={colors.onSurface3} />
-            <Text style={styles.lab}>Category</Text>
+            <Text style={styles.lab}>Genre</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
               {["adventure", "shooter", "simulation", "racing", "roleplay", "puzzle", "other"].map(c => (
                 <Pressable key={c} onPress={() => setCategory(c)} style={[styles.pill, category === c && styles.pillActive]} testID={`editor-cat-${c}`}>
@@ -708,6 +861,16 @@ export default function StudioEditor() {
                 </Pressable>
               ))}
             </ScrollView>
+            <Text style={styles.lab}>Subgenre (optional)</Text>
+            <TextInput
+              testID="editor-subgenre"
+              value={subgenre}
+              onChangeText={setSubgenre}
+              style={styles.input}
+              placeholder="e.g. Battle Royale, Tycoon, Horror..."
+              placeholderTextColor={colors.onSurface3}
+              maxLength={40}
+            />
             <Text style={styles.lab}>{t("age_select_title")}</Text>
             <View style={{ flexDirection: "row", gap: 8 }}>
               <Pressable testID="editor-age-under" onPress={() => setAgeCategory("under_18")} style={[styles.ageBtn, ageCategory === "under_18" && styles.ageBtnActive]}><Text style={[styles.ageBtnText, ageCategory === "under_18" && { color: colors.brand }]}>{t("age_under_18")}</Text></Pressable>
@@ -821,6 +984,14 @@ const styles = StyleSheet.create({
   hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
   boxSelectRect: { position: "absolute", borderWidth: 2, borderColor: colors.brand, backgroundColor: "rgba(204,255,0,0.15)" },
   viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
+  dpad: { position: "absolute", left: 14, bottom: 14, width: 138, height: 138 },
+  vpad: { position: "absolute", right: 14, bottom: 14, width: 52, height: 138 },
+  dpadBtn: {
+    position: "absolute", width: 46, height: 46, borderRadius: 23,
+    backgroundColor: "rgba(15,16,18,0.72)", borderWidth: 1, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  vpadLabel: { color: colors.onSurface3, fontSize: 7, fontWeight: "800", marginTop: -2 },
   toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
   toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
   toolBtn: { alignItems: "center", justifyContent: "center", width: 68, paddingVertical: 8, backgroundColor: colors.surface3, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, gap: 2 },
