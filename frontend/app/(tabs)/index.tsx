@@ -93,7 +93,7 @@ export default function DiscoverScreen() {
             {/* 1. PRIETENI */}
             {friends.length ? (
               <>
-                <SectionTitle title={t("friends") || "Friends"} />
+                <SectionTitle title={t("friends")} />
                 <FlatList
                   data={friends}
                   keyExtractor={(item) => item.user_id}
