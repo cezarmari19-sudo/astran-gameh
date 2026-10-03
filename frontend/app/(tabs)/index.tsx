@@ -23,6 +23,7 @@ export default function DiscoverScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const { t } = useI18n();
+  const [friends, setFriends] = useState<any[]>([]);
   const [forYou, setForYou] = useState<any[]>([]);
   const [trending, setTrending] = useState<any[]>([]);
   const [newest, setNewest] = useState<any[]>([]);
@@ -34,13 +35,15 @@ export default function DiscoverScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [a, b, c, d, r] = await Promise.all([
+      const [f, a, b, c, d, r] = await Promise.all([
+        api("/friends").catch(() => ({ friends: [] })),
         api("/games/discover?section=for_you"),
         api("/games/discover?section=trending"),
         api("/games/discover?section=new"),
         api("/games/discover?section=popular"),
         api("/games/recently-played").catch(() => ({ games: [] })),
       ]);
+      setFriends(f.friends || []);
       setForYou(a.games || []);
       setTrending(b.games || []);
       setNewest(c.games || []);
@@ -87,15 +90,67 @@ export default function DiscoverScreen() {
           </View>
         ) : (
           <>
-            {filter(forYou)[0] ? (
+            {/* 1. PRIETENI */}
+            {friends.length ? (
               <>
-                <SectionTitle title={t("for_you")} />
-                <View style={{ paddingHorizontal: spacing.lg }}>
-                  <GameCard testID={`game-featured`} game={filter(forYou)[0]} wide onPress={() => router.push({ pathname: "/game/[id]", params: { id: filter(forYou)[0].game_id } })} />
-                </View>
+                <SectionTitle title={t("friends") || "Friends"} />
+                <FlatList
+                  data={friends}
+                  keyExtractor={(item) => item.user_id}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 12 }}
+                  renderItem={({ item }) => (
+                    <Pressable
+                      testID={`friend-${item.user_id}`}
+                      onPress={() => router.push({ pathname: "/user/[id]", params: { id: item.user_id } })}
+                      style={styles.friendItem}
+                    >
+                      <View style={styles.friendAvatar}>
+                        <Text style={styles.friendAvatarText}>{(item.display_name || item.username)[0].toUpperCase()}</Text>
+                      </View>
+                      <Text style={styles.friendName} numberOfLines={1}>{item.display_name || item.username}</Text>
+                    </Pressable>
+                  )}
+                />
               </>
             ) : null}
 
+            {/* 2. PENTRU TINE */}
+            {filter(forYou).length ? (
+              <>
+                <SectionTitle title={t("for_you")} />
+                <FlatList
+                  data={filter(forYou)}
+                  keyExtractor={(item) => item.game_id}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingHorizontal: spacing.lg }}
+                  renderItem={({ item }) => (
+                    <GameCard testID={`game-foryou-${item.game_id}`} game={item} onPress={() => router.push({ pathname: "/game/[id]", params: { id: item.game_id } })} />
+                  )}
+                />
+              </>
+            ) : null}
+
+            {/* 3. RECENTE JUCATE */}
+            {recent.length ? (
+              <>
+                <SectionTitle title={t("recently_played")} />
+                <FlatList
+                  data={recent}
+                  keyExtractor={(item) => item.game_id}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingHorizontal: spacing.lg }}
+                  renderItem={({ item }) => (
+                    <GameCard game={item} onPress={() => router.push({ pathname: "/game/[id]", params: { id: item.game_id } })} />
+                  )}
+                />
+              </>
+            ) : null}
+
+            {/* 4. RESTUL SECȚIUNILOR, în ordinea lor actuală */}
             <SectionTitle title={t("trending")} />
             <FlatList
               data={filter(trending)}
@@ -131,22 +186,6 @@ export default function DiscoverScreen() {
                 <GameCard testID={`game-popular-${item.game_id}`} game={item} onPress={() => router.push({ pathname: "/game/[id]", params: { id: item.game_id } })} />
               )}
             />
-
-            {recent.length ? (
-              <>
-                <SectionTitle title={t("recently_played")} />
-                <FlatList
-                  data={recent}
-                  keyExtractor={(item) => item.game_id}
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={{ paddingHorizontal: spacing.lg }}
-                  renderItem={({ item }) => (
-                    <GameCard game={item} onPress={() => router.push({ pathname: "/game/[id]", params: { id: item.game_id } })} />
-                  )}
-                />
-              </>
-            ) : null}
           </>
         )}
       </ScrollView>
@@ -175,4 +214,8 @@ const styles = StyleSheet.create({
     height: 56,
     justifyContent: "center",
   },
+  friendItem: { alignItems: "center", width: 64 },
+  friendAvatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  friendAvatarText: { color: colors.brand, fontWeight: "900", fontSize: 18 },
+  friendName: { color: colors.onSurface2, fontSize: 11, marginTop: 6, textAlign: "center" },
 });
