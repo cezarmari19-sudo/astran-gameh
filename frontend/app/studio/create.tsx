@@ -20,6 +20,7 @@ import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
 import {
   ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
   iconFor, iconForObj, isSolidDefault, buildMesh, applyTransform, spawnKindOf, spawnMarkerColor,
+  GROUND_MIN, GROUND_MAX, groundWidthOf, groundDepthOf, clampGroundSize, buildGroundGeometry,
 } from "@/src/studio/sceneShared";
 import { ProjectState } from "@/src/studio/projectTree";
 
@@ -39,6 +40,9 @@ const MOVE_SPEED = 6;            // unitati pe secunda la deplasare cu D-pad/tas
 const DOLLY_SPEED = 10;          // viteza de deplasare inainte/inapoi din pinch
 type MoveKey = "forward" | "back" | "left" | "right" | "up" | "down";
 
+// Pas de ajustare rapida pentru butoanele +/- din panoul de Baseplate.
+const GROUND_STEP = 10;
+
 export default function StudioEditor() {
   const router = useRouter();
   const { t } = useI18n();
@@ -57,6 +61,11 @@ export default function StudioEditor() {
   const [playerCharacterId, setPlayerCharacterId] = useState<string | null>(null);
   const [scene, setScene] = useState<Scene>({ objects: [], sky: "#0F1012", ground: "#1A1D21" });
   const [selIds, setSelIds] = useState<string[]>([]);
+  // BASEPLATE: selectie separata de selIds (care e doar pentru obiecte din scene.objects) -
+  // niciodata ambele adevarate in acelasi timp, vezi pickAt() mai jos.
+  const [baseplateSelected, setBaseplateSelected] = useState(false);
+  const [groundWidthText, setGroundWidthText] = useState(String(groundWidthOf({})));
+  const [groundDepthText, setGroundDepthText] = useState(String(groundDepthOf({})));
   const [showMeta, setShowMeta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -155,7 +164,10 @@ export default function StudioEditor() {
         setMaxPlayersText(String(g.max_players ?? 20));
         setPlayerCharacterId(g.player_character_model_id ?? null);
         setGroupName(g.group_name || null);
-        setScene(g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" });
+        const loadedScene: Scene = g.scene && g.scene.objects ? g.scene : { objects: [], sky: "#0F1012", ground: "#1A1D21" };
+        setScene(loadedScene);
+        setGroundWidthText(String(groundWidthOf(loadedScene)));
+        setGroundDepthText(String(groundDepthOf(loadedScene)));
         try {
           const pr = await api(`/sandbox/games/${editingId}/files`);
           setProject({
@@ -241,6 +253,7 @@ export default function StudioEditor() {
       solid: isSolidDefault(type),
     };
     setScene(s => ({ ...s, objects: [...s.objects, obj] }));
+    setBaseplateSelected(false);
     setSelIds([obj.id]);
   }
 
@@ -265,6 +278,7 @@ export default function StudioEditor() {
       initial: noSpawnYet ? true : undefined,
     };
     setScene(s => ({ ...s, objects: [...s.objects, obj] }));
+    setBaseplateSelected(false);
     setSelIds([obj.id]);
   }
 
@@ -307,6 +321,32 @@ export default function StudioEditor() {
 
   function setSolidForSelection(solid: boolean) {
     updateSel({ solid });
+  }
+
+  // ---------- BASEPLATE: Width/Depth ----------
+  // Singurul loc din tot editorul care poate schimba dimensiunea Baseplate-ului - nu trece
+  // niciodata prin updateSel()/scene.objects, deci nu poate fi atins accidental de Move/Rotate/
+  // Scale sau de duplicare/stergere in masa, care opereaza exclusiv pe scene.objects.
+  function applyGroundSize(rawWidth: number, rawDepth: number) {
+    const width = clampGroundSize(rawWidth);
+    const depth = clampGroundSize(rawDepth);
+    setScene(s => ({ ...s, groundWidth: width, groundDepth: depth }));
+    setGroundWidthText(String(width));
+    setGroundDepthText(String(depth));
+  }
+  function commitGroundWidth() {
+    applyGroundSize(parseFloat(groundWidthText) || groundWidthOf(scene), groundDepthOf(scene));
+  }
+  function commitGroundDepth() {
+    applyGroundSize(groundWidthOf(scene), parseFloat(groundDepthText) || groundDepthOf(scene));
+  }
+  function nudgeGround(dw: number, dd: number) {
+    applyGroundSize(groundWidthOf(scene) + dw, groundDepthOf(scene) + dd);
+  }
+  function resetGroundSize() {
+    setScene(s => { const { groundWidth, groundDepth, ...rest } = s; return rest as Scene; });
+    setGroundWidthText(String(groundWidthOf({})));
+    setGroundDepthText(String(groundDepthOf({})));
   }
 
   async function pickThumb() {
@@ -434,7 +474,23 @@ export default function StudioEditor() {
       s.add(box);
       selBoxes.current.push(box);
     });
-  }, [scene, selIds, glReady]);
+    // BASEPLATE: acelasi tip de contur galben ca la orice obiect selectat, dar in jurul
+    // mesh-ului de ground - confirma vizual ca Baseplate-ul e selectat ca un obiect real.
+    if (baseplateSelected && groundRef.current) {
+      const gbox = new THREE.BoxHelper(groundRef.current, 0xCCFF00);
+      s.add(gbox);
+      selBoxes.current.push(gbox);
+    }
+  }, [scene, selIds, baseplateSelected, glReady]);
+
+  // BASEPLATE: reconstruieste geometria reala a gridului de cate ori Width/Depth se schimba -
+  // nu e un fundal static, grila chiar se extinde/micsoreaza (vezi buildGroundGeometry).
+  useEffect(() => {
+    const g = groundRef.current;
+    if (!g || !glReady) return;
+    g.geometry.dispose();
+    g.geometry = buildGroundGeometry(groundWidthOf(scene), groundDepthOf(scene));
+  }, [scene.groundWidth, scene.groundDepth, glReady]);
 
   // Aplica rotatia camerei (pozitie + lookAt derivat din yaw/pitch) catre obiectul three.js real.
   function updateCameraPosition() {
@@ -487,8 +543,9 @@ export default function StudioEditor() {
     const dir = new THREE.DirectionalLight(0xffffff, 1.1);
     dir.position.set(5, 8, 4);
     s.add(dir);
+    // BASEPLATE: dimensiunea reala vine din scena (groundWidth/groundDepth), nu mai e fixa.
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(20, 20, 20, 20),
+      buildGroundGeometry(groundWidthOf(scene), groundDepthOf(scene)),
       new THREE.MeshStandardMaterial({ color: new THREE.Color(scene.ground), wireframe: true })
     );
     ground.rotation.x = -Math.PI / 2;
@@ -531,7 +588,23 @@ export default function StudioEditor() {
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ndc, cam);
     const hits = ray.intersectObjects(Object.values(meshMap.current), false);
-    setSelIds(hits.length > 0 ? [hits[0].object.userData.objId as string] : []);
+    if (hits.length > 0) {
+      setBaseplateSelected(false);
+      setSelIds([hits[0].object.userData.objId as string]);
+      return;
+    }
+    // BASEPLATE: daca n-am lovit niciun obiect, incercam Baseplate-ul insusi - devine
+    // selectabil exact ca un obiect real al scenei, cu propriul panou (vezi randarea de mai jos).
+    if (groundRef.current) {
+      const gHits = ray.intersectObject(groundRef.current, false);
+      if (gHits.length > 0) {
+        setSelIds([]);
+        setBaseplateSelected(true);
+        return;
+      }
+    }
+    setSelIds([]);
+    setBaseplateSelected(false);
   }
 
   const onTapStateChange = (e: any) => {
@@ -562,6 +635,7 @@ export default function StudioEditor() {
           const p = projectToScreen(o);
           return p && p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
         });
+        setBaseplateSelected(false);
         setSelIds(inside.map(o => o.id));
       }
       boxStart.current = null;
@@ -718,7 +792,7 @@ export default function StudioEditor() {
               </Pressable>
             </View>
 
-            <Pressable testID="editor-select-mode" onPress={() => { setSelectMode(v => !v); setSelIds([]); }} style={[styles.viewBtn, { right: 54 }, selectMode && { borderColor: colors.brand, borderWidth: 1 }]}>
+            <Pressable testID="editor-select-mode" onPress={() => { setSelectMode(v => !v); setSelIds([]); setBaseplateSelected(false); }} style={[styles.viewBtn, { right: 54 }, selectMode && { borderColor: colors.brand, borderWidth: 1 }]}>
               <MaterialCommunityIcons name="selection-drag" size={20} color={selectMode ? colors.brand : colors.onSurface} />
             </Pressable>
             <Pressable testID="editor-reset-view" onPress={resetView} style={styles.viewBtn}>
@@ -738,6 +812,14 @@ export default function StudioEditor() {
           <Pressable testID="editor-assets" onPress={() => setShowAssets(true)} style={[styles.toolBtn, { borderColor: colors.brand }]}>
             <MaterialCommunityIcons name="storefront-outline" size={22} color={colors.brand} />
             <Text style={styles.toolBtnText}>{assetIds.length > 0 ? `shop ${assetIds.length}` : "shop"}</Text>
+          </Pressable>
+          <Pressable
+            testID="editor-select-baseplate"
+            onPress={() => { setSelIds([]); setBaseplateSelected(true); }}
+            style={[styles.toolBtn, baseplateSelected && { borderColor: colors.brand }]}
+          >
+            <MaterialCommunityIcons name="grid" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>baseplate</Text>
           </Pressable>
           <Pressable testID="editor-add-spawn" onPress={() => addSpawnPoint("spawn")} style={[styles.toolBtn, hasSpawnPoint && { borderColor: colors.brand }]}>
             <MaterialCommunityIcons name="map-marker-radius-outline" size={22} color={colors.brand} />
@@ -778,6 +860,62 @@ export default function StudioEditor() {
           onClose={() => setSelIds([])}
           onSetInitial={() => setInitialSpawn(singleSel.id)}
         />
+      ) : baseplateSelected ? (
+        <View style={styles.baseplatePanel}>
+          <View style={styles.baseplateHeader}>
+            <MaterialCommunityIcons name="grid" size={16} color={colors.brand} />
+            <Text style={styles.baseplateTitle}>BASEPLATE</Text>
+            <Pressable testID="baseplate-close" onPress={() => setBaseplateSelected(false)} style={styles.baseplateCloseBtn}>
+              <MaterialCommunityIcons name="close" size={16} color={colors.onSurface3} />
+            </Pressable>
+          </View>
+          <View style={styles.baseplateRow}>
+            <View style={styles.baseplateField}>
+              <Text style={styles.baseplateLabel}>WIDTH (X)</Text>
+              <View style={styles.baseplateStepperRow}>
+                <Pressable testID="baseplate-width-minus" onPress={() => nudgeGround(-GROUND_STEP, 0)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="minus" size={16} color={colors.onSurface} />
+                </Pressable>
+                <TextInput
+                  testID="baseplate-width-input"
+                  value={groundWidthText}
+                  onChangeText={setGroundWidthText}
+                  onEndEditing={commitGroundWidth}
+                  keyboardType="number-pad"
+                  style={styles.baseplateInput}
+                />
+                <Pressable testID="baseplate-width-plus" onPress={() => nudgeGround(GROUND_STEP, 0)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="plus" size={16} color={colors.onSurface} />
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.baseplateField}>
+              <Text style={styles.baseplateLabel}>DEPTH (Z)</Text>
+              <View style={styles.baseplateStepperRow}>
+                <Pressable testID="baseplate-depth-minus" onPress={() => nudgeGround(0, -GROUND_STEP)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="minus" size={16} color={colors.onSurface} />
+                </Pressable>
+                <TextInput
+                  testID="baseplate-depth-input"
+                  value={groundDepthText}
+                  onChangeText={setGroundDepthText}
+                  onEndEditing={commitGroundDepth}
+                  keyboardType="number-pad"
+                  style={styles.baseplateInput}
+                />
+                <Pressable testID="baseplate-depth-plus" onPress={() => nudgeGround(0, GROUND_STEP)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="plus" size={16} color={colors.onSurface} />
+                </Pressable>
+              </View>
+            </View>
+          </View>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+            <Text style={styles.baseplateHint}>{GROUND_MIN}–{GROUND_MAX} units · grid updates live</Text>
+            <Pressable testID="baseplate-reset" onPress={resetGroundSize}>
+              <Text style={styles.baseplateResetText}>Reset to default</Text>
+            </Pressable>
+          </View>
+        </View>
       ) : (
         <View style={styles.objList}>
           <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select, or use Box Select</Text>
@@ -786,7 +924,7 @@ export default function StudioEditor() {
               const spawnLike = o.type === SPAWN_TYPE;
               const label = spawnLike ? (spawnKindOf(o) === "checkpoint" ? "checkpoint" : "spawn") : o.type;
               return (
-                <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => setSelIds([o.id])} style={[styles.objChip, { borderColor: spawnLike ? colors.brand : o.color }]}>
+                <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => { setBaseplateSelected(false); setSelIds([o.id]); }} style={[styles.objChip, { borderColor: spawnLike ? colors.brand : o.color }]}>
                   <MaterialCommunityIcons name={iconForObj(o) as any} size={14} color={spawnLike ? colors.brand : o.color} />
                   <Text style={styles.objChipText}>{label}</Text>
                 </Pressable>
@@ -1000,6 +1138,18 @@ const styles = StyleSheet.create({
   objListTitle: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1.5, paddingHorizontal: 14, marginBottom: 6 },
   objChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface3, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
   objChipText: { color: colors.onSurface, fontSize: 11, fontWeight: "700", textTransform: "capitalize" },
+  baseplatePanel: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, padding: spacing.md },
+  baseplateHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
+  baseplateTitle: { flex: 1, color: colors.onSurface, fontSize: 11, fontWeight: "800", letterSpacing: 1.5 },
+  baseplateCloseBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center" },
+  baseplateRow: { flexDirection: "row", gap: 12 },
+  baseplateField: { flex: 1 },
+  baseplateLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 6 },
+  baseplateStepperRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  baseplateStepBtn: { width: 32, height: 32, borderRadius: radius.sm, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  baseplateInput: { flex: 1, textAlign: "center", backgroundColor: colors.surface3, color: colors.onSurface, fontWeight: "800", fontSize: 14, borderRadius: radius.sm, paddingVertical: 8, borderWidth: 1, borderColor: colors.border },
+  baseplateHint: { color: colors.onSurface3, fontSize: 10, marginTop: 10 },
+  baseplateResetText: { color: colors.brand, fontSize: 11, fontWeight: "700", marginTop: 10 },
   footer: { flexDirection: "row", alignItems: "center", gap: 8, padding: spacing.md, borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   delBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.error, alignItems: "center", justifyContent: "center" },
   playBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
