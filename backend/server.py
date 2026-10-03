@@ -790,6 +790,20 @@ async def recently_played(current=Depends(get_current_user)):
     return {"games": ordered}
 
 
+async def _can_view_private_game(g: dict, current: dict) -> bool:
+    """SECURITY: un joc PRIVAT (draft, inca nepublicat) e vizibil DOAR pentru owner,
+    platform admin, sau cineva cu acces explicit (Editor/Tester) - niciodata doar pentru
+    ca cineva "stie" game_id-ul. Foloseste exact aceeasi regula ca play_game (vezi
+    SECURITY items 12/13/15), aplicata acum si la citirea jocului/instantelor lui, nu doar
+    la a-l juca efectiv."""
+    if g["owner_id"] == current["user_id"] or current.get("is_platform_admin"):
+        return True
+    if get_game_access is None:
+        return False
+    access = await get_game_access(db, g, current)
+    return bool(access.can_play)
+
+
 @api.get("/games/{game_id}")
 async def get_game(game_id: str, current=Depends(get_current_user)):
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
@@ -797,6 +811,12 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
+
+    # SECURITY: vezi _can_view_private_game - un joc privat/nepublicat nu mai e vizibil
+    # doar pentru ca cineva are/ghiceste game_id-ul (acelasi bug era si la list_instances).
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
+
     if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
         g.pop("script", None)
     out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g)]))
@@ -831,12 +851,8 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
     # SECURITY (items 12/13/15): un joc PRIVAT (draft, inca nepublicat) se poate juca
     # doar de owner, de un Editor, sau de un Tester caruia i s-a dat acces explicit -
     # niciodata doar pentru ca cineva "stie" game_id-ul. Jocurile publice raman neschimbate.
-    if not g.get("is_public") and g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
-        if get_game_access is None:
-            raise HTTPException(status_code=403, detail="This game is private")
-        access = await get_game_access(db, g, current)
-        if not access.can_play:
-            raise HTTPException(status_code=403, detail="This game is private")
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
 
     g = _game_defaults(g)
     max_players = g["max_players"]
@@ -918,6 +934,15 @@ async def instance_leave(game_id: str, body: HeartbeatBody, current=Depends(get_
 @api.get("/games/{game_id}/instances")
 async def list_instances(game_id: str, current=Depends(get_current_user)):
     """Lista serverelor deschise pentru un joc (util pentru debugging/afisare optionala in UI)."""
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # SECURITY: vezi _can_view_private_game - aceeasi regula ca la get_game/play_game, ca
+    # sa nu se poata afla cate instante/locuri libere are un joc privat doar stiindu-i id-ul.
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
+
     await reap_empty_instances(game_id)
     cursor = db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).sort("created_at", 1)
     return {"instances": await cursor.to_list(200)}
