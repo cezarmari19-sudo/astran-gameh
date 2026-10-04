@@ -1,3 +1,4 @@
+# backend/astran_sandbox/clothes_routes.py
 """Clothes Shop: magazin separat, exclusiv pentru haine si accesorii de Avatar Editor.
 
 Complet independent de Shop-ul de obiecte (shop_routes.py) SI de Game Studio
@@ -392,8 +393,16 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         if it["owner_id"] == current["user_id"]:
             raise HTTPException(status_code=400, detail="You already own this item")
 
-        already = await db.clothes_purchases.find_one({"user_id": current["user_id"], "item_id": item_id}, {"_id": 0})
-        if already:
+        # Rezervam INTAI randul de purchase (indexul unic (user_id,item_id) e garda impotriva
+        # dublei cumparari - dublu-click, retry de retea), INAINTE de orice transfer de Astrans.
+        # Vezi comentariul identic din shop_routes.py/buy_item - acelasi bug era duplicat aici:
+        # rezervarea facuta DUPA transferul de bani lasa o fereastra in care doua cereri
+        # concurente puteau ambele trece de verificarea initiala "already owned" si ambele
+        # debita cumparatorul/credita autorul, inainte ca vreuna sa apuce sa insereze randul
+        # de purchase - userul era taxat de doua ori pentru acelasi item.
+        try:
+            await db.clothes_purchases.insert_one({"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()})
+        except Exception:
             return {"ok": True, "already_owned": True}
 
         price = it["price"]
@@ -404,6 +413,9 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
                 {"$inc": {"astrans_balance": -price}},
             )
             if debit.modified_count == 0:
+                # Nu avea destui Astrans - anulam rezervarea de mai sus, ca userul sa poata
+                # incerca din nou (altfel ar ramane cu item-ul "detinut" dar neplatit).
+                await db.clothes_purchases.delete_one({"user_id": current["user_id"], "item_id": item_id})
                 raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
 
             await db.users.update_one({"user_id": it["owner_id"]}, {"$inc": {"astrans_balance": author_share}})
@@ -423,10 +435,6 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             await db.astran_ledger.insert_one(tx_buyer)
             await db.astran_ledger.insert_one(tx_seller)
 
-        try:
-            await db.clothes_purchases.insert_one({"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()})
-        except Exception:
-            pass
         await db.clothes_items.update_one({"item_id": item_id}, {"$inc": {"downloads": 1}})
 
         return {"ok": True, "already_owned": False}
