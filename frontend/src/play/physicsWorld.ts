@@ -148,11 +148,24 @@ export class PhysicsWorld {
     }
     entry.cannon.friction = def.friction;
     entry.cannon.restitution = def.bounce;
-    this.contactCache.clear(); // frecarea/elasticitatea intre perechi trebuie recalculata
-    this.invalidateContacts();
 
-    // Corpurile care foloseau deja acest material isi actualizeaza masa (densitatea
-    // s-a putut schimba) si damping-ul (Liquid poate sa fi comutat).
+    // Un script poate apela Material.new(...) de mai multe ori pe parcursul UNUI singur
+    // joc (ex: schimba proprietatile unui material deja folosit) - fiecare apel ajunge
+    // aici. Perechea de contact (sol <-> acest material) deja adaugata in `this.world`
+    // trebuie SCOASA explicit inainte sa adaugam una noua (vezi ensureGroundContact mai
+    // jos): cannon-es nu deduplica singur `world.contactmaterials`, deci fara asta,
+    // fiecare apel repetat lasa in urma o perche "moarta" care ramane in lume pentru
+    // totdeauna. O lume cu mii de ContactMaterial-uri moarte devine tot mai lenta la
+    // fiecare pas de fizica (fiecare pas le parcurge pe toate), pana cand jocul
+    // incepe sa se blocheze si, in cele din urma, sa pice - exact tipul de "memory
+    // leak lent" care nu tine de randare, ci de simularea fizica in sine.
+    const key = "ground:" + id;
+    const old = this.contactCache.get(key);
+    if (old) {
+      this.world.removeContactMaterial(old);
+      this.contactCache.delete(key);
+    }
+
     for (const [pid, e] of this.bodies) {
       if (e.materialId === id) {
         this.applyMassFor(pid, e);
@@ -167,16 +180,6 @@ export class PhysicsWorld {
 
   private getCannonMaterial(id: string | undefined): CANNON.Material {
     return this.materials.get(id ?? "__default")?.cannon ?? this.materials.get("__default")!.cannon;
-  }
-
-  // Frecarea/elasticitatea dintre acest material si sol (sau intre doua materiale
-  // custom) se calculeaza o singura data pentru fiecare pereche folosita in joc,
-  // nu pentru toate combinatiile posibile din start.
-  private invalidateContacts() {
-    // ContactMaterial-urile deja atasate lumii raman valabile pentru cannon-es
-    // (friction/restitution sunt citite live de pe obiectul CANNON.Material),
-    // deci nu trebuie recreate - le lasam, doar am golit cache-ul local de mai sus
-    // ca eventualele materiale NOI create dupa acest punct sa capete perechi noi.
   }
 
   private ensureGroundContact(mat: CANNON.Material) {
