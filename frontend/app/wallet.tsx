@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, ActivityIndic
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useIAP } from "expo-iap";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
@@ -23,6 +24,25 @@ export default function WalletScreen() {
   const [transferPreview, setTransferPreview] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Mesaj special pentru cazul rar in care Google/Apple au confirmat plata, dar creditarea
+  // pe server a esuat (retea, server jos) - vezi handlePurchaseSuccess mai jos. Diferit de
+  // `err` (eroare normala de achizitie), ca userul sa stie ca BANII AU FOST LUATI, nu doar
+  // ca achizitia a esuat, si sa nu incerce sa plateasca din nou.
+  const [pendingCreditWarning, setPendingCreditWarning] = useState<string | null>(null);
+
+  // IAP real (Google Play pe Android, Apple App Store pe iOS) - vezi expo-iap. Pe web
+  // acest hook nu face nimic (connected ramane false), fallback-ul ramane mesajul de mai
+  // jos ca achizitiile nu sunt disponibile pe web.
+  const { connected, products, fetchProducts, requestPurchase, finishTransaction } = useIAP({
+    onPurchaseSuccess: (purchase: any) => {
+      handlePurchaseSuccess(purchase);
+    },
+    onPurchaseError: (error: any) => {
+      console.log("[wallet] purchase error", error);
+      setErr(error?.message || "Purchase failed");
+      setBusy(false);
+    },
+  });
 
   const load = useCallback(async () => {
     try {
@@ -36,17 +56,93 @@ export default function WalletScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Produsele reale (nume, preT localizat) se incarca de la Google/Apple abia dupa ce
+  // STIM ce package_id-uri exista (din backend) SI magazinul e conectat - SKU-urile
+  // trimise sunt EXACT package_id-urile din astran_packages (vezi backend/server.py,
+  // GooglePlayProvider/AppleProvider: product_id = package["package_id"]), deci produsele
+  // trebuie create in Play Console / App Store Connect cu exact aceste id-uri.
+  useEffect(() => {
+    if (Platform.OS === "web" || !connected || packages.length === 0) return;
+    fetchProducts({ skus: packages.map(p => p.package_id), type: "in-app" }).catch((e: any) => {
+      console.log("[wallet] fetchProducts failed", e);
+    });
+  }, [connected, packages]);
+
+  function storeProductFor(pkg: any): any {
+    return (products || []).find((p: any) => p.id === pkg.package_id || p.productId === pkg.package_id);
+  }
+
   async function buy(pkg: any) {
-    setBusy(true); setErr(null);
+    if (Platform.OS === "web") {
+      setErr("Purchases are not available on web yet - use the mobile app.");
+      return;
+    }
+    if (!connected) {
+      setErr("Store connection not ready, try again in a moment.");
+      return;
+    }
+    setBusy(true); setErr(null); setPendingCreditWarning(null);
     try {
-      const provider = Platform.OS === "android" ? "google_play" : Platform.OS === "ios" ? "apple" : "stripe";
-      const provider_token = provider === "google_play" ? "gp_dev_stub" : provider === "apple" ? "ap_dev_stub" : "";
-      await api("/wallet/buy", { method: "POST", body: JSON.stringify({ package_id: pkg.package_id, provider: "mock", provider_token }) });
+      // Formatul de request e DIFERIT pe iOS vs Android (vezi expo-iap) - trimitem
+      // amandoua chei, biblioteca o foloseste doar pe cea a platformei curente.
+      await requestPurchase({
+        request: { ios: { sku: pkg.package_id }, android: { skus: [pkg.package_id] } },
+        type: "in-app",
+      });
+      // Rezultatul (succes sau eroare) ajunge in onPurchaseSuccess/onPurchaseError de mai
+      // sus (callback-uri ale useIAP), nu aici - requestPurchase doar PORNESTE fluxul
+      // nativ (dialogul de plata Google/Apple).
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+      setBusy(false);
+    }
+  }
+
+  // Apelat de useIAP cand Google/Apple confirma ca userul a finalizat plata in dialogul
+  // nativ. De aici, pasii sunt STRICT in aceasta ordine:
+  //   1. trimitem tokenul/chitanta REALA la server, pentru verificare (nu mai trimitem
+  //      niciun provider_token fals, ca inainte)
+  //   2. DOAR daca serverul confirma si crediteaza Astrans, inchidem tranzactia la
+  //      Google/Apple (finishTransaction / consumeAsync)
+  // Ordinea asta conteaza: daca am inchide tranzactia INAINTE sa stim sigur ca serverul a
+  // creditat, si request-ul catre server ar pica (retea, server jos chiar atunci), userul
+  // ar ramane platit dar necreditat - FARA nicio cale sa mai recupereze, pentru ca
+  // Google/Apple ar considera tranzactia deja "consumata". Asa, daca pasul 1 esueaza, NU
+  // inchidem tranzactia - ramane in asteptare la Google/Apple si va fi redata automat
+  // (acelasi purchase, din nou prin onPurchaseSuccess) data viitoare cand se deschide acest
+  // ecran, pana cand reuseste sa fie creditata.
+  async function handlePurchaseSuccess(purchase: any) {
+    try {
+      const provider = Platform.OS === "android" ? "google_play" : "apple";
+      const provider_token: string | undefined =
+        Platform.OS === "android"
+          ? (purchase.purchaseToken ?? purchase.purchaseTokenAndroid)
+          : (purchase.transactionReceipt ?? purchase.jwsRepresentationIOS);
+      const package_id: string | undefined = purchase.productId ?? purchase.id;
+      if (!provider_token || !package_id) throw new Error("Incomplete purchase data from the store");
+
+      await api("/wallet/buy", {
+        method: "POST",
+        body: JSON.stringify({ package_id, provider, provider_token }),
+      });
+
+      // Serverul a confirmat si a creditat Astrans (sau tranzactia era deja creditata -
+      // idempotent) - DOAR ACUM e sigur sa inchidem/consumam tranzactia.
+      await finishTransaction({ purchase, isConsumable: true });
       await refresh();
       await load();
     } catch (e: any) {
-      setErr(e.message);
-    } finally { setBusy(false); }
+      console.log("[wallet] credit after purchase failed", e);
+      setPendingCreditWarning(
+        "Plata a fost confirmată de magazin, dar creditarea Astrans a eșuat (conexiune). " +
+        "Nu e nevoie să plătești din nou - redeschide acest ecran și achiziția va fi " +
+        "finalizată automat."
+      );
+      // NU apelam finishTransaction: tranzactia ramane needisa la Google/Apple si va
+      // ajunge din nou in onPurchaseSuccess (acelasi purchase) data viitoare.
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function preview() {
@@ -90,18 +186,31 @@ export default function WalletScreen() {
           </View>
         </View>
 
+        {pendingCreditWarning ? <Text style={styles.warn} testID="wallet-pending-credit">{pendingCreditWarning}</Text> : null}
+
         <Text style={styles.section}>{t("buy_astrans").toUpperCase()}</Text>
+        {Platform.OS === "web" ? (
+          <Text style={styles.webNotice}>Purchases are available in the mobile app.</Text>
+        ) : null}
         <View style={styles.pkgGrid}>
-          {loading ? <ActivityIndicator color={colors.brand} /> : packages.map(p => (
-            <Pressable key={p.package_id} testID={`buy-${p.package_id}`} onPress={() => buy(p)} style={styles.pkg}>
-              <MaterialCommunityIcons name="hexagon-slice-6" size={28} color={colors.brand} />
-              <Text style={styles.pkgAmt}>{p.astrans}</Text>
-              <Text style={styles.pkgLabel}>{p.label}</Text>
-              <View style={styles.pkgPriceBox}>
-                <Text style={styles.pkgPrice}>{p.price} {currency}</Text>
-              </View>
-            </Pressable>
-          ))}
+          {loading ? <ActivityIndicator color={colors.brand} /> : packages.map(p => {
+            // Pretul AFISAT trebuie sa fie cel REAL, localizat, intors de Google/Apple -
+            // politica ambelor magazine cere ca pretul aratat userului sa corespunda exact
+            // celui din dialogul de plata. Pretul in RON din backend (p.price) e doar
+            // fallback, cat timp produsele inca nu s-au incarcat de la magazin (sau pe web).
+            const storeProduct = storeProductFor(p);
+            const displayPrice = storeProduct?.displayPrice || storeProduct?.localizedPrice || `${p.price} ${currency}`;
+            return (
+              <Pressable key={p.package_id} testID={`buy-${p.package_id}`} onPress={() => buy(p)} style={styles.pkg} disabled={busy}>
+                <MaterialCommunityIcons name="hexagon-slice-6" size={28} color={colors.brand} />
+                <Text style={styles.pkgAmt}>{p.astrans}</Text>
+                <Text style={styles.pkgLabel}>{p.label}</Text>
+                <View style={styles.pkgPriceBox}>
+                  <Text style={styles.pkgPrice}>{displayPrice}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
         </View>
 
         {err ? <Text style={styles.err} testID="wallet-error">{err}</Text> : null}
@@ -167,6 +276,7 @@ const styles = StyleSheet.create({
   balanceValue: { color: colors.onSurface, fontSize: 44, fontWeight: "900", letterSpacing: -1 },
   balanceCurrency: { color: colors.brand, fontSize: 11, fontWeight: "800", letterSpacing: 3, marginTop: 4 },
   section: { color: colors.onSurface, fontSize: 13, fontWeight: "800", letterSpacing: 1.5, marginTop: 28, marginBottom: 10 },
+  webNotice: { color: colors.onSurface3, fontSize: 12, marginBottom: 10 },
   pkgGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   pkg: { width: "48%", padding: 16, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
   pkgAmt: { color: colors.onSurface, fontSize: 22, fontWeight: "900", marginTop: 6 },
@@ -184,4 +294,5 @@ const styles = StyleSheet.create({
   previewBox: { marginTop: 16, padding: 14, backgroundColor: colors.brandTint, borderRadius: radius.md, borderWidth: 1, borderColor: colors.brand },
   previewLine: { color: colors.brand, fontSize: 13, fontWeight: "700", marginBottom: 4 },
   err: { color: colors.error, marginTop: 10, fontSize: 12, fontWeight: "600" },
+  warn: { color: colors.brand, marginTop: 12, fontSize: 12, fontWeight: "700", backgroundColor: colors.brandTint, padding: 10, borderRadius: radius.md },
 });
