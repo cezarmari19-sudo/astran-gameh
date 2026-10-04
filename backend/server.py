@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import uuid
+import json
+import base64
 import logging
 import secrets
 from pathlib import Path
@@ -15,6 +17,8 @@ from typing import List, Optional, Literal
 import bcrypt
 import jwt
 import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -310,6 +314,9 @@ async def startup():
     await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
     await db.astran_ledger.create_index("tx_id", unique=True)
     await db.astran_ledger.create_index("idempotency_key", unique=True, sparse=True)
+    # O singura creditare per plata REALA (purchase token Google / transaction_id Apple /
+    # payment_intent Stripe) - vezi VerifyResult.external_id si buy_astrans mai jos.
+    await db.astran_ledger.create_index("provider_ref", unique=True, sparse=True)
     await db.astran_ledger.create_index([("user_id", 1), ("timestamp", -1)])
     await db.reports.create_index("report_id", unique=True)
     await db.recently_played.create_index([("user_id", 1), ("played_at", -1)])
@@ -1137,47 +1144,198 @@ async def wallet_tx(current=Depends(get_current_user)):
     return {"transactions": await cursor.to_list(100)}
 
 
+class VerifyResult:
+    """Rezultatul verificarii unei plati: ok=True DOAR daca plata e reala si confirmata
+    de furnizor (Google/Apple/Stripe), nu doar "token-ul are forma corecta". external_id
+    e identificatorul UNIC al acelei plati (purchase token la Google, transaction_id la
+    Apple, payment_intent la Stripe) - folosit in buy_astrans mai jos ca sa nu creditam
+    Astrans de doua ori pentru aceeasi plata (retry de retea, token retrimis etc)."""
+
+    def __init__(self, ok: bool, external_id: Optional[str] = None, detail: Optional[str] = None):
+        self.ok = ok
+        self.external_id = external_id
+        self.detail = detail
+
+
 class PaymentProvider:
     name: str = "base"
 
-    async def verify(self, token: str, package: dict, user: dict) -> bool:
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
         raise NotImplementedError
 
 
 class MockProvider(PaymentProvider):
     name = "mock"
 
-    async def verify(self, token: str, package: dict, user: dict) -> bool:
-        return True
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        return VerifyResult(True, external_id=f"mock:{new_id()}")
 
 
 class StripeProvider(PaymentProvider):
     name = "stripe"
 
-    async def verify(self, token: str, package: dict, user: dict) -> bool:
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
         api_key = os.environ.get("STRIPE_SECRET_KEY")
         if not api_key or not token:
-            return False
+            return VerifyResult(False, detail="Missing Stripe payment intent")
         async with httpx.AsyncClient(timeout=10.0) as h:
-            r = await h.get(f"https://api.stripe.com/v1/payment_intents/{token}", auth=(api_key, ""))
+            try:
+                r = await h.get(f"https://api.stripe.com/v1/payment_intents/{token}", auth=(api_key, ""))
+            except Exception as e:  # noqa: BLE001
+                log.error("Stripe verify error: %s", e)
+                return VerifyResult(False, detail="Stripe verification failed")
         if r.status_code != 200:
-            return False
+            return VerifyResult(False, detail="Stripe payment intent not found")
         data = r.json()
-        return data.get("status") == "succeeded" and int(data.get("amount", 0)) >= int(package["price"] * 100)
+        ok = data.get("status") == "succeeded" and int(data.get("amount", 0)) >= int(package["price"] * 100)
+        return VerifyResult(ok, external_id=token if ok else None, detail=None if ok else "Payment not completed")
+
+
+# ---------- Google Play: verificare REALA prin Android Publisher API ----------
+# Fluxul standard Google OAuth2 "Service Account" (JWT Bearer): semnam noi insine un JWT
+# cu cheia privata din Service Account-ul descarcat din Google Cloud Console, il schimbam
+# la Google pe un access_token, si cu el intrebam Android Publisher API daca tokenul de
+# achizitie primit de la client e intr-adevar o plata REALA si confirmata. Nu folosim
+# biblioteca google-auth (dependinta noua) - semnarea RS256 se face cu 'cryptography',
+# deja in requirements.txt.
+_google_token_cache: dict = {"token": None, "expires_at": 0.0}
+
+
+def _rsa_sign_rs256(private_key_pem: str, data: bytes) -> bytes:
+    key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    return key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+
+
+async def _google_access_token() -> Optional[str]:
+    """Token OAuth2 pentru Android Publisher API. Cache in memorie ~55 minute (tokenul
+    Google e valabil 60 minute) - nu cerem un token nou la fiecare achizitie verificata."""
+    now = now_utc().timestamp()
+    if _google_token_cache["token"] and _google_token_cache["expires_at"] > now:
+        return _google_token_cache["token"]
+
+    raw = os.environ.get("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        log.error("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured")
+        return None
+    try:
+        sa = json.loads(raw)
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        claims = {
+            "iss": sa["client_email"],
+            "scope": "https://www.googleapis.com/auth/androidpublisher",
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": int(now),
+            "exp": int(now) + 3600,
+        }
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+        signing_input = header + b"." + payload
+        signature = base64.urlsafe_b64encode(_rsa_sign_rs256(sa["private_key"], signing_input)).rstrip(b"=")
+        assertion = (signing_input + b"." + signature).decode()
+    except Exception as e:  # noqa: BLE001
+        log.error("Invalid GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: %s", e)
+        return None
+
+    async with httpx.AsyncClient(timeout=10.0) as h:
+        try:
+            r = await h.post("https://oauth2.googleapis.com/token", data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": assertion,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.error("Google OAuth token error: %s", e)
+            return None
+    if r.status_code != 200:
+        log.error("Google OAuth token rejected: %s", r.text[:300])
+        return None
+    data = r.json()
+    token = data.get("access_token")
+    _google_token_cache["token"] = token
+    _google_token_cache["expires_at"] = now + max(60, int(data.get("expires_in", 3300)) - 120)
+    return token
 
 
 class GooglePlayProvider(PaymentProvider):
     name = "google_play"
 
-    async def verify(self, token: str, package: dict, user: dict) -> bool:
-        return bool(token and token.startswith("gp_"))
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        if not token:
+            return VerifyResult(False, detail="Missing purchase token")
+        pkg_name = os.environ.get("GOOGLE_PLAY_PACKAGE_NAME")
+        if not pkg_name:
+            log.error("GOOGLE_PLAY_PACKAGE_NAME is not configured")
+            return VerifyResult(False, detail="Google Play verification not configured")
+        access_token = await _google_access_token()
+        if not access_token:
+            return VerifyResult(False, detail="Google Play verification unavailable")
+
+        product_id = package["package_id"]  # SKU-ul din Play Console = package_id din astran_packages
+        url = (
+            f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+            f"{pkg_name}/purchases/products/{product_id}/tokens/{token}"
+        )
+        async with httpx.AsyncClient(timeout=10.0) as h:
+            try:
+                r = await h.get(url, headers={"Authorization": f"Bearer {access_token}"})
+            except Exception as e:  # noqa: BLE001
+                log.error("Google Play verify error: %s", e)
+                return VerifyResult(False, detail="Google Play verification failed")
+        if r.status_code != 200:
+            return VerifyResult(False, detail=f"Google Play rejected purchase (status {r.status_code})")
+        data = r.json()
+        # purchaseState: 0 = achitata, 1 = anulata, 2 = in asteptare (ex: plata in numerar)
+        if data.get("purchaseState") != 0:
+            return VerifyResult(False, detail="Purchase not completed")
+        return VerifyResult(True, external_id=token)
 
 
+# ---------- Apple: verificare REALA prin App Store receipt validation ----------
 class AppleProvider(PaymentProvider):
     name = "apple"
 
-    async def verify(self, token: str, package: dict, user: dict) -> bool:
-        return bool(token and token.startswith("ap_"))
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        if not token:
+            return VerifyResult(False, detail="Missing receipt")
+        shared_secret = os.environ.get("APPLE_SHARED_SECRET")
+        if not shared_secret:
+            log.error("APPLE_SHARED_SECRET is not configured")
+            return VerifyResult(False, detail="Apple verification not configured")
+
+        body = {"receipt-data": token, "password": shared_secret, "exclude-old-transactions": True}
+        data = await self._call(body, "https://buy.itunes.apple.com/verifyReceipt")
+        if data is None:
+            return VerifyResult(False, detail="Apple verification failed")
+        # 21007: chitanta de test (sandbox) trimisa din greseala la serverul de productie -
+        # reincercam automat pe serverul de sandbox, exact cum recomanda documentatia Apple.
+        if data.get("status") == 21007:
+            data = await self._call(body, "https://sandbox.itunes.apple.com/verifyReceipt")
+            if data is None:
+                return VerifyResult(False, detail="Apple verification failed")
+
+        if data.get("status") != 0:
+            return VerifyResult(False, detail=f"Apple rejected receipt (status {data.get('status')})")
+
+        bundle_id = os.environ.get("APPLE_BUNDLE_ID")
+        receipt = data.get("receipt", {})
+        if bundle_id and receipt.get("bundle_id") != bundle_id:
+            return VerifyResult(False, detail="Receipt belongs to a different app")
+
+        product_id = package["package_id"]  # product id-ul din App Store Connect = package_id
+        in_app = data.get("latest_receipt_info") or receipt.get("in_app") or []
+        match = next((it for it in in_app if it.get("product_id") == product_id), None)
+        if not match:
+            return VerifyResult(False, detail="Receipt does not contain this product")
+        return VerifyResult(True, external_id=match.get("transaction_id"))
+
+    async def _call(self, body: dict, url: str) -> Optional[dict]:
+        async with httpx.AsyncClient(timeout=10.0) as h:
+            try:
+                r = await h.post(url, json=body)
+            except Exception as e:  # noqa: BLE001
+                log.error("Apple verify error: %s", e)
+                return None
+        if r.status_code != 200:
+            return None
+        return r.json()
 
 
 PROVIDERS: dict[str, PaymentProvider] = {
@@ -1197,9 +1355,25 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     provider = PROVIDERS.get(body.provider)
     if not provider:
         raise HTTPException(status_code=400, detail="Unknown payment provider")
-    ok = await provider.verify(body.provider_token or "", package, current)
-    if not ok:
-        raise HTTPException(status_code=402, detail="Payment verification failed")
+    # Mock-ul crediteaza Astrans fara nicio plata reala - util pentru dezvoltare, dar
+    # PERICULOS daca ar ramane deschis in productie (oricine cu un cont ar putea apela
+    # acest API direct, nu doar din aplicatie, si s-ar credita la nesfarsit gratis).
+    # Activ DOAR daca serverul are explicit ALLOW_MOCK_PAYMENTS=1 (niciodata pe Render productie).
+    if provider.name == "mock" and os.environ.get("ALLOW_MOCK_PAYMENTS") != "1":
+        raise HTTPException(status_code=403, detail="Mock payments are disabled")
+
+    result = await provider.verify(body.provider_token or "", package, current)
+    if not result.ok:
+        raise HTTPException(status_code=402, detail=result.detail or "Payment verification failed")
+
+    # Fiecare plata REALA (identificata unic prin external_id - purchase token la Google,
+    # transaction_id la Apple) se crediteaza O SINGURA DATA. Fara asta, acelasi token
+    # retrimis (retry de retea, buton apasat de doua ori, sau cineva incercand intentionat)
+    # ar credita Astrans de fiecare data, desi userul a platit o singura data.
+    if result.external_id:
+        existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
+        if existing:
+            return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
 
     await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": package["astrans"]}})
     tx = {
@@ -1214,11 +1388,19 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         "timestamp": now_utc(),
         "reference": f"buy:{package['package_id']}:{provider.name}",
         "provider": provider.name,
-        "provider_token": body.provider_token,
+        "provider_ref": result.external_id,
         "price": package["price"],
         "currency": cfg.get("currency", "RON"),
     }
-    await db.astran_ledger.insert_one(tx)
+    try:
+        await db.astran_ledger.insert_one(tx)
+    except Exception:  # noqa: BLE001
+        # Indexul UNIC pe provider_ref a respins insertia: doua request-uri simultane cu
+        # acelasi token (dublu-click, retry) - creditul a fost deja dat de celalalt request,
+        # deci anulam incrementul facut mai sus si intoarcem tranzactia deja existenta.
+        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": -package["astrans"]}})
+        existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
+        return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
     return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
 
 
