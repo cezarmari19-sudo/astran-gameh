@@ -200,6 +200,10 @@ export default function PlayScreen() {
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // Orice eroare care scapa din onContextCreate sau din bucla de randare ajunge aici -
+  // ecranul afiseaza mesajul REAL in loc sa ramana un ecran gri/inghetat fara nicio
+  // explicatie. Vezi runCrashGuard/render() mai jos.
+  const [crashError, setCrashError] = useState<string | null>(null);
 
   // Setarile PLAYERULUI (Graphics Quality, Render Distance, etc) - persistente, aceleasi in
   // orice joc, salvate automat la fiecare schimbare (fara buton de Save). Vezi
@@ -275,6 +279,31 @@ export default function PlayScreen() {
     pos: THREE.Vector3; velY: number; facingAngle: number;
     camAngle: number; camPolar: number; camDist: number;
   } | null>(null);
+
+  // Elibereaza TOATE resursele GPU ale scenei curente (geometrii, materiale, renderer) -
+  // THREE.js NU le elibereaza singur la demontare, trebuie .dispose() explicit pe fiecare,
+  // altfel fiecare remontare a GLView-ului (schimbare de orientare, sau iesirea din ecran)
+  // lasa in urma memorie GPU nefolosita dar nealocata inapoi - exact tipul de "leak" care, cu
+  // destule remontari, umple memoria telefonului si duce in cele din urma la crash/ecran gri.
+  function disposeSceneResources() {
+    const scene = sceneRef.current;
+    if (scene) {
+      scene.traverse((obj: any) => {
+        if (obj.isMesh) {
+          obj.geometry?.dispose?.();
+          const mat = obj.material;
+          if (Array.isArray(mat)) mat.forEach((m: THREE.Material) => m.dispose());
+          else mat?.dispose?.();
+        }
+      });
+    }
+    try { (rendererRef.current as any)?.dispose?.(); } catch {}
+    rendererRef.current = null;
+    sceneRef.current = null;
+    cameraRef.current = null;
+    lightsRef.current = null;
+    playerGroupRef.current = null;
+  }
 
   // ============================================================================================
   // MULTI-TOUCH REAL - DE CE E UN SINGUR RESPONDER, NU DOUA:
@@ -464,6 +493,7 @@ export default function PlayScreen() {
       if (rafId.current !== null) cancelAnimationFrame(rafId.current);
       physicsRef.current?.dispose();
       physicsRef.current = null;
+      disposeSceneResources();
     };
   }, []);
 
@@ -522,6 +552,11 @@ export default function PlayScreen() {
       }
       physicsRef.current?.dispose();
       physicsRef.current = null;
+      // Fara asta, fiecare schimbare de orientare lasa in urma scena/renderer-ul VECHI
+      // nealocate (geometrii, materiale, bufferele GPU ale renderer-ului) - cu destule
+      // rotiri intr-o singura sesiune de joc, memoria consumata creste neintrerupt pana
+      // la crash. Vezi disposeSceneResources() de mai sus.
+      disposeSceneResources();
       setReady(false);
       setGlMountKey(k => k + 1);
     };
@@ -653,9 +688,13 @@ export default function PlayScreen() {
     }
     return maxTop;
   }
-
-  const onContextCreate = async (gl: any) => {
+const onContextCreate = async (gl: any) => {
     if (!game) return;
+    // Orice exceptie neasteptata aici (date de scena/script malformate, un geometry/
+    // material invalid, etc) iesea inainte NECAPTATA: setReady(true) nu se mai apela
+    // niciodata, iar ecranul ramanea blocat pe gri la nesfarsit, fara niciun indiciu.
+    // Acum eroarea REALA ajunge pe ecran (vezi crashError in JSX-ul de mai jos).
+    try {
     glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
@@ -702,8 +741,8 @@ export default function PlayScreen() {
 
     // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate.
     // Intra si in fizica, implicit FIXE (Anchored = true) - opresc jucatorul si orice obiect
-    // mobil creat de script, exact ca inainte; devin mobile doar daca scriptul le schimba
-    // explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
+    // mobil creat de script, exact ca inainte de fizica reala; devin mobile doar daca scriptul le
+    // schimba explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
     //
     // Spawn Points si Checkpoint-urile (o.type === SPAWN_TYPE) sunt marker-e speciale: nu intra
     // niciodata in fizica de obiecte mobile (physics.addStudioObject le ignora oricum), dar de-
@@ -785,104 +824,114 @@ export default function PlayScreen() {
 
     const render = () => {
       if (!alive.current) return;
+      // Orice exceptie intr-un cadru (script malformat, fizica instabila, etc) oprea
+      // inainte bucla SILENTIOS - requestAnimationFrame nu mai era reprogramat, dar
+      // niciun semnal nu ajungea pe ecran: ultimul cadru randat ramanea inghetat (sau,
+      // daca exceptia venea foarte devreme, ramanea doar culoarea gri implicita a
+      // suprafetei GL, inainte de primul desen). Acum eroarea REALA ajunge pe ecran.
+      try {
+        const now = Date.now();
+        const dt = Math.min(0.05, (now - lastFrame) / 1000);
+        lastFrame = now;
+
+        const elapsed = (now - startedAt) / 1000;
+        while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
+          applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
+          nextOp += 1;
+        }
+
+        // Avansam simularea fizica (gravitatie, ciocniri, densitate/frecare/elasticitate pe
+        // materialele setate de script) si aducem pozitia/rotatia FIECARUI corp mobil creat
+        // de script inapoi pe mesh-ul lui 3D. Corpurile fixe (Anchored) nu se misca niciodata,
+        // deci nu au nevoie sa fie citite aici.
+        physics.step(dt);
+        for (const [opId, mesh] of scriptMeshes) {
+          if (physics.isAnchored(opId)) continue;
+          const t = physics.getTransform(opId);
+          if (!t) continue;
+          mesh.position.copy(t.position);
+          mesh.quaternion.copy(t.quaternion);
+          const s = mesh.userData as MeshState;
+          s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
+        }
+
+        // Miscare jucator, relativa la directia camerei (doar swipe pe zona camerei o roteste).
+        // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
+        // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
+        const jv = joyVec.current;
+        const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
+        if (moveMag > 0.05) {
+          const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+          const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
+          const moveDir = new THREE.Vector3()
+            .addScaledVector(camForward, jv.y)
+            .addScaledVector(camRight, jv.x);
+          if (moveDir.lengthSq() > 0.0001) {
+            moveDir.normalize();
+            facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+            const prev = pos.current.clone();
+            const next = prev.clone().addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
+            const resolved = resolveCollisions(next, prev);
+            pos.current.set(resolved.x, pos.current.y, resolved.z);
+          }
+        }
+
+        const groundY = groundHeightAt(pos.current.x, pos.current.z);
+        velY.current += GRAVITY * dt;
+        let nextY = pos.current.y + velY.current * dt;
+        if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
+        pos.current.y = nextY;
+
+        // Activarea checkpoint-urilor: cand playerul intra in zona unui checkpoint, acesta devine
+        // noul punct de respawn AL ACESTUI PLAYER (vezi activeCheckpointRef mai sus - independent
+        // de alti jucatori). Nu conteaza ordinea in care sunt parcurse - oricare checkpoint activ
+        // a carui zona o calci devine cel curent, exact ca cerinta punctelor 4-5.
+        for (const cp of checkpointsRef.current) {
+          const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
+          if (dx * dx + dz * dz <= cp.radius * cp.radius) {
+            if (activeCheckpointRef.current?.id !== cp.id) activeCheckpointRef.current = cp;
+            break;
+          }
+        }
+
+        if (playerGroupRef.current) {
+          playerGroupRef.current.position.copy(pos.current);
+          playerGroupRef.current.rotation.y = facingAngle.current;
+          playerGroupRef.current.visible = !firstPerson.current;
+        }
+
+        firstPerson.current = camDist.current <= CAM_FIRST_PERSON_THRESHOLD;
+        const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
+        if (firstPerson.current) {
+          camera.position.set(pos.current.x, eyeY, pos.current.z);
+          const lookDir = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+          camera.lookAt(camera.position.clone().add(lookDir));
+        } else {
+          const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
+          const r = camDist.current, th = camAngle.current, ph = camPolar.current;
+          camera.position.set(
+            target.x + r * Math.sin(ph) * Math.sin(th),
+            target.y + r * Math.cos(ph),
+            target.z + r * Math.sin(ph) * Math.cos(th)
+          );
+          camera.lookAt(target);
+        }
+
+        renderer.render(scene, camera);
+        gl.endFrameEXP();
+      } catch (e: any) {
+        console.log("[play] render loop crashed", e);
+        if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+        return; // nu mai reprogramam cadrul urmator - bucla se opreste curat aici
+      }
       rafId.current = requestAnimationFrame(render);
-
-      // NOTA: aspectul camerei se seteaza la creare (onContextCreate). Schimbarile
-      // de orientare remonteaza GLView-ul (vezi glMountKey si listener-ul de
-      // orientare de mai sus), deci camera se recreeaza cu aspectul corect.
-
-      const now = Date.now();
-      const dt = Math.min(0.05, (now - lastFrame) / 1000);
-      lastFrame = now;
-
-      const elapsed = (now - startedAt) / 1000;
-      while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
-        applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
-        nextOp += 1;
-      }
-
-      // Avansam simularea fizica (gravitatie, ciocniri, densitate/frecare/elasticitate pe
-      // materialele setate de script) si aducem pozitia/rotatia FIECARUI corp mobil creat
-      // de script inapoi pe mesh-ul lui 3D. Corpurile fixe (Anchored) nu se misca niciodata,
-      // deci nu au nevoie sa fie citite aici.
-      physics.step(dt);
-      for (const [opId, mesh] of scriptMeshes) {
-        if (physics.isAnchored(opId)) continue;
-        const t = physics.getTransform(opId);
-        if (!t) continue;
-        mesh.position.copy(t.position);
-        mesh.quaternion.copy(t.quaternion);
-        const s = mesh.userData as MeshState;
-        s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
-      }
-
-      // Miscare jucator, relativa la directia camerei (doar swipe pe zona camerei o roteste).
-      // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
-      // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
-      const jv = joyVec.current;
-      const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
-      if (moveMag > 0.05) {
-        const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
-        const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
-        const moveDir = new THREE.Vector3()
-          .addScaledVector(camForward, jv.y)
-          .addScaledVector(camRight, jv.x);
-        if (moveDir.lengthSq() > 0.0001) {
-          moveDir.normalize();
-          facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
-          const prev = pos.current.clone();
-          const next = prev.clone().addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
-          const resolved = resolveCollisions(next, prev);
-          pos.current.set(resolved.x, pos.current.y, resolved.z);
-        }
-      }
-
-      const groundY = groundHeightAt(pos.current.x, pos.current.z);
-      velY.current += GRAVITY * dt;
-      let nextY = pos.current.y + velY.current * dt;
-      if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
-      pos.current.y = nextY;
-
-      // Activarea checkpoint-urilor: cand playerul intra in zona unui checkpoint, acesta devine
-      // noul punct de respawn AL ACESTUI PLAYER (vezi activeCheckpointRef mai sus - independent
-      // de alti jucatori). Nu conteaza ordinea in care sunt parcurse - oricare checkpoint activ
-      // a carui zona o calci devine cel curent, exact ca cerinta punctelor 4-5.
-      for (const cp of checkpointsRef.current) {
-        const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
-        if (dx * dx + dz * dz <= cp.radius * cp.radius) {
-          if (activeCheckpointRef.current?.id !== cp.id) activeCheckpointRef.current = cp;
-          break;
-        }
-      }
-
-      if (playerGroupRef.current) {
-        playerGroupRef.current.position.copy(pos.current);
-        playerGroupRef.current.rotation.y = facingAngle.current;
-        playerGroupRef.current.visible = !firstPerson.current;
-      }
-
-      firstPerson.current = camDist.current <= CAM_FIRST_PERSON_THRESHOLD;
-      const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
-      if (firstPerson.current) {
-        camera.position.set(pos.current.x, eyeY, pos.current.z);
-        const lookDir = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
-        camera.lookAt(camera.position.clone().add(lookDir));
-      } else {
-        const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
-        const r = camDist.current, th = camAngle.current, ph = camPolar.current;
-        camera.position.set(
-          target.x + r * Math.sin(ph) * Math.sin(th),
-          target.y + r * Math.cos(ph),
-          target.z + r * Math.sin(ph) * Math.cos(th)
-        );
-        camera.lookAt(target);
-      }
-
-      renderer.render(scene, camera);
-      gl.endFrameEXP();
     };
     render();
     setReady(true);
+    } catch (e: any) {
+      console.log("[play] onContextCreate crashed", e);
+      setCrashError(e?.message ? String(e.message) : String(e));
+    }
   };
 
   // Respawn: foloseste checkpoint-ul activ AL ACESTUI PLAYER daca exista unul (punctul 6 din
@@ -899,6 +948,17 @@ export default function PlayScreen() {
     const inst = instanceRef.current;
     if (inst) api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: inst.instance_id }) }).catch(() => {});
     router.replace({ pathname: "/game/[id]", params: { id } } as any);
+  }
+
+  // Reincearca dupa un crash: remonteaza GLView-ul de la zero (acelasi mecanism ca la
+  // schimbarea de orientare), fara sa iasa din ecran.
+  function doRetryAfterCrash() {
+    setCrashError(null);
+    physicsRef.current?.dispose();
+    physicsRef.current = null;
+    disposeSceneResources();
+    setReady(false);
+    setGlMountKey(k => k + 1);
   }
 
   useEffect(() => {
@@ -1005,6 +1065,28 @@ export default function PlayScreen() {
         </Pressable>
       </SafeAreaView>
 
+      {/* Ecranul de eroare: inlocuieste ecranul gri "mort" cu mesajul REAL al crash-ului
+          si doua actiuni clare - Reincearca (remonteaza jocul fara sa iasa din el) sau
+          Leave. Se afiseaza peste tot (deasupra GLView-ului, daca mai e ceva randat). */}
+      <Modal visible={!!crashError} transparent animationType="fade" onRequestClose={() => {}}>
+        <View style={styles.menuBackdrop}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
+            <MaterialCommunityIcons name="alert-circle-outline" size={28} color={colors.error} style={{ marginBottom: 10 }} />
+            <Text style={styles.menuTitle}>Jocul s-a oprit cu o eroare</Text>
+            <ScrollView style={{ maxHeight: 160 }}>
+              <Text style={styles.crashMessage}>{crashError}</Text>
+            </ScrollView>
+            <Pressable testID="play-crash-retry" onPress={doRetryAfterCrash} style={styles.menuCloseBtn}>
+              <Text style={styles.menuCloseBtnText}>Retry</Text>
+            </Pressable>
+            <Pressable testID="play-crash-leave" onPress={doLeave} style={[styles.menuRow, { justifyContent: "center", marginTop: 4 }]}>
+              <MaterialCommunityIcons name="exit-run" size={18} color={colors.error} />
+              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
           <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
@@ -1073,6 +1155,7 @@ const styles = StyleSheet.create({
   menuBox: { width: "100%", maxWidth: 340, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
   menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
+  crashMessage: { color: colors.onSurface2, fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginBottom: 6 },
   menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
   menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
   settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
