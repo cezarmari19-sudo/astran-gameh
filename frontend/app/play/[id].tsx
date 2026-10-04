@@ -413,12 +413,37 @@ export default function PlayScreen() {
     if (inCamZone && camTouchIds.current.length < 2) startCameraTouch(t);
   }
 
-  const onRootResponderGrant = (evt: any) => {
+  // Orice exceptie care scapa dintr-un handler de touch (sau dintr-un useEffect care ruleaza
+  // DUPA montare, in afara buclei de randare din onContextCreate) nu trecea prin NICIUN
+  // try/catch - spre deosebire de onContextCreate si de bucla render() de mai jos, care isi
+  // afiseaza eroarea pe crashError. O exceptie neprinsa intr-un handler de event (de ex. un
+  // undefined neasteptat in camTouchPos, provocat de o secventa rara de atingere/ridicare a
+  // degetelor) omora firul JS: din acel moment React Native nu mai poate rula NICIUN cod -
+  // inclusiv setCrashError -, deci ecranul de eroare nu mai apare deloc. Ramane "inghetat" pe
+  // ultimul cadru deja randat de GL (ecranul negru descris de utilizator, cu doar butonul "A"
+  // vizibil, ultimul strat nativ compus), fara niciun mesaj. Asta explica de ce bug-ul parea
+  // "aleatoriu, dupa cateva secunde sau minute de joc": depinde de o secventa particulara de
+  // atingeri pe ecran, nu de timpul scurs in sine. Solutia tehnic corecta NU e sa evitam acel
+  // caz (ar reduce multi-touch-ul), ci sa prindem orice exceptie chiar la sursa, ca sa ajunga
+  // mereu pe crashError - acelasi mecanism deja construit, acum aplicat peste tot unde poate
+  // rula cod dupa montare, nu doar in bucla de randare.
+  function safeHandler<T extends (...args: any[]) => void>(fn: T): T {
+    return ((...args: any[]) => {
+      try {
+        fn(...args);
+      } catch (e: any) {
+        console.log("[play] touch handler crashed", e);
+        if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+      }
+    }) as T;
+  }
+
+  const onRootResponderGrant = safeHandler((evt: any) => {
     const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
     assignTouch(t);
-  };
+  });
 
-  const onRootResponderMove = (evt: any) => {
+  const onRootResponderMove = safeHandler((evt: any) => {
     const touches = touchesOf(evt);
 
     // Deget nou aparut (al doilea/al treilea, intrat cat timp altele sunt deja active) - nu
@@ -457,9 +482,9 @@ export default function PlayScreen() {
         camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, camPinchStartCamDist.current / scale));
       }
     }
-  };
+  });
 
-  const onRootResponderEnd = (evt: any) => {
+  const onRootResponderEnd = safeHandler((evt: any) => {
     const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
     let camChanged = false;
     for (const c of changed) {
@@ -484,7 +509,7 @@ export default function PlayScreen() {
         lastCamPolar.current = camPolar.current;
       }
     }
-  };
+  });
 
   useEffect(() => {
     alive.current = true;
@@ -962,31 +987,46 @@ const onContextCreate = async (gl: any) => {
   }
 
   useEffect(() => {
-    const r = rendererRef.current as any;
-    const cam = cameraRef.current;
-    if (!r) return;
-    r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
-    // NOTA (Viziune): three.js seteaza viewport-ul GL la size * pixelRatio, dar
-    // bufferul expo-gl are dimensiune fixa. La 1.4 / 2 viewport-ul depaseste
-    // bufferul, deci se vede doar o parte din scena, marita (personajul se muta
-    // spre coltul din dreapta-sus). Comportamentul e pastrat intentionat ca
-    // "Viziunea 1/2/3", la cererea utilizatorului. NU folosi pixelRatio pentru
-    // calitate grafica - pentru asta exista setarea Grafica (iluminare).
-    if (cam) {
-      const size = new THREE.Vector2();
-      r.getSize(size);
-      if (size.x > 0 && size.y > 0) {
-        cam.aspect = size.x / size.y;
-        cam.updateProjectionMatrix();
+    try {
+      const r = rendererRef.current as any;
+      const cam = cameraRef.current;
+      if (!r) return;
+      r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+      // NOTA (Viziune): three.js seteaza viewport-ul GL la size * pixelRatio, dar
+      // bufferul expo-gl are dimensiune fixa. La 1.4 / 2 viewport-ul depaseste
+      // bufferul, deci se vede doar o parte din scena, marita (personajul se muta
+      // spre coltul din dreapta-sus). Comportamentul e pastrat intentionat ca
+      // "Viziunea 1/2/3", la cererea utilizatorului. NU folosi pixelRatio pentru
+      // calitate grafica - pentru asta exista setarea Grafica (iluminare).
+      if (cam) {
+        const size = new THREE.Vector2();
+        r.getSize(size);
+        if (size.x > 0 && size.y > 0) {
+          cam.aspect = size.x / size.y;
+          cam.updateProjectionMatrix();
+        }
       }
+    } catch (e: any) {
+      console.log("[play] quality effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
     }
   }, [quality]);
   useEffect(() => {
-    if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
+    try {
+      if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
+    } catch (e: any) {
+      console.log("[play] graphicsLevel effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
   }, [graphicsLevel]);
   useEffect(() => {
-    const cam = cameraRef.current;
-    if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
+    try {
+      const cam = cameraRef.current;
+      if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
+    } catch (e: any) {
+      console.log("[play] renderDistance effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
   }, [renderDistance]);
 
   const isLandscape = screenW > screenH;
