@@ -1,4 +1,4 @@
-// frontend/package.json
+//frontend/package.json
 {
   "name": "frontend",
   "main": "expo-router/entry",
