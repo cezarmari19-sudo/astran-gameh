@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { View, Text, TextInput, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, Pressable } from "react-native";
+import { View, Text, TextInput, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, Pressable, Modal } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/src/context/AuthContext";
@@ -17,6 +18,13 @@ export default function RegisterScreen() {
   const [ageCategory, setAgeCategory] = useState<"under_18" | "adult_18">("under_18");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Checkbox-ul Politicii de Confidentialitate. Independent de modalul de mai jos: deschiderea
+  // politicii NU bifeaza nimic, doar afiseaza textul - bifarea e mereu o actiune separata,
+  // explicita a utilizatorului (vezi cerinta). Modalul fiind in aceeasi componenta (nu o ruta
+  // noua), formularul si privacyAccepted raman neatinse la deschidere/inchidere - nu exista
+  // nicio demontare a ecranului de Inregistrare intre timp.
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
 
   async function doRegister() {
     setBusy(true); setErr(null);
@@ -67,12 +75,64 @@ export default function RegisterScreen() {
             </Pressable>
           </View>
 
+          <View style={styles.privacyRow}>
+            <Pressable
+              testID="register-privacy-checkbox"
+              onPress={() => setPrivacyAccepted(v => !v)}
+              hitSlop={8}
+              style={styles.checkbox}
+            >
+              <MaterialCommunityIcons
+                name={privacyAccepted ? "checkbox-marked" : "checkbox-blank-outline"}
+                size={18}
+                color={privacyAccepted ? colors.brand : colors.onSurface3}
+              />
+            </Pressable>
+            <Text style={styles.privacyText}>
+              Am citit și accept{" "}
+              <Text testID="register-privacy-link" style={styles.privacyLink} onPress={() => setShowPrivacy(true)}>
+                Politica de Confidențialitate
+              </Text>
+            </Text>
+          </View>
+
           {err ? <Text style={styles.err} testID="register-error">{err}</Text> : null}
           <View style={{ marginTop: 24 }}>
-            <PrimaryButton testID="register-submit-button" label={busy ? "..." : t("continue")} onPress={doRegister} disabled={busy || !email || !username || !password} />
+            <PrimaryButton
+              testID="register-submit-button"
+              label={busy ? "..." : t("continue")}
+              onPress={doRegister}
+              disabled={busy || !email || !username || !password || !privacyAccepted}
+            />
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Pagina Politicii de Confidentialitate: modal full-screen in interiorul aplicatiei (nu
+          browser, nu ruta noua) - cerinta explicita. Fiind Modal, nu router.push, ecranul de
+          Inregistrare de dedesubt nu se demonteaza niciodata: formularul si privacyAccepted
+          supravietuiesc neschimbate cat timp userul citeste si apoi apasa Inapoi. */}
+      <Modal
+        visible={showPrivacy}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setShowPrivacy(false)}
+      >
+        <SafeAreaView style={styles.privacyRoot} edges={["top", "left", "right", "bottom"]}>
+          <View style={styles.privacyHeader}>
+            <Pressable testID="register-privacy-close" onPress={() => setShowPrivacy(false)} style={styles.privacyBack} hitSlop={8}>
+              <MaterialCommunityIcons name="chevron-left" size={26} color={colors.onSurface} />
+            </Pressable>
+            <Text style={styles.privacyTitle}>Politica de Confidențialitate</Text>
+            <View style={styles.privacyHeaderSpacer} />
+          </View>
+          <ScrollView contentContainerStyle={styles.privacyContent} showsVerticalScrollIndicator>
+            {/* Placeholder temporar, la cererea explicita - se inlocuieste cu textul complet
+                al politicii cand va fi furnizat. */}
+            <Text style={styles.privacyBody}>Aici va fi afișată Politica de Confidențialitate Astran Game.</Text>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 }
@@ -91,4 +151,15 @@ const styles = StyleSheet.create({
   ageBtnText: { color: colors.onSurface2, fontWeight: "700", fontSize: 14 },
   ageBtnTextActive: { color: colors.brand },
   err: { color: colors.error, marginTop: 12, fontSize: 12, fontWeight: "600" },
+  privacyRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginTop: 16 },
+  checkbox: { width: 18, height: 18, alignItems: "center", justifyContent: "center", marginTop: 1 },
+  privacyText: { flex: 1, color: colors.onSurface2, fontSize: 12, lineHeight: 17 },
+  privacyLink: { color: colors.brand, fontWeight: "700", textDecorationLine: "underline" },
+  privacyRoot: { flex: 1, backgroundColor: colors.surface },
+  privacyHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
+  privacyBack: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  privacyTitle: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "900", textAlign: "center" },
+  privacyHeaderSpacer: { width: 40 },
+  privacyContent: { padding: spacing.lg, paddingBottom: 48 },
+  privacyBody: { color: colors.onSurface2, fontSize: 14, lineHeight: 22 },
 });
