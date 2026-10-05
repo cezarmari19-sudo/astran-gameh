@@ -469,12 +469,16 @@ async def google_session(body: SessionBody):
         raise HTTPException(status_code=401, detail="Invalid or used session_id")
     data = resp.json()
     email = data.get("email")
+    # BUG REPARAT: verificarea trebuie facuta INAINTE de a calcula 'name' - "name = ... or
+    # email.split('@')[0]" arunca o exceptie necontrolata (AttributeError: 'NoneType' object
+    # has no attribute 'split') daca Google nu trimite deloc email, pentru ca atunci email e
+    # None, iar None.split(...) crapa. Userul vedea o eroare generica 500 in loc de mesajul
+    # clar de mai jos. Mutand verificarea aici, email lipsa se trateaza curat, cu 401.
+    if not email:
+        raise HTTPException(status_code=401, detail="No email in session")
     name = data.get("name") or email.split("@")[0]
     picture = data.get("picture")
     session_token = data.get("session_token") or secrets.token_urlsafe(32)
-
-    if not email:
-        raise HTTPException(status_code=401, detail="No email in session")
 
     existing = await db.users.find_one({"email": email})
     if existing:
