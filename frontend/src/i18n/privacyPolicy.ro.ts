@@ -254,4 +254,298 @@ Putem colecta informații despre:
 
 Dacă un utilizator raportează, blochează sau dezactivează un alt utilizator, putem colecta și păstra informațiile necesare pentru:
 
-- inves
+- investigarea raportului;
+- aplicarea regulilor;
+- prevenirea abuzului;
+- securitate;
+- detectarea fraudelor;
+- soluționarea disputelor;
+- aplicarea sancțiunilor;
+- protejarea utilizatorilor.
+
+
+12. ACHIZIȚII ȘI INFORMAȚII FINANCIARE
+
+Astran poate colecta:
+
+- istoricul achizițiilor;
+- produsele cumpărate;
+- monedele virtuale cumpărate;
+- abonamente;
+- tranzacții;
+- rambursări;
+- informații despre metoda de plată;
+- identificatori de tranzacție;
+- informații furnizate de procesatorii de plăți.
+
+Datele complete ale cardului sau alte date financiare sensibile pot fi procesate de procesatori de plăți specializați, în funcție de metoda de plată utilizată.
+
+Astran nu intenționează să comercializeze date precum numărul complet al cardului sau parolele.
+
+În schimb, putem transmite informațiile necesare procesatorilor de plăți și altor furnizori autorizați.
+
+
+13. DATE FURNIZATE DE PĂRINȚI SAU TUTORI
+
+Dacă este necesar consimțământul parental, Astran poate colecta de la părintele sau tutorele:
+
+- adresa de e-mail;
+- numele, dacă este necesar;
+- informații necesare verificării consimțământului;
+- data și momentul acordării consimțământului;
+- informații privind relația cu minorul, atunci când este necesar;
+- informații tehnice și administrative asociate procesului de verificare.
+
+Aceste date pot fi utilizate pentru verificarea, documentarea și gestionarea consimțământului parental.
+
+
+14. CUM PUTEM UTILIZA DATELE
+
+În măsura permisă de legislația aplicabilă și în funcție de baza juridică relevantă, Astran poate utiliza datele pentru:
+
+- furnizarea platformei;
+- funcționarea jocurilor;
+- multiplayer;
+- conturi;
+- autentificare;
+- securitate;
+- prevenirea fraudelor;
+- prevenirea abuzului;
+- moderare;
+- aplicarea regulilor;
+- suport;
+- rezolvarea problemelor;
+- dezvoltarea produsului;
+- analiză;
+- statistici;
+- cercetare;
+- personalizare;
+- recomandări;
+- publicitate;
+- marketing;
+- măsurarea performanței;
+- dezvoltarea de noi funcții;
+- dezvoltarea și antrenarea sistemelor AI;
+- evaluarea sistemelor AI;
+- îmbunătățirea sistemelor AI;
+- detectarea conținutului problematic;
+- detectarea comportamentului automatizat sau fraudulos;
+- protejarea platformei;
+- respectarea obligațiilor legale;
+- alte scopuri permise de legislația aplicabilă.
+
+
+15. UTILIZAREA PENTRU AI
+
+Astran poate utiliza anumite date colectate prin platformă pentru:
+
+- dezvoltarea modelelor AI;
+- antrenarea modelelor AI;
+- evaluarea modelelor AI;
+- testarea modelelor AI;
+- îmbunătățirea modelelor AI;
+- cercetare;
+- dezvoltarea unor produse sau servicii bazate pe AI.
+
+Aceste date pot include, în funcție de funcție și de temeiul juridic aplicabil:
+
+- date despre jocuri;
+- comportament în joc;
+- conversații text;
+- interacțiuni;
+- conținut creat;
+- date audio;
+- voce;
+- alte date tehnice.
+
+Astran poate utiliza datele direct sau prin furnizori, parteneri, cercetători sau alte organizații autorizate.
+
+
+16. RESTRICȚIE PRIVIND ANUMITE UTILIZĂRI AI ALE VOCII
+
+Deși Astran poate permite utilizarea anumitor date pentru dezvoltarea sistemelor AI, Astran nu autorizează utilizarea datelor vocale, a stilului vocal sau a altor date asociate vocii pentru dezvoltarea unor sisteme AI destinate în mod specific:
+
+- generării de conținut pornografic;
+- generării de deepfake-uri sexuale;
+- simulării sexuale a unei persoane;
+- imitării sexuale neconsensuale a unei persoane;
+- creării unei simulări romantice sau intime prezentate ca o relație cu utilizatorul;
+- altor utilizări similare pe care Astran le interzice prin contract sau politică.
+
+Această restricție poate fi inclusă în acordurile contractuale cu destinatarii datelor pentru a impune respectarea ei.
+
+
+17. COMERCIALIZAREA ȘI LICENȚIEREA DATELOR
+
+În măsura permisă de lege și în baza juridică aplicabilă, Astran poate licenția, transmite, pune la dispoziție sau comercializa anumite date și informații către terți.
+
+Acești terți pot include:
+
+- companii;
+- furnizori;
+- parteneri comerciali;
+- cercetători;
+- dezvoltatori;
+- organizații;
+- instituții;
+- alte entități;
+- în anumite situații, persoane fizice.
+
+Datele pot fi furnizate pentru scopuri precum:
+
+- analiză;
+- cercetare;
+- publicitate;
+- marketing;
+- personalizare;
+- AI;
+- dezvoltare software;
+- securitate;
+- statistică;
+- cercetare comercială;
+- dezvoltarea de produse;
+- servicii comerciale;
+- alte scopuri permise de legislația aplicabilă.
+
+
+18. TRANSMITEREA ULTERIOARĂ DE CĂTRE DESTINATARI
+
+În măsura permisă de lege și de acordurile aplicabile, un destinatar al datelor poate utiliza datele primite și le poate transmite sau licenția mai departe.
+
+Astfel, datele pot circula între mai multe organizații sau persoane.
+
+Acolo unde Astran impune contractual restricții privind anumite utilizări, destinatarii trebuie să respecte respectivele restricții.
+
+Astran nu poate garanta modul în care un terț va utiliza ulterior datele după ce transferul a fost efectuat, dacă legea și contractele aplicabile permit acea utilizare.
+
+
+19. DATE SENSIBILE ȘI DATE CU RISC RIDICAT
+
+Astran nu intenționează să comercializeze în mod obișnuit anumite date extrem de sensibile, cum ar fi:
+
+- parole;
+- numere complete de card;
+- chei de autentificare;
+- token-uri secrete;
+- alte credențiale de securitate.
+
+Pentru alte categorii de date personale, posibilitatea de transmitere, licențiere sau comercializare va depinde de legislația aplicabilă, baza juridică și consimțământul necesar.
+
+
+20. PROCESAREA INTERNAȚIONALĂ
+
+Astran poate utiliza furnizori și infrastructură aflate în:
+
+- Europa;
+- America de Nord;
+- America de Sud;
+- Asia;
+- Africa;
+- Australia și Oceania;
+- alte regiuni.
+
+Prin urmare, datele pot fi transferate sau procesate pe alte continente decât cel în care locuiește utilizatorul.
+
+Pentru transferurile internaționale, Astran va aplica mecanismele juridice necesare atunci când acestea sunt cerute de legislația aplicabilă.
+
+
+21. CÂT TIMP PĂSTRĂM DATELE
+
+Astran poate păstra diferite categorii de date pentru perioade diferite.
+
+Unele date pot fi:
+
+- șterse rapid;
+- păstrate temporar;
+- păstrate atât timp cât sunt necesare funcției;
+- păstrate pentru securitate;
+- păstrate pentru obligații legale;
+- anonimizate;
+- agregate;
+- păstrate în sisteme de backup pentru o anumită perioadă.
+
+Perioada de păstrare poate varia în funcție de tipul datelor, scopul pentru care au fost colectate, funcția utilizată, obligațiile legale și alte circumstanțe relevante.
+
+Astran nu garantează că toate datele sunt șterse imediat după încetarea utilizării unei funcții.
+
+
+22. CE SE ÎNTÂMPLĂ CÂND ȘTERGI CONTUL
+
+Ștergerea contului nu înseamnă automat că fiecare copie a fiecărei informații asociate contului este imediat eliminată din toate sistemele sau de la toți destinatarii.
+
+Detaliile privind acest lucru vor fi prezentate într-o Politică separată privind ștergerea contului și păstrarea datelor.
+
+În funcție de legislația aplicabilă, anumite date pot rămâne necesare pentru:
+
+- obligații legale;
+- securitate;
+- prevenirea fraudelor;
+- soluționarea disputelor;
+- evidențe financiare;
+- backup-uri;
+- respectarea obligațiilor contractuale;
+- date deja anonimizate sau agregate;
+- date care au fost deja transmise unui terț în condițiile permise de lege.
+
+Ștergerea contului oprește utilizarea contului ca serviciu activ și, în funcție de funcție și de legislația aplicabilă, poate opri colectarea unor date noi asociate contului.
+
+Datele colectate anterior pot continua să existe în sistemele Astran sau în sistemele terților atunci când acest lucru este permis de lege și de acordurile aplicabile.
+
+Drepturile obligatorii de ștergere și alte drepturi prevăzute de legislația aplicabilă vor fi respectate.
+
+
+23. MODIFICAREA ACESTEI POLITICI
+
+Astran poate modifica această Politică de Confidențialitate.
+
+Dacă modificările sunt importante, Astran poate solicita utilizatorului să revizuiască și, atunci când este necesar, să accepte noua versiune înainte de a continua utilizarea anumitor servicii.
+
+Pentru prelucrările pentru care este necesar un consimțământ nou sau separat, Astran va solicita consimțământul corespunzător.
+
+
+24. UTILIZATORII MINORI
+
+Astran aplică măsuri suplimentare atunci când utilizatorul este minor.
+
+Acestea pot include:
+
+- verificarea vârstei;
+- solicitarea e-mailului unui părinte sau tutore;
+- obținerea consimțământului parental;
+- limitarea anumitor funcții;
+- limitarea anumitor tipuri de publicitate;
+- limitarea anumitor tipuri de transmitere a datelor;
+- mecanisme suplimentare de siguranță.
+
+Pentru utilizatorii copii, anumite forme de comercializare sau divulgare a datelor pot necesita consimțământ parental separat sau pot fi restricționate de lege.
+
+Regulile aplicabile minorilor pot varia în funcție de țara în care utilizatorul se află.
+
+
+25. RESPECTAREA LEGISLAȚIEI
+
+Nicio prevedere din această Politică de Confidențialitate nu trebuie interpretată ca permițând Astran să efectueze o prelucrare care este interzisă de legislația aplicabilă.
+
+Dacă o lege locală acordă utilizatorului protecții suplimentare, Astran va respecta aceste cerințe în măsura în care sunt aplicabile.
+
+În special, pentru utilizatorii din UE și SEE, Astran va ține cont de cerințele legislației privind protecția datelor, inclusiv principiile privind legalitatea, transparența, limitarea scopului, minimizarea datelor, securitatea și limitarea stocării.
+
+
+26. CONTACT
+
+Pentru întrebări privind această Politică de Confidențialitate:
+
+Operator:
+[NUMELE LEGAL AL COMPANIEI — ÎNLOCUIEȘTE CÂND ÎL AI]
+
+E-mail:
+[EMAIL DE CONFIDENȚIALITATE — ÎNLOCUIEȘTE CÂND ÎL AI]
+
+Website:
+[WEBSITE — ÎNLOCUIEȘTE CÂND ÎL AI]
+
+Adresă:
+[ADRESA LEGALĂ — ÎNLOCUIEȘTE CÂND ESTE DISPONIBILĂ]
+
+
+SFÂRȘITUL POLITICII DE CONFIDENȚIALITATE`;
