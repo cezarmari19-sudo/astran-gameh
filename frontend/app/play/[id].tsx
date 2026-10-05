@@ -13,7 +13,7 @@ import { SceneObj, buildMesh, geometryFor, aabbFor, AABB, SPAWN_TYPE, spawnKindO
 import { PhysicsWorld, MaterialDef, DEFAULT_MATERIAL, PhysicsShapeType } from "@/src/play/physicsWorld";
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
-import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
+import { createObject, applyLocalTransform, applyMaterial, normalizeParts } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
 // ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
@@ -623,7 +623,20 @@ export default function PlayScreen() {
         if (charId && g.game?.player_character_source === "shop_model") {
           try {
             const item = await api(`/shop/items/${charId}`);
-            if (Array.isArray(item?.item?.parts)) characterPartsRef.current = item.item.parts;
+            // IMPORTANT: datele vin direct de la server (pot fi un model vechi, salvat
+            // inainte de o validare, sau pur si simplu corupt) - exact ca piesele incarcate
+            // in editorul de modele (model-studio/[id].tsx), care NICIODATA nu le foloseste
+            // brute, ci mereu prin normalizeParts() (vezi modelTypes.ts: "Curata ce vine de
+            // la server ... valori lipsa, radacina, parinti disparuti"). Inainte, Play Mode
+            // ocolea exact aceasta curatare si trimitea piesele brute direct in
+            // createObject()/applyLocalTransform() - daca lista avea o intrare nula/malformata
+            // sau un parent catre un id care nu mai exista, asta arunca direct "Cannot read
+            // property 'x'/'name' of undefined" in buildPlayerVisual(), cu ecranul deja
+            // negru/pe un cadru vechi. normalizeParts() garanteaza, exact ca in Studio, ca
+            // fiecare piesa are id/name/type valide si un lant de parinti care se termina
+            // mereu in ROOT_ID - fara sa reduca sau sa ascunda nimic, doar sa repare fluxul
+            // de date, acelasi mecanism folosit deja de editor pentru exact acest caz.
+            if (Array.isArray(item?.item?.parts)) characterPartsRef.current = normalizeParts(item.item.parts);
           } catch (e) { console.log("[play] character load failed", e); }
         }
       } catch (e: any) {
