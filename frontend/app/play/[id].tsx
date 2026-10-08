@@ -552,11 +552,28 @@ export default function PlayScreen() {
   // (PORTRAIT_UP, PORTRAIT_DOWN, LANDSCAPE_LEFT, LANDSCAPE_RIGHT) si sa
   // remontam GLView-ul de fiecare data cand aceasta valoare se schimba,
   // indiferent daca e o schimbare portret<->landscape sau landscape<->landscape.
+  //
+  // BUG GASIT: remontarea (setGlMountKey) se facea SINCRON, chiar in callback-ul
+  // evenimentului de orientare. Dar acel eveniment poate sosi inainte ca React
+  // Native sa fi terminat recalcularea layout-ului (dimensiunile inversate ale
+  // View-ului parinte) pentru noua orientare - layout-ul si evenimentul de
+  // orientare nu sunt garantate sincronizate. Daca GLView se remonteaza chiar
+  // atunci, noul context GL (onContextCreate -> gl.drawingBufferWidth/Height)
+  // mosteneste inca dimensiunile VECHI, dinainte de rotire: suprafata e alocata
+  // gresit de la bun inceput, nu e un glitch temporar - de-aia jumatate din
+  // ecran ramane negru si NU isi mai revine, exact ce a raportat utilizatorul.
+  // Solutia: amanam remontarea cu doua requestAnimationFrame (nu un setTimeout
+  // arbitrar) - primul rAF ruleaza dupa ce browser-ul/RN a aplicat deja layout-ul
+  // curent, al doilea confirma ca acel layout s-a si "asezat" inainte sa cream
+  // noul context GL. Nu reduce nimic din functionalitate, doar sincronizeaza mai
+  // bine remontarea cu layout-ul.
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
     let subscription: ScreenOrientation.Subscription | null = null;
     let cancelled = false;
+    let raf1: number | null = null;
+    let raf2: number | null = null;
 
     const remountFor = (orientation: ScreenOrientation.Orientation) => {
       if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
@@ -583,7 +600,14 @@ export default function PlayScreen() {
       // la crash. Vezi disposeSceneResources() de mai sus.
       disposeSceneResources();
       setReady(false);
-      setGlMountKey(k => k + 1);
+      // Doua rAF: lasam layout-ul RN sa se aseze pe noile dimensiuni (inversate)
+      // ale View-ului parinte INAINTE sa remontam GLView-ul, ca noul context GL
+      // sa porneasca deja cu dimensiunea corecta, nu cu cea veche, pre-rotire.
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => {
+          if (!cancelled) setGlMountKey(k => k + 1);
+        });
+      });
     };
 
     (async () => {
@@ -601,6 +625,8 @@ export default function PlayScreen() {
 
     return () => {
       cancelled = true;
+      if (raf1 !== null) cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
       if (subscription) ScreenOrientation.removeOrientationChangeListener(subscription);
     };
   }, []);
