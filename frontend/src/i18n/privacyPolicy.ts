@@ -2,6 +2,7 @@ import { LangCode } from "./index";
 import { PRIVACY_POLICY_RO } from "./privacyPolicy.ro";
 import { PRIVACY_POLICY_EN } from "./privacyPolicy.en";
 import { PRIVACY_POLICY_ES } from "./privacyPolicy.es";
+import { PRIVACY_POLICY_RU } from "./privacyPolicy.ru";
 import { PRIVACY_POLICY_FR } from "./privacyPolicy.fr";
 import { PRIVACY_POLICY_PL } from "./privacyPolicy.pl";
 import { PRIVACY_POLICY_NL } from "./privacyPolicy.nl";
@@ -33,14 +34,17 @@ import { PRIVACY_POLICY_UR } from "./privacyPolicy.ur";
 import { PRIVACY_POLICY_KO } from "./privacyPolicy.ko";
 import { PRIVACY_POLICY_HE } from "./privacyPolicy.he";
 import { PRIVACY_POLICY_FA } from "./privacyPolicy.fa";
-// ro, en, es, fr, pl, nl, el, sv, da, fi, no, is, cs, sk, hu, bg, hr, sr, sl, bs, mk, sq, uk,
-// be, lt, lv, et, mt, tr, kk, ur, ko, he, fa = 34 fisiere separate (ja, zh, ar, hi, ru sunt
-// deja complete in privacyPolicy.ro.ts/.en.ts... nu - vezi nota de mai jos).
+import { PRIVACY_POLICY_JA } from "./privacyPolicy.ja";
+import { PRIVACY_POLICY_ZH } from "./privacyPolicy.zh";
+import { PRIVACY_POLICY_AR } from "./privacyPolicy.ar";
+import { PRIVACY_POLICY_HI } from "./privacyPolicy.hi";
 
+// Toate cele 39 de limbi pentru care exista document complet in fisiere separate.
 export const PRIVACY_POLICY: Partial<Record<LangCode, string>> = {
   ro: PRIVACY_POLICY_RO,
   en: PRIVACY_POLICY_EN,
   es: PRIVACY_POLICY_ES,
+  ru: PRIVACY_POLICY_RU,
   fr: PRIVACY_POLICY_FR,
   pl: PRIVACY_POLICY_PL,
   nl: PRIVACY_POLICY_NL,
@@ -72,6 +76,10 @@ export const PRIVACY_POLICY: Partial<Record<LangCode, string>> = {
   ko: PRIVACY_POLICY_KO,
   he: PRIVACY_POLICY_HE,
   fa: PRIVACY_POLICY_FA,
+  ja: PRIVACY_POLICY_JA,
+  zh: PRIVACY_POLICY_ZH,
+  ar: PRIVACY_POLICY_AR,
+  hi: PRIVACY_POLICY_HI,
 };
 
 export function privacyPolicyText(lang: LangCode): string {
