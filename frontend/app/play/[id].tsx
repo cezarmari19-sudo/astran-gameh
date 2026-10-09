@@ -50,6 +50,13 @@ function disposeMesh(m: THREE.Mesh) {
   m.geometry.dispose();
   (m.material as THREE.Material).dispose();
 }
+// GARDA NaN/Infinity (vezi folosirea ei in render(), mai jos): THREE.js nu arunca nicio
+// eroare cand primeste un numar invalid in pozitia camerei/jucatorului - pur si simplu nu
+// mai poate desena nimic corect, iar tot ce ramane vizibil e culoarea de fundal a cerului
+// (aproape neagra). Exact un "ecran negru complet", FARA crash si FARA mesaj.
+function isFiniteNum(n: number): boolean {
+  return typeof n === "number" && Number.isFinite(n);
+}
 function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: PhysicsWorld, op: ScriptOp) {
   // "world" si "material" nu au un mesh asociat: schimba starea globala a lumii fizice.
   if (op.op === "world") {
@@ -312,19 +319,21 @@ export default function PlayScreen() {
   // doar traseele STIUTE (touch handlers, bucla de randare, efectele de quality/graphics/
   // renderDistance). Dar useEffect-ul de orientare (mai jos, "remontare GLView la FIECARE
   // schimbare reala de orientare") avea un gol: callback-ul listener-ului de orientare
-  // (ScreenOrientation.addOrientationChangeListener) NU trecea prin niciun try/catch. In Play
-  // Mode orientarea e complet libera (unlockAsync) - o inclinare usoara a telefonului CAT
-  // JUCATORUL TINE TELEFONUL IN MANA SI SE JOACA (nu neaparat o rotire deliberata) poate
-  // declansa acelasi eveniment nativ si, daca ceva arunca o exceptie in acel callback, omoara
-  // firul JS exact ca bug-ul documentat la safeHandler - dar FARA sa ajunga pe crashError,
-  // pentru ca acel traseu nu era acoperit. Asta explica un ecran complet negru, aparut "aleator"
-  // dupa cateva secunde/minute de joc, fara mesaj de eroare si fara legatura cu minimizarea.
+  // (ScreenOrientation.addOrientationChangeListener) NU trecea prin niciun try/catch. Solutia:
+  // (1) try/catch in jurul lui remountFor, ca orice alt traseu deja protejat; si (2) un handler
+  // GLOBAL (ErrorUtils), activ doar cat acest ecran e montat, care prinde ORICE exceptie
+  // neprinsa ramasa - de pe orice traseu, inclusiv unul inca nedescoperit - si o afiseaza pe
+  // crashError in loc sa lase firul JS sa moara silentios. Handler-ul vechi e restaurat la
+  // demontare, ca sa nu afecteze alte ecrane ale aplicatiei.
   //
-  // Solutia: (1) try/catch in jurul lui remountFor, ca orice alt traseu deja protejat; si (2)
-  // un handler GLOBAL (ErrorUtils), activ doar cat acest ecran e montat, care prinde ORICE
-  // exceptie neprinsa ramasa - de pe orice traseu, inclusiv unul inca nedescoperit - si o
-  // afiseaza pe crashError in loc sa lase firul JS sa moara silentios. Handler-ul vechi e
-  // restaurat la demontare, ca sa nu afecteze alte ecrane ale aplicatiei.
+  // RAPORTAT ULTERIOR: cu ambele adaugate, ecranul tot devine complet negru, dar FARA sa
+  // apara vreodata crashError. Asta exclude o exceptie JS ca si cauza - bucla de randare
+  // continua sa ruleze normal, dar ceea ce randeaza nu mai e vizibil. Cel mai probabil
+  // motiv tehnic: pozitia jucatorului sau a camerei ajunge la un numar invalid (NaN/
+  // Infinity) - THREE.js NU arunca nicio eroare cand primeste asa ceva in pozitia camerei,
+  // pur si simplu nu mai poate desena nimic corect, iar tot ce ramane vizibil e culoarea de
+  // fundal a cerului (aproape neagra). Vezi garda explicita din render(), mai jos, care
+  // transforma acest caz tacut intr-un crash cu valorile exacte pe ecran.
   // ============================================================================================
   useEffect(() => {
     const ErrorUtilsGlobal = (global as any).ErrorUtils;
@@ -606,17 +615,10 @@ export default function PlayScreen() {
   // ce RN a aplicat deja layout-ul curent, al doilea confirma ca acel layout
   // s-a si "asezat" inainte sa cream noul context GL.
   //
-  // BUG GASIT #2 (raportat ulterior - ecran COMPLET negru, aleatoriu, dupa
-  // cateva secunde/minute de joc, FARA nicio legatura cu minimizarea si FARA
-  // sa apara fereastra de crash): acest callback NU trecea prin niciun
-  // try/catch, spre deosebire de restul codului. In Play Mode orientarea e
-  // complet libera (unlockAsync) - o inclinare usoara a telefonului CAT
-  // jucatorul il tine in mana si se joaca (nu neaparat o rotire deliberata)
-  // poate declansa oricand acest eveniment nativ. Daca ceva din remountFor
-  // arunca o exceptie, firul JS moare silentios, exact ca bug-ul documentat
-  // mai sus la safeHandler - dar fara mesaj, pentru ca acest traseu nu era
-  // acoperit. Solutie: try/catch in jurul lui remountFor, care trimite orice
-  // eroare pe crashError, la fel ca peste tot in rest.
+  // BUG GASIT #2: acest callback NU trecea prin niciun try/catch, spre deosebire
+  // de restul codului - o exceptie acolo omora firul JS silentios. Solutie:
+  // try/catch in jurul lui remountFor, care trimite orice eroare pe crashError,
+  // la fel ca peste tot in rest.
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -1034,6 +1036,26 @@ const onContextCreate = async (gl: any) => {
             target.z + r * Math.sin(ph) * Math.cos(th)
           );
           camera.lookAt(target);
+        }
+
+        // GARDA NaN/Infinity: daca pozitia jucatorului sau a camerei devine vreodata un
+        // numar invalid (posibil dintr-o coliziune/miscare degenerata), THREE.js NU arunca
+        // nicio eroare - pur si simplu nu mai poate desena nimic, iar tot ce ramane vizibil
+        // e culoarea de fundal a cerului (aproape neagra). Exact un "ecran negru complet"
+        // FARA crash si FARA mesaj, pentru ca tehnic nu e un crash. Aruncam noi eroarea aici,
+        // cu valorile exacte, ca sa treaca prin try/catch-ul de mai jos si sa ajunga pe
+        // crashError in loc sa ramana silentios.
+        if (
+          !isFiniteNum(pos.current.x) || !isFiniteNum(pos.current.y) || !isFiniteNum(pos.current.z) ||
+          !isFiniteNum(camera.position.x) || !isFiniteNum(camera.position.y) || !isFiniteNum(camera.position.z) ||
+          !isFiniteNum(camAngle.current) || !isFiniteNum(camPolar.current) || !isFiniteNum(camDist.current)
+        ) {
+          throw new Error(
+            `Pozitie invalida (NaN/Infinity): player=(${pos.current.x}, ${pos.current.y}, ${pos.current.z}) ` +
+            `camera=(${camera.position.x}, ${camera.position.y}, ${camera.position.z}) ` +
+            `camAngle=${camAngle.current} camPolar=${camPolar.current} camDist=${camDist.current} ` +
+            `velY=${velY.current} dt=${dt}`
+          );
         }
 
         renderer.render(scene, camera);
