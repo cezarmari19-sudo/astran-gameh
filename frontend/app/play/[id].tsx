@@ -306,6 +306,46 @@ export default function PlayScreen() {
   }
 
   // ============================================================================================
+  // ERORI NEASTEPTATE, ORIUNDE AR SCAPA - DE CE AVEM ACUM SI UN HANDLER GLOBAL:
+  //
+  // Mecanismul safeHandler (mai jos) si try/catch-urile din onContextCreate/render acopereau
+  // doar traseele STIUTE (touch handlers, bucla de randare, efectele de quality/graphics/
+  // renderDistance). Dar useEffect-ul de orientare (mai jos, "remontare GLView la FIECARE
+  // schimbare reala de orientare") avea un gol: callback-ul listener-ului de orientare
+  // (ScreenOrientation.addOrientationChangeListener) NU trecea prin niciun try/catch. In Play
+  // Mode orientarea e complet libera (unlockAsync) - o inclinare usoara a telefonului CAT
+  // JUCATORUL TINE TELEFONUL IN MANA SI SE JOACA (nu neaparat o rotire deliberata) poate
+  // declansa acelasi eveniment nativ si, daca ceva arunca o exceptie in acel callback, omoara
+  // firul JS exact ca bug-ul documentat la safeHandler - dar FARA sa ajunga pe crashError,
+  // pentru ca acel traseu nu era acoperit. Asta explica un ecran complet negru, aparut "aleator"
+  // dupa cateva secunde/minute de joc, fara mesaj de eroare si fara legatura cu minimizarea.
+  //
+  // Solutia: (1) try/catch in jurul lui remountFor, ca orice alt traseu deja protejat; si (2)
+  // un handler GLOBAL (ErrorUtils), activ doar cat acest ecran e montat, care prinde ORICE
+  // exceptie neprinsa ramasa - de pe orice traseu, inclusiv unul inca nedescoperit - si o
+  // afiseaza pe crashError in loc sa lase firul JS sa moara silentios. Handler-ul vechi e
+  // restaurat la demontare, ca sa nu afecteze alte ecrane ale aplicatiei.
+  // ============================================================================================
+  useEffect(() => {
+    const ErrorUtilsGlobal = (global as any).ErrorUtils;
+    const prevHandler = ErrorUtilsGlobal?.getGlobalHandler?.();
+    if (ErrorUtilsGlobal?.setGlobalHandler) {
+      ErrorUtilsGlobal.setGlobalHandler((error: any, isFatal?: boolean) => {
+        console.log("[play] uncaught global error", error, "fatal:", isFatal);
+        if (alive.current) setCrashError(error?.message ? String(error.message) : String(error));
+        // Chemam mai departe handler-ul initial (reporting/crash-logging existent, daca e),
+        // ca sa nu pierdem nimic din infrastructura de erori a aplicatiei.
+        prevHandler?.(error, isFatal);
+      });
+    }
+    return () => {
+      if (ErrorUtilsGlobal?.setGlobalHandler && prevHandler) {
+        ErrorUtilsGlobal.setGlobalHandler(prevHandler);
+      }
+    };
+  }, []);
+
+  // ============================================================================================
   // MULTI-TOUCH REAL - DE CE E UN SINGUR RESPONDER, NU DOUA:
   //
   // Incercarea veche (pastrata ca istoric in alte fisiere ale proiectului) avea doua View-uri
@@ -553,7 +593,7 @@ export default function PlayScreen() {
   // remontam GLView-ul de fiecare data cand aceasta valoare se schimba,
   // indiferent daca e o schimbare portret<->landscape sau landscape<->landscape.
   //
-  // BUG GASIT: remontarea (setGlMountKey) se facea SINCRON, chiar in callback-ul
+  // BUG GASIT #1: remontarea (setGlMountKey) se facea SINCRON, chiar in callback-ul
   // evenimentului de orientare. Dar acel eveniment poate sosi inainte ca React
   // Native sa fi terminat recalcularea layout-ului (dimensiunile inversate ale
   // View-ului parinte) pentru noua orientare - layout-ul si evenimentul de
@@ -561,12 +601,22 @@ export default function PlayScreen() {
   // atunci, noul context GL (onContextCreate -> gl.drawingBufferWidth/Height)
   // mosteneste inca dimensiunile VECHI, dinainte de rotire: suprafata e alocata
   // gresit de la bun inceput, nu e un glitch temporar - de-aia jumatate din
-  // ecran ramane negru si NU isi mai revine, exact ce a raportat utilizatorul.
-  // Solutia: amanam remontarea cu doua requestAnimationFrame (nu un setTimeout
-  // arbitrar) - primul rAF ruleaza dupa ce browser-ul/RN a aplicat deja layout-ul
-  // curent, al doilea confirma ca acel layout s-a si "asezat" inainte sa cream
-  // noul context GL. Nu reduce nimic din functionalitate, doar sincronizeaza mai
-  // bine remontarea cu layout-ul.
+  // ecran ramane negru si NU isi mai revine. Solutia: amanam remontarea cu doua
+  // requestAnimationFrame (nu un setTimeout arbitrar) - primul rAF ruleaza dupa
+  // ce RN a aplicat deja layout-ul curent, al doilea confirma ca acel layout
+  // s-a si "asezat" inainte sa cream noul context GL.
+  //
+  // BUG GASIT #2 (raportat ulterior - ecran COMPLET negru, aleatoriu, dupa
+  // cateva secunde/minute de joc, FARA nicio legatura cu minimizarea si FARA
+  // sa apara fereastra de crash): acest callback NU trecea prin niciun
+  // try/catch, spre deosebire de restul codului. In Play Mode orientarea e
+  // complet libera (unlockAsync) - o inclinare usoara a telefonului CAT
+  // jucatorul il tine in mana si se joaca (nu neaparat o rotire deliberata)
+  // poate declansa oricand acest eveniment nativ. Daca ceva din remountFor
+  // arunca o exceptie, firul JS moare silentios, exact ca bug-ul documentat
+  // mai sus la safeHandler - dar fara mesaj, pentru ca acest traseu nu era
+  // acoperit. Solutie: try/catch in jurul lui remountFor, care trimite orice
+  // eroare pe crashError, la fel ca peste tot in rest.
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -576,38 +626,43 @@ export default function PlayScreen() {
     let raf2: number | null = null;
 
     const remountFor = (orientation: ScreenOrientation.Orientation) => {
-      if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
-      currentOrientationRef.current = orientation;
-      // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
-      // context GL (vezi inceputul lui onContextCreate). La primul apel
-      // (montarea initiala a ecranului) inca nu exista o scena activa - nu
-      // salvam nimic, jucatorul porneste normal din spawn.
-      if (sceneRef.current) {
-        preservedStateRef.current = {
-          pos: pos.current.clone(),
-          velY: velY.current,
-          facingAngle: facingAngle.current,
-          camAngle: camAngle.current,
-          camPolar: camPolar.current,
-          camDist: camDist.current,
-        };
-      }
-      physicsRef.current?.dispose();
-      physicsRef.current = null;
-      // Fara asta, fiecare schimbare de orientare lasa in urma scena/renderer-ul VECHI
-      // nealocate (geometrii, materiale, bufferele GPU ale renderer-ului) - cu destule
-      // rotiri intr-o singura sesiune de joc, memoria consumata creste neintrerupt pana
-      // la crash. Vezi disposeSceneResources() de mai sus.
-      disposeSceneResources();
-      setReady(false);
-      // Doua rAF: lasam layout-ul RN sa se aseze pe noile dimensiuni (inversate)
-      // ale View-ului parinte INAINTE sa remontam GLView-ul, ca noul context GL
-      // sa porneasca deja cu dimensiunea corecta, nu cu cea veche, pre-rotire.
-      raf1 = requestAnimationFrame(() => {
-        raf2 = requestAnimationFrame(() => {
-          if (!cancelled) setGlMountKey(k => k + 1);
+      try {
+        if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
+        currentOrientationRef.current = orientation;
+        // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
+        // context GL (vezi inceputul lui onContextCreate). La primul apel
+        // (montarea initiala a ecranului) inca nu exista o scena activa - nu
+        // salvam nimic, jucatorul porneste normal din spawn.
+        if (sceneRef.current) {
+          preservedStateRef.current = {
+            pos: pos.current.clone(),
+            velY: velY.current,
+            facingAngle: facingAngle.current,
+            camAngle: camAngle.current,
+            camPolar: camPolar.current,
+            camDist: camDist.current,
+          };
+        }
+        physicsRef.current?.dispose();
+        physicsRef.current = null;
+        // Fara asta, fiecare schimbare de orientare lasa in urma scena/renderer-ul VECHI
+        // nealocate (geometrii, materiale, bufferele GPU ale renderer-ului) - cu destule
+        // rotiri intr-o singura sesiune de joc, memoria consumata creste neintrerupt pana
+        // la crash. Vezi disposeSceneResources() de mai sus.
+        disposeSceneResources();
+        setReady(false);
+        // Doua rAF: lasam layout-ul RN sa se aseze pe noile dimensiuni (inversate)
+        // ale View-ului parinte INAINTE sa remontam GLView-ul, ca noul context GL
+        // sa porneasca deja cu dimensiunea corecta, nu cu cea veche, pre-rotire.
+        raf1 = requestAnimationFrame(() => {
+          raf2 = requestAnimationFrame(() => {
+            if (!cancelled) setGlMountKey(k => k + 1);
+          });
         });
-      });
+      } catch (e: any) {
+        console.log("[play] orientation remount crashed", e);
+        if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+      }
     };
 
     (async () => {
