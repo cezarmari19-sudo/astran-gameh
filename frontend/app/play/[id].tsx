@@ -317,23 +317,11 @@ export default function PlayScreen() {
   //
   // Mecanismul safeHandler (mai jos) si try/catch-urile din onContextCreate/render acopereau
   // doar traseele STIUTE (touch handlers, bucla de randare, efectele de quality/graphics/
-  // renderDistance). Dar useEffect-ul de orientare (mai jos, "remontare GLView la FIECARE
-  // schimbare reala de orientare") avea un gol: callback-ul listener-ului de orientare
-  // (ScreenOrientation.addOrientationChangeListener) NU trecea prin niciun try/catch. Solutia:
-  // (1) try/catch in jurul lui remountFor, ca orice alt traseu deja protejat; si (2) un handler
-  // GLOBAL (ErrorUtils), activ doar cat acest ecran e montat, care prinde ORICE exceptie
-  // neprinsa ramasa - de pe orice traseu, inclusiv unul inca nedescoperit - si o afiseaza pe
-  // crashError in loc sa lase firul JS sa moara silentios. Handler-ul vechi e restaurat la
-  // demontare, ca sa nu afecteze alte ecrane ale aplicatiei.
-  //
-  // RAPORTAT ULTERIOR: cu ambele adaugate, ecranul tot devine complet negru, dar FARA sa
-  // apara vreodata crashError. Asta exclude o exceptie JS ca si cauza - bucla de randare
-  // continua sa ruleze normal, dar ceea ce randeaza nu mai e vizibil. Cel mai probabil
-  // motiv tehnic: pozitia jucatorului sau a camerei ajunge la un numar invalid (NaN/
-  // Infinity) - THREE.js NU arunca nicio eroare cand primeste asa ceva in pozitia camerei,
-  // pur si simplu nu mai poate desena nimic corect, iar tot ce ramane vizibil e culoarea de
-  // fundal a cerului (aproape neagra). Vezi garda explicita din render(), mai jos, care
-  // transforma acest caz tacut intr-un crash cu valorile exacte pe ecran.
+  // renderDistance). Dar useEffect-ul de orientare avea un gol: callback-ul listener-ului de
+  // orientare NU trecea prin niciun try/catch. Solutia: (1) try/catch in jurul lui remountFor;
+  // si (2) un handler GLOBAL (ErrorUtils), activ doar cat acest ecran e montat, care prinde
+  // ORICE exceptie neprinsa ramasa si o afiseaza pe crashError. Handler-ul vechi e restaurat
+  // la demontare, ca sa nu afecteze alte ecrane ale aplicatiei.
   // ============================================================================================
   useEffect(() => {
     const ErrorUtilsGlobal = (global as any).ErrorUtils;
@@ -370,9 +358,7 @@ export default function PlayScreen() {
   // toate touch-urile active (nativeEvent.touches). Fiecare touch nou e asignat, dupa pozitia
   // lui pe ecran, fie joystick-ului fie camerei (vezi assignTouch mai jos); apoi, la fiecare
   // miscare, se actualizeaza independent starea joystick-ului si starea camerei pentru touch-
-  // urile care le apartin. Nu mai exista NICIUN alt View cu care sa se negocieze "cine e
-  // responder-ul" - deci nu mai exista cine sa refuze pe cine, si cele doua zone chiar
-  // functioneaza simultan.
+  // urile care le apartin.
   // ============================================================================================
 
   // Pozitia absoluta pe ecran a fiecarei zone (masurata prin onLayout) - necesara ca sa
@@ -444,7 +430,12 @@ export default function PlayScreen() {
       // sunt 2 degete
       const [idA, idB] = camTouchIds.current;
       const a = camTouchPos.current.get(idA)!, b = camTouchPos.current.get(idB)!;
-      camPinchStartDist.current = Math.hypot(a.x - b.x, a.y - b.y);
+      // Prag minim (1px): daca cele 2 degete pornesc la coordonate identice/aproape identice,
+      // distanta initiala ar fi 0, iar urmatoarea scalare (distanta_curenta / 0) ar produce
+      // NaN sau Infinity - exact bug-ul gasit ("camDist=NaN" dintr-un crashError real), care
+      // apoi strica pozitia camerei si face ecranul complet negru, fara nicio exceptie vizibila.
+      // Pragul nu reduce functionalitatea de zoom - doar elimina cazul limita de impartire la zero.
+      camPinchStartDist.current = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       camPinchStartCamDist.current = camDist.current;
     }
   }
@@ -464,18 +455,11 @@ export default function PlayScreen() {
 
   // Orice exceptie care scapa dintr-un handler de touch (sau dintr-un useEffect care ruleaza
   // DUPA montare, in afara buclei de randare din onContextCreate) nu trecea prin NICIUN
-  // try/catch - spre deosebire de onContextCreate si de bucla render() de mai jos, care isi
-  // afiseaza eroarea pe crashError. O exceptie neprinsa intr-un handler de event (de ex. un
-  // undefined neasteptat in camTouchPos, provocat de o secventa rara de atingere/ridicare a
-  // degetelor) omora firul JS: din acel moment React Native nu mai poate rula NICIUN cod -
-  // inclusiv setCrashError -, deci ecranul de eroare nu mai apare deloc. Ramane "inghetat" pe
-  // ultimul cadru deja randat de GL (ecranul negru descris de utilizator, cu doar butonul "A"
-  // vizibil, ultimul strat nativ compus), fara niciun mesaj. Asta explica de ce bug-ul parea
-  // "aleatoriu, dupa cateva secunde sau minute de joc": depinde de o secventa particulara de
-  // atingeri pe ecran, nu de timpul scurs in sine. Solutia tehnic corecta NU e sa evitam acel
-  // caz (ar reduce multi-touch-ul), ci sa prindem orice exceptie chiar la sursa, ca sa ajunga
-  // mereu pe crashError - acelasi mecanism deja construit, acum aplicat peste tot unde poate
-  // rula cod dupa montare, nu doar in bucla de randare.
+  // try/catch - spre deosebire de onContextCreate si de bucla render() de mai jos. O exceptie
+  // neprinsa intr-un handler de event omora firul JS: din acel moment React Native nu mai
+  // poate rula NICIUN cod - inclusiv setCrashError -, deci ecranul de eroare nu mai apare
+  // deloc. Solutia tehnic corecta NU e sa evitam acel caz (ar reduce multi-touch-ul), ci sa
+  // prindem orice exceptie chiar la sursa, ca sa ajunga mereu pe crashError.
   function safeHandler<T extends (...args: any[]) => void>(fn: T): T {
     return ((...args: any[]) => {
       try {
@@ -528,7 +512,13 @@ export default function PlayScreen() {
       if (a && b) {
         const dist = Math.hypot(a.x - b.x, a.y - b.y);
         const scale = dist / camPinchStartDist.current;
-        camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, camPinchStartCamDist.current / scale));
+        const nextCamDist = camPinchStartCamDist.current / scale;
+        // Garda: daca totusi iese un numar invalid (ex. scale = 0), pastram camDist-ul
+        // curent in loc sa stricam camera - mai bine un zoom care nu se misca o fractiune
+        // de secunda, decat un ecran negru permanent.
+        if (Number.isFinite(nextCamDist)) {
+          camDist.current = Math.max(CAM_MIN_DIST, Math.min(CAM_MAX_DIST, nextCamDist));
+        }
       }
     }
   });
@@ -581,44 +571,6 @@ export default function PlayScreen() {
   }, []);
 
   // ---------- remontare GLView la FIECARE schimbare reala de orientare ----------
-  // Pe Android, expo-gl leaga suprafata EGL de dimensiunile View-ului la
-  // momentul montarii. Redimensionarea view-ului FARA remontare nu garanteaza
-  // realocarea completa a acelei suprafete pe toate device-urile, iar randarea
-  // ajunge sa foloseasca un buffer cu dimensiunea/orientarea veche.
-  //
-  // IMPORTANT: nu putem detecta asta comparand doar screenW > screenH (boolean
-  // "e landscape?"), pentru ca useWindowDimensions() intoarce ACEEASI pereche
-  // de valori atat pentru LANDSCAPE_LEFT cat si pentru LANDSCAPE_RIGHT (e doar
-  // telefonul intors 180 fata de axa lunga, dimensiunile logice raman identice).
-  // Asta inseamna ca o rotire directa stanga<->dreapta (fara sa treci prin
-  // portret) nu schimba deloc acel boolean, deci nu declansa remontarea -
-  // exact cauza bug-ului: suprafata EGL ramanea legata de orientarea veche,
-  // iar randarea acoperea doar partea din ecran care se suprapune cu vechea
-  // orientare, restul ramanand nedesenat (negru).
-  //
-  // Solutia tehnica corecta e sa ascultam evenimentul NATIV de orientare
-  // (expo-screen-orientation), care distinge toate cele 4 stari posibile
-  // (PORTRAIT_UP, PORTRAIT_DOWN, LANDSCAPE_LEFT, LANDSCAPE_RIGHT) si sa
-  // remontam GLView-ul de fiecare data cand aceasta valoare se schimba,
-  // indiferent daca e o schimbare portret<->landscape sau landscape<->landscape.
-  //
-  // BUG GASIT #1: remontarea (setGlMountKey) se facea SINCRON, chiar in callback-ul
-  // evenimentului de orientare. Dar acel eveniment poate sosi inainte ca React
-  // Native sa fi terminat recalcularea layout-ului (dimensiunile inversate ale
-  // View-ului parinte) pentru noua orientare - layout-ul si evenimentul de
-  // orientare nu sunt garantate sincronizate. Daca GLView se remonteaza chiar
-  // atunci, noul context GL (onContextCreate -> gl.drawingBufferWidth/Height)
-  // mosteneste inca dimensiunile VECHI, dinainte de rotire: suprafata e alocata
-  // gresit de la bun inceput, nu e un glitch temporar - de-aia jumatate din
-  // ecran ramane negru si NU isi mai revine. Solutia: amanam remontarea cu doua
-  // requestAnimationFrame (nu un setTimeout arbitrar) - primul rAF ruleaza dupa
-  // ce RN a aplicat deja layout-ul curent, al doilea confirma ca acel layout
-  // s-a si "asezat" inainte sa cream noul context GL.
-  //
-  // BUG GASIT #2: acest callback NU trecea prin niciun try/catch, spre deosebire
-  // de restul codului - o exceptie acolo omora firul JS silentios. Solutie:
-  // try/catch in jurul lui remountFor, care trimite orice eroare pe crashError,
-  // la fel ca peste tot in rest.
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -631,10 +583,6 @@ export default function PlayScreen() {
       try {
         if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
         currentOrientationRef.current = orientation;
-        // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
-        // context GL (vezi inceputul lui onContextCreate). La primul apel
-        // (montarea initiala a ecranului) inca nu exista o scena activa - nu
-        // salvam nimic, jucatorul porneste normal din spawn.
         if (sceneRef.current) {
           preservedStateRef.current = {
             pos: pos.current.clone(),
@@ -647,15 +595,8 @@ export default function PlayScreen() {
         }
         physicsRef.current?.dispose();
         physicsRef.current = null;
-        // Fara asta, fiecare schimbare de orientare lasa in urma scena/renderer-ul VECHI
-        // nealocate (geometrii, materiale, bufferele GPU ale renderer-ului) - cu destule
-        // rotiri intr-o singura sesiune de joc, memoria consumata creste neintrerupt pana
-        // la crash. Vezi disposeSceneResources() de mai sus.
         disposeSceneResources();
         setReady(false);
-        // Doua rAF: lasam layout-ul RN sa se aseze pe noile dimensiuni (inversate)
-        // ale View-ului parinte INAINTE sa remontam GLView-ul, ca noul context GL
-        // sa porneasca deja cu dimensiunea corecta, nu cu cea veche, pre-rotire.
         raf1 = requestAnimationFrame(() => {
           raf2 = requestAnimationFrame(() => {
             if (!cancelled) setGlMountKey(k => k + 1);
@@ -668,8 +609,6 @@ export default function PlayScreen() {
     };
 
     (async () => {
-      // Citim orientarea curenta o data, la montare, ca sa avem o valoare de
-      // start (fara sa declansam remontare - e chiar prima montare a GLView).
       try {
         const initial = await ScreenOrientation.getOrientationAsync();
         if (!cancelled) currentOrientationRef.current = initial;
@@ -706,19 +645,6 @@ export default function PlayScreen() {
         if (charId && g.game?.player_character_source === "shop_model") {
           try {
             const item = await api(`/shop/items/${charId}`);
-            // IMPORTANT: datele vin direct de la server (pot fi un model vechi, salvat
-            // inainte de o validare, sau pur si simplu corupt) - exact ca piesele incarcate
-            // in editorul de modele (model-studio/[id].tsx), care NICIODATA nu le foloseste
-            // brute, ci mereu prin normalizeParts() (vezi modelTypes.ts: "Curata ce vine de
-            // la server ... valori lipsa, radacina, parinti disparuti"). Inainte, Play Mode
-            // ocolea exact aceasta curatare si trimitea piesele brute direct in
-            // createObject()/applyLocalTransform() - daca lista avea o intrare nula/malformata
-            // sau un parent catre un id care nu mai exista, asta arunca direct "Cannot read
-            // property 'x'/'name' of undefined" in buildPlayerVisual(), cu ecranul deja
-            // negru/pe un cadru vechi. normalizeParts() garanteaza, exact ca in Studio, ca
-            // fiecare piesa are id/name/type valide si un lant de parinti care se termina
-            // mereu in ROOT_ID - fara sa reduca sau sa ascunda nimic, doar sa repare fluxul
-            // de date, acelasi mecanism folosit deja de editor pentru exact acest caz.
             if (Array.isArray(item?.item?.parts)) characterPartsRef.current = normalizeParts(item.item.parts);
           } catch (e) { console.log("[play] character load failed", e); }
         }
@@ -811,17 +737,10 @@ export default function PlayScreen() {
   }
 const onContextCreate = async (gl: any) => {
     if (!game) return;
-    // Orice exceptie neasteptata aici (date de scena/script malformate, un geometry/
-    // material invalid, etc) iesea inainte NECAPTATA: setReady(true) nu se mai apela
-    // niciodata, iar ecranul ramanea blocat pe gri la nesfarsit, fara niciun indiciu.
-    // Acum eroarea REALA ajunge pe ecran (vezi crashError in JSX-ul de mai jos).
     try {
     glRef.current = gl;
     const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
     const renderer = new Renderer({ gl });
-    // Setarile playerului (quality/renderDistance/graphicsLevel) sunt deja incarcate la acest
-    // punct (vezi canStartGL - GLView nu se monteaza decat dupa ce settingsLoaded e true),
-    // deci jocul porneste direct cu ele aplicate, fara un "jump" vizual ulterior.
     renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
     renderer.setSize(w, h);
     rendererRef.current = renderer as any;
@@ -853,22 +772,10 @@ const onContextCreate = async (gl: any) => {
     ground.rotation.x = -Math.PI / 2;
     scene.add(ground);
 
-    // Lumea fizica: gravitatie/densitatea aerului si materialele pornesc de la valorile
-    // implicite (identice cu backend/astran_sandbox/prelude.luau) si sunt schimbate de
-    // operatiile "world"/"material" primite de la server, redate mai jos in bucla de render.
     const physics = new PhysicsWorld();
     physicsRef.current = physics;
     physics.addGroundPlane();
 
-    // Lumea salvata in Studio: obiectele vizibile se randeaza EXACT cum au fost create/pozitionate.
-    // Intra si in fizica, implicit FIXE (Anchored = true) - opresc jucatorul si orice obiect
-    // mobil creat de script, exact ca inainte de fizica reala; devin mobile doar daca scriptul le
-    // schimba explicit Anchored-ul prin workspace.NumeObiect (vezi runner.scene_file / prelude.luau).
-    //
-    // Spawn Points si Checkpoint-urile (o.type === SPAWN_TYPE) sunt marker-e speciale: nu intra
-    // niciodata in fizica de obiecte mobile (physics.addStudioObject le ignora oricum), dar de-
-    // acum RESPECTA Visible si Solid ca orice alt obiect din scena (inainte erau mereu invizibile
-    // si fara collision, indiferent de proprietati) - vezi punctul 9 din cerinta.
     const boxes: AABB[] = [];
     const spawns: SpawnRuntime[] = [];
     (game.scene?.objects || []).forEach((o: SceneObj) => {
@@ -883,8 +790,6 @@ const onContextCreate = async (gl: any) => {
             radius: Math.max(CHECKPOINT_MIN_RADIUS, 0.6 * (o.scale ?? 1) * CHECKPOINT_RADIUS_FACTOR),
           });
         }
-        // Implicit Spawn Point/Checkpoint e invizibil si fara collision (comportamentul de
-        // dinainte); devine vizibil/solid DOAR daca creatorul seteaza explicit Visible/Solid = true.
         if (o.visible === true) scene.add(buildMesh(o));
         if (o.solid === true) boxes.push(aabbFor(o));
         return;
@@ -897,10 +802,6 @@ const onContextCreate = async (gl: any) => {
     });
     solidBoxesRef.current = boxes;
 
-    // Rezolvarea spawnului initial: primul Spawn Point (nu Checkpoint) marcat initial=true.
-    // Daca niciunul nu e marcat asa - joc vechi salvat inainte de aceasta functionalitate, sau
-    // configurare incompleta - cade pe primul Spawn Point activ gasit, iar daca jocul nu are
-    // niciun Spawn Point deloc, foloseste (0,0,0) ca inainte de aceasta functionalitate.
     const spawnKindPoints = spawns.filter(p => p.kind === "spawn");
     const resolvedInitial = spawnKindPoints.find(p => p.initial) ?? spawnKindPoints[0] ?? null;
     const initial = resolvedInitial
@@ -908,12 +809,8 @@ const onContextCreate = async (gl: any) => {
       : { x: 0, y: 0, z: 0, ry: 0 };
     spawnPointRef.current = initial;
     checkpointsRef.current = spawns.filter(p => p.kind === "checkpoint");
-    // Fiecare intrare noua in joc (fiecare montare a acestui ecran) porneste fara niciun
-    // checkpoint activ - playerul trebuie sa il re-activeze parcurgand zona lui din nou.
     activeCheckpointRef.current = null;
 
-    // Daca venim dintr-o remontare (schimbare de orientare), restauram starea
-    // jocului din instanta veche in loc sa trimitem jucatorul inapoi la spawn.
     const preserved = preservedStateRef.current;
     if (preserved) {
       pos.current.copy(preserved.pos);
@@ -926,7 +823,6 @@ const onContextCreate = async (gl: any) => {
       camDist.current = preserved.camDist;
       preservedStateRef.current = null;
     } else {
-      // Playerul apare EXACT la pozitia si orientarea Spawn Point-ului initial (punctul 9 din cerinta).
       pos.current.set(initial.x, initial.y, initial.z);
       velY.current = 0;
       facingAngle.current = (initial.ry * Math.PI) / 180;
@@ -945,11 +841,6 @@ const onContextCreate = async (gl: any) => {
 
     const render = () => {
       if (!alive.current) return;
-      // Orice exceptie intr-un cadru (script malformat, fizica instabila, etc) oprea
-      // inainte bucla SILENTIOS - requestAnimationFrame nu mai era reprogramat, dar
-      // niciun semnal nu ajungea pe ecran: ultimul cadru randat ramanea inghetat (sau,
-      // daca exceptia venea foarte devreme, ramanea doar culoarea gri implicita a
-      // suprafetei GL, inainte de primul desen). Acum eroarea REALA ajunge pe ecran.
       try {
         const now = Date.now();
         const dt = Math.min(0.05, (now - lastFrame) / 1000);
@@ -961,10 +852,6 @@ const onContextCreate = async (gl: any) => {
           nextOp += 1;
         }
 
-        // Avansam simularea fizica (gravitatie, ciocniri, densitate/frecare/elasticitate pe
-        // materialele setate de script) si aducem pozitia/rotatia FIECARUI corp mobil creat
-        // de script inapoi pe mesh-ul lui 3D. Corpurile fixe (Anchored) nu se misca niciodata,
-        // deci nu au nevoie sa fie citite aici.
         physics.step(dt);
         for (const [opId, mesh] of scriptMeshes) {
           if (physics.isAnchored(opId)) continue;
@@ -976,9 +863,6 @@ const onContextCreate = async (gl: any) => {
           s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
         }
 
-        // Miscare jucator, relativa la directia camerei (doar swipe pe zona camerei o roteste).
-        // jv.y > 0 inseamna ca joystick-ul a fost tras in JOS (coordonate ecran).
-        // Vrem: tras in JOS => inapoi, impins in SUS => inainte.
         const jv = joyVec.current;
         const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
         if (moveMag > 0.05) {
@@ -1003,10 +887,6 @@ const onContextCreate = async (gl: any) => {
         if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
         pos.current.y = nextY;
 
-        // Activarea checkpoint-urilor: cand playerul intra in zona unui checkpoint, acesta devine
-        // noul punct de respawn AL ACESTUI PLAYER (vezi activeCheckpointRef mai sus - independent
-        // de alti jucatori). Nu conteaza ordinea in care sunt parcurse - oricare checkpoint activ
-        // a carui zona o calci devine cel curent, exact ca cerinta punctelor 4-5.
         for (const cp of checkpointsRef.current) {
           const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
           if (dx * dx + dz * dz <= cp.radius * cp.radius) {
@@ -1038,13 +918,6 @@ const onContextCreate = async (gl: any) => {
           camera.lookAt(target);
         }
 
-        // GARDA NaN/Infinity: daca pozitia jucatorului sau a camerei devine vreodata un
-        // numar invalid (posibil dintr-o coliziune/miscare degenerata), THREE.js NU arunca
-        // nicio eroare - pur si simplu nu mai poate desena nimic, iar tot ce ramane vizibil
-        // e culoarea de fundal a cerului (aproape neagra). Exact un "ecran negru complet"
-        // FARA crash si FARA mesaj, pentru ca tehnic nu e un crash. Aruncam noi eroarea aici,
-        // cu valorile exacte, ca sa treaca prin try/catch-ul de mai jos si sa ajunga pe
-        // crashError in loc sa ramana silentios.
         if (
           !isFiniteNum(pos.current.x) || !isFiniteNum(pos.current.y) || !isFiniteNum(pos.current.z) ||
           !isFiniteNum(camera.position.x) || !isFiniteNum(camera.position.y) || !isFiniteNum(camera.position.z) ||
@@ -1063,7 +936,7 @@ const onContextCreate = async (gl: any) => {
       } catch (e: any) {
         console.log("[play] render loop crashed", e);
         if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
-        return; // nu mai reprogramam cadrul urmator - bucla se opreste curat aici
+        return;
       }
       rafId.current = requestAnimationFrame(render);
     };
@@ -1075,9 +948,6 @@ const onContextCreate = async (gl: any) => {
     }
   };
 
-  // Respawn: foloseste checkpoint-ul activ AL ACESTUI PLAYER daca exista unul (punctul 6 din
-  // cerinta); altfel cade pe spawn-ul initial al jocului. Reface si orientarea (ry), nu doar
-  // pozitia, la fel ca la intrarea initiala in joc.
   function doRespawn() {
     const target = activeCheckpointRef.current ?? spawnPointRef.current;
     pos.current.set(target.x, target.y, target.z);
@@ -1091,8 +961,6 @@ const onContextCreate = async (gl: any) => {
     router.replace({ pathname: "/game/[id]", params: { id } } as any);
   }
 
-  // Reincearca dupa un crash: remonteaza GLView-ul de la zero (acelasi mecanism ca la
-  // schimbarea de orientare), fara sa iasa din ecran.
   function doRetryAfterCrash() {
     setCrashError(null);
     physicsRef.current?.dispose();
@@ -1108,12 +976,6 @@ const onContextCreate = async (gl: any) => {
       const cam = cameraRef.current;
       if (!r) return;
       r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
-      // NOTA (Viziune): three.js seteaza viewport-ul GL la size * pixelRatio, dar
-      // bufferul expo-gl are dimensiune fixa. La 1.4 / 2 viewport-ul depaseste
-      // bufferul, deci se vede doar o parte din scena, marita (personajul se muta
-      // spre coltul din dreapta-sus). Comportamentul e pastrat intentionat ca
-      // "Viziunea 1/2/3", la cererea utilizatorului. NU folosi pixelRatio pentru
-      // calitate grafica - pentru asta exista setarea Grafica (iluminare).
       if (cam) {
         const size = new THREE.Vector2();
         r.getSize(size);
@@ -1155,22 +1017,9 @@ const onContextCreate = async (gl: any) => {
           <Text style={styles.webText}>{game?.title || ""}</Text>
         </View>
       ) : (
-        // key={glMountKey}: GLView se remonteaza la fiecare schimbare REALA de
-        // orientare a device-ului (inclusiv landscape-stanga <-> landscape-dreapta),
-        // detectata prin evenimentul nativ, nu prin screenW/screenH. Remontarea
-        // creeaza un context GL nou, cu suprafata EGL alocata corect la
-        // orientarea curenta. Starea jocului (pozitie, unghi camera) e pastrata
-        // si restaurata in onContextCreate, ca userul sa nu simta un reset vizual.
-        //
-        // canStartGL tine GLView-ul nemontat pana cand setarile playerului s-au
-        // incarcat (settingsLoaded) - punctul 4 din cerinta: incarca -> aplica ->
-        // abia apoi porneste jocul, nu invers.
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
 
-      {/* UN SINGUR View responder peste tot ecranul: joystick-ul si camera sunt citite din
-          acelasi loc (vezi onRootResponder*), ca sa nu mai existe doua View-uri care se
-          negociaza reciproc responder-ul - vezi comentariul mare de mai sus din componenta. */}
       {ready && Platform.OS !== "web" ? (
         <View
           style={StyleSheet.absoluteFillObject}
@@ -1182,8 +1031,6 @@ const onContextCreate = async (gl: any) => {
           onResponderTerminate={onRootResponderEnd}
           onResponderTerminationRequest={() => false}
         >
-          {/* Zona camerei (dreapta): doar layout + randare vizuala; input-ul vine din View-ul
-              parinte de mai sus, deci pointerEvents="none" aici. */}
           <View
             style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]}
             pointerEvents="none"
@@ -1193,7 +1040,6 @@ const onContextCreate = async (gl: any) => {
             }}
           />
 
-          {/* Zona joystick-ului (stanga-jos): doar layout + randare vizuala, acelasi motiv. */}
           <View
             style={styles.joystickZone}
             pointerEvents="none"
@@ -1221,9 +1067,6 @@ const onContextCreate = async (gl: any) => {
         </Pressable>
       </SafeAreaView>
 
-      {/* Ecranul de eroare: inlocuieste ecranul gri "mort" cu mesajul REAL al crash-ului
-          si doua actiuni clare - Reincearca (remonteaza jocul fara sa iasa din el) sau
-          Leave. Se afiseaza peste tot (deasupra GLView-ului, daca mai e ceva randat). */}
       <Modal visible={!!crashError} transparent animationType="fade" onRequestClose={() => {}}>
         <View style={styles.menuBackdrop}>
           <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
