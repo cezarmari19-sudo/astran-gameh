@@ -16,7 +16,6 @@ import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial, normalizeParts } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
-// ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
@@ -45,10 +44,6 @@ function disposeMesh(m: THREE.Mesh) {
   m.geometry.dispose();
   (m.material as THREE.Material).dispose();
 }
-// GARDA NaN/Infinity (vezi folosirea ei in render(), mai jos): THREE.js nu arunca nicio
-// eroare cand primeste un numar invalid in pozitia camerei/jucatorului - pur si simplu nu
-// mai poate desena nimic corect, iar tot ce ramane vizibil e culoarea de fundal a cerului
-// (aproape neagra). Exact un "ecran negru complet", FARA crash si FARA mesaj.
 function isFiniteNum(n: number): boolean {
   return typeof n === "number" && Number.isFinite(n);
 }
@@ -269,7 +264,6 @@ export default function PlayScreen() {
   }, []);
 
   const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
-  const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
 
   const joyTouchId = useRef<number | null>(null);
   const joyActive = useRef(false);
@@ -332,33 +326,37 @@ export default function PlayScreen() {
       const [idA, idB] = camTouchIds.current;
       const a = camTouchPos.current.get(idA);
       const b = camTouchPos.current.get(idB);
-      // GARDA: in mod normal ambele pozitii exista deja (idA de la primul deget, idB
-      // tocmai setat mai sus) - dar o secventa rara de ridicare/atingere foarte rapida
-      // a degetelor poate lasa starea inconsistenta pentru o fractiune de secunda.
-      // Inainte, .x pe "undefined" arunca direct "Cannot read property 'x' of undefined"
-      // (prins acum de safeHandler, deci aratat ca o eroare reala, nu mai ramane
-      // silentios) - dar solutia corecta e sa nu pornim deloc pinch-ul in acel caz rar,
-      // nu doar sa-l prindem dupa ce s-a intamplat. Jucatorul ramane cu rotatia
-      // degetului care chiar exista; zoom-ul porneste normal la urmatoarea atingere.
+      // GARDA: in mod normal ambele pozitii exista deja - dar o secventa rara de
+      // ridicare/atingere foarte rapida a degetelor poate lasa starea inconsistenta
+      // pentru o fractiune de secunda ("Cannot read property 'x' of undefined" gasit
+      // anterior). Daca se intampla, renuntam silentios la pornirea pinch-ului.
       if (!a || !b) {
         camPinchStartDist.current = null;
         return;
       }
       // Prag minim (1px): daca cele 2 degete pornesc la coordonate identice/aproape
       // identice, distanta initiala ar fi 0, iar urmatoarea scalare (distanta/0) ar
-      // produce NaN/Infinity - bug-ul "camDist=NaN" gasit anterior.
+      // produce NaN/Infinity (bug-ul "camDist=NaN" gasit anterior).
       camPinchStartDist.current = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       camPinchStartCamDist.current = camDist.current;
     }
   }
 
+  // Zona camerei acopera ACUM TOT ecranul, in afara joystick-ului (+ o marja de
+  // siguranta) - inainte era doar o fasie din dreapta (40-55% din latime), iar restul
+  // ecranului (stanga, in afara micii cutii a joystick-ului) era complet "mort": orice
+  // swipe/pinch acolo nu era asignat NICIUNUI gest, parand ca "nu inregistreaza nimic".
+  // Marja de 28px in jurul joystick-ului previne ca un deget aproape de marginea lui sa
+  // fie confundat cu un gest de camera.
+  const JOY_SAFETY_MARGIN = 28;
   function assignTouch(t: { identifier: number; pageX: number; pageY: number }) {
     const jz = joyZoneLayout.current;
     const inJoyZone = t.pageX >= jz.x && t.pageX <= jz.x + jz.w && t.pageY >= jz.y && t.pageY <= jz.y + jz.h;
     if (inJoyZone && joyTouchId.current === null) { startJoystick(t); return; }
-    const cz = camZoneLayout.current;
-    const inCamZone = t.pageX >= cz.x && t.pageX <= cz.x + cz.w && t.pageY >= cz.y && t.pageY <= cz.y + cz.h;
-    if (inCamZone && camTouchIds.current.length < 2) startCameraTouch(t);
+    const nearJoyZone =
+      t.pageX >= jz.x - JOY_SAFETY_MARGIN && t.pageX <= jz.x + jz.w + JOY_SAFETY_MARGIN &&
+      t.pageY >= jz.y - JOY_SAFETY_MARGIN && t.pageY <= jz.y + jz.h + JOY_SAFETY_MARGIN;
+    if (!nearJoyZone && camTouchIds.current.length < 2) startCameraTouch(t);
   }
 
   function safeHandler<T extends (...args: any[]) => void>(fn: T): T {
@@ -795,7 +793,15 @@ const onContextCreate = async (gl: any) => {
         const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
         if (firstPerson.current) {
           camera.position.set(pos.current.x, eyeY, pos.current.z);
-          const lookDir = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+          // camPolar aplicat ACUM si in prima persoana (privire sus-jos) - inainte era
+          // complet ignorat aici, deci swipe-ul vertical nu avea niciun efect vizibil la
+          // zoom minim (exact "nu se misca sus-jos" raportat).
+          const pitch = Math.PI / 2 - camPolar.current;
+          const lookDir = new THREE.Vector3(
+            Math.sin(camAngle.current) * Math.cos(pitch),
+            Math.sin(pitch),
+            Math.cos(camAngle.current) * Math.cos(pitch)
+          );
           camera.lookAt(camera.position.clone().add(lookDir));
         } else {
           const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
@@ -922,15 +928,6 @@ const onContextCreate = async (gl: any) => {
           onResponderTerminationRequest={() => false}
         >
           <View
-            style={[styles.cameraZone, { width: isLandscape ? "40%" : "55%" }]}
-            pointerEvents="none"
-            onLayout={e => {
-              const { x, y, width, height } = e.nativeEvent.layout;
-              camZoneLayout.current = { x, y, w: width, h: height };
-            }}
-          />
-
-          <View
             style={styles.joystickZone}
             pointerEvents="none"
             onLayout={e => {
@@ -1032,7 +1029,6 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.surface },
   webFallback: { alignItems: "center", justifyContent: "center", gap: 12 },
   webText: { color: colors.onSurface, fontWeight: "800", fontSize: 18 },
-  cameraZone: { position: "absolute", top: 0, bottom: 0, right: 0 },
   joystickZone: { position: "absolute", left: 0, bottom: 0, width: 180, height: 180 },
   joyBase: { position: "absolute", width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(255,255,255,0.12)", borderWidth: 2, borderColor: "rgba(255,255,255,0.35)", alignItems: "center", justifyContent: "center" },
   joyKnob: { width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(204,255,0,0.85)" },
