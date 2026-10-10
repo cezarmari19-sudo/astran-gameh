@@ -310,6 +310,13 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         g = await get_group_or_404(group_id)
         if g["owner_id"] == current["user_id"]:
             raise HTTPException(status_code=400, detail="The Owner cannot leave their own Group")
+        # Un membru BANAT nu are voie sa-si stearga singur randul de membership prin /leave -
+        # asta ar sterge si interdictia (ban_member doar marcheaza status="banned", nu sterge
+        # randul), lasandu-l liber sa intre din nou cu /join imediat dupa. Doar un membru activ
+        # poate pleca de bunavoie; un ban se ridica exclusiv de un owner/admin (unban_member).
+        existing = await get_membership(group_id, current["user_id"])
+        if existing and existing["status"] == "banned":
+            raise HTTPException(status_code=403, detail="You are banned from this Group")
         await db.group_members.delete_one({"group_id": group_id, "user_id": current["user_id"]})
         return {"ok": True}
 
