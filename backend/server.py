@@ -844,8 +844,14 @@ async def reap_empty_instances(game_id: str) -> None:
     open_instances = await db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).to_list(200)
     for inst in open_instances:
         active = await db.instance_players.count_documents({"instance_id": inst["instance_id"]})
-        if active == 0 and inst["player_count"] > 0:
-            await db.game_instances.update_one({"instance_id": inst["instance_id"]}, {"$set": {"player_count": 0}})
+        if active == 0:
+            # Niciun jucator activ (toti au plecat sau au expirat din TTL-ul de 60s) - inchidem
+            # instanta de tot, altfel ramanea "open" cu player_count=0 pentru totdeauna si se
+            # acumula la infinit in game_instances (vezi comentariul de mai sus despre status=closed).
+            await db.game_instances.update_one(
+                {"instance_id": inst["instance_id"]},
+                {"$set": {"status": "closed", "player_count": 0, "closed_at": now_utc()}},
+            )
         elif active != inst["player_count"]:
             await db.game_instances.update_one({"instance_id": inst["instance_id"]}, {"$set": {"player_count": active}})
 
@@ -1000,6 +1006,19 @@ async def send_request(body: FriendRequestBody, current=Depends(get_current_user
         {"blocker_id": body.target_user_id, "blocked_id": current["user_id"]},
     ]}):
         raise HTTPException(status_code=403, detail="Blocked")
+    # Daca celalalt ne-a trimis deja o cerere (pending, in sens invers), cele doua cereri
+    # simultane devin direct prietenie, in loc sa ramana doua cereri pendinte in paralel.
+    reverse = await db.friend_requests.find_one({
+        "from_id": body.target_user_id, "to_id": current["user_id"], "status": "pending",
+    })
+    if reverse:
+        await db.friendships.update_one(
+            {"user_a": a, "user_b": b},
+            {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}},
+            upsert=True,
+        )
+        await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
+        return {"ok": True, "auto_accepted": True}
     try:
         await db.friend_requests.insert_one({
             "from_id": current["user_id"], "to_id": body.target_user_id,
@@ -1019,7 +1038,10 @@ async def accept_request(body: FriendRequestBody, current=Depends(get_current_us
         raise HTTPException(status_code=404, detail="No pending request")
     a, b = _pair(current["user_id"], body.target_user_id)
     await db.friendships.update_one({"user_a": a, "user_b": b}, {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}}, upsert=True)
-    await db.friend_requests.update_one({"from_id": body.target_user_id, "to_id": current["user_id"]}, {"$set": {"status": "accepted"}})
+    # Stergem cererea (nu doar o marcam "accepted"): un rand ramas in friend_requests ar
+    # bloca permanent o re-trimitere viitoare, din cauza indexului unic pe (from_id, to_id) -
+    # de exemplu daca cei doi se deprietenesc mai tarziu si unul vrea sa trimita din nou o cerere.
+    await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
     return {"ok": True}
 
 
@@ -1033,6 +1055,13 @@ async def reject_request(body: FriendRequestBody, current=Depends(get_current_us
 async def remove_friend(body: FriendRequestBody, current=Depends(get_current_user)):
     a, b = _pair(current["user_id"], body.target_user_id)
     await db.friendships.delete_one({"user_a": a, "user_b": b})
+    # Curatam si eventuale cereri ramase (de ex. dintr-o acceptare veche, salvata inainte de
+    # acest fix) - altfel indexul unic de pe friend_requests ar bloca permanent o viitoare
+    # re-trimitere de cerere intre acesti doi useri.
+    await db.friend_requests.delete_many({"$or": [
+        {"from_id": current["user_id"], "to_id": body.target_user_id},
+        {"from_id": body.target_user_id, "to_id": current["user_id"]},
+    ]})
     return {"ok": True}
 
 
@@ -1084,7 +1113,7 @@ def _calc_fee(amount: int, tiers: list[dict]) -> tuple[int, int]:
 @api.post("/wallet/transfer/preview")
 async def transfer_preview(body: TransferBody, current=Depends(get_current_user)):
     cfg = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
-    fee, net = _calc_fee(body.amount, cfg["tiers"])
+    fee, net = _calc_fee(body.amount, (cfg or {}).get("tiers", []))
     return {"gross": body.amount, "fee": fee, "net": net}
 
 
@@ -1102,7 +1131,7 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
             return {"ok": True, "transaction": existing, "idempotent": True}
 
     cfg = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
-    fee, net = _calc_fee(body.amount, cfg["tiers"])
+    fee, net = _calc_fee(body.amount, (cfg or {}).get("tiers", []))
 
     debit = await db.users.update_one(
         {"user_id": current["user_id"], "astrans_balance": {"$gte": body.amount}},
@@ -1110,8 +1139,6 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
     )
     if debit.modified_count == 0:
         raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
-
-    await db.users.update_one({"user_id": recipient["user_id"]}, {"$inc": {"astrans_balance": net}})
 
     tx = {
         "tx_id": new_id("tx_"),
@@ -1126,7 +1153,22 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
         "idempotency_key": body.idempotency_key,
         "reference": f"transfer_to:{recipient['username']}",
     }
-    await db.astran_ledger.insert_one(tx)
+    # Scriem randul de ledger INAINTE de a credita destinatarul. Daca insert_one pica (de
+    # exemplu coliziune pe idempotency_key, din doua cereri concurente cu aceeasi cheie),
+    # facem rollback la debitul de mai sus - la fel ca buy_astrans mai jos - in loc sa lasam
+    # expeditorul debitat fara nicio tranzactie inregistrata si fara ca destinatarul sa fi
+    # primit ceva.
+    try:
+        await db.astran_ledger.insert_one(tx)
+    except Exception:
+        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": body.amount}})
+        if body.idempotency_key:
+            existing = await db.astran_ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+            if existing:
+                return {"ok": True, "transaction": existing, "idempotent": True}
+        raise HTTPException(status_code=409, detail="Transfer already in progress, try again")
+
+    await db.users.update_one({"user_id": recipient["user_id"]}, {"$inc": {"astrans_balance": net}})
     await db.astran_ledger.insert_one({
         "tx_id": new_id("tx_"),
         "user_id": recipient["user_id"],
