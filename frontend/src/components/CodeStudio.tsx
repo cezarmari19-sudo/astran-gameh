@@ -184,7 +184,11 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
         body: JSON.stringify({ files: project.files.map(f => ({ path: f.path, source: f.source })) }),
       });
       const lines: RunLine[] = [];
-      (r?.output ?? []).forEach((l: string) => lines.push({ kind: "log", text: l }));
+      // r.output e un array de {level, msg} (vezi runner.py), nu de string-uri brute -
+      // trebuia extras l.msg, altfel aparea "[object Object]" in consola in loc de textul real.
+      (r?.output ?? []).forEach((l: { level?: string; msg?: string }) =>
+        lines.push({ kind: l?.level === "warn" ? "error" : "log", text: String(l?.msg ?? "") })
+      );
       (r?.errors ?? []).forEach((l: string) => lines.push({ kind: "error", text: l }));
       if (lines.length === 0) lines.push({ kind: "log", text: r?.ok ? "No output (no runnable .lua/.luau files, or nothing printed)." : "Failed." });
       if (r?.truncated) lines.push({ kind: "log", text: "(output truncated)" });
