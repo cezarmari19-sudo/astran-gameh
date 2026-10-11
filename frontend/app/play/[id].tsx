@@ -277,6 +277,13 @@ export default function PlayScreen() {
   const camTouchStartPos = useRef<Map<number, TouchXY>>(new Map());
   const camPinchStartDist = useRef<number | null>(null);
   const camPinchStartCamDist = useRef(4.5);
+  // BUG GASIT (al doilea, separat de cel din Studio): retine pozitia initiala REALA (jos-deget)
+  // a oricarei atingeri neclasificate inca - inclusiv a celor care pornesc in marja de 28px din
+  // jurul joystick-ului (JOY_SAFETY_MARGIN) si raman "in asteptare" cateva cadre. Fara asta,
+  // assignTouch() foloseste pozitia CURENTA (deja miscata) in momentul in care degetul in sfarsit
+  // iese din marja - miscarea facuta pana atunci se pierde complet, exact senzatia de "greu" si
+  // "uneori nu citeste swipe-ul" pentru swipe-urile care pornesc langa joystick.
+  const touchDownPos = useRef<Map<number, TouchXY>>(new Map());
 
   function touchesOf(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
     return (evt?.nativeEvent?.touches as any[]) ?? [];
@@ -314,7 +321,11 @@ export default function PlayScreen() {
     if (camTouchIds.current.length >= 2) return; // doar 1 (rotire) sau 2 degete (pinch)
     camTouchIds.current.push(t.identifier);
     camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-    camTouchStartPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+    // Folosim pozitia de jos-deget REALA (nu cea curenta) ca punct de start al rotatiei,
+    // ca sa nu pierdem miscarea facuta de utilizator cat timp atingerea a fost "in asteptare"
+    // in marja din jurul joystick-ului (vezi touchDownPos mai sus si assignTouch mai jos).
+    const down = touchDownPos.current.get(t.identifier) ?? { x: t.pageX, y: t.pageY };
+    camTouchStartPos.current.set(t.identifier, down);
 
     if (camTouchIds.current.length === 1) {
       // primul deget: incepe o rotatie noua, fata de pozitia curenta a camerei
@@ -372,6 +383,9 @@ export default function PlayScreen() {
 
   const onRootResponderGrant = safeHandler((evt: any) => {
     const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
+    if (!touchDownPos.current.has(t.identifier)) {
+      touchDownPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+    }
     assignTouch(t);
   });
 
@@ -380,7 +394,12 @@ export default function PlayScreen() {
 
     for (const t of touches) {
       const known = joyTouchId.current === t.identifier || camTouchIds.current.includes(t.identifier);
-      if (!known) assignTouch(t);
+      if (!known) {
+        if (!touchDownPos.current.has(t.identifier)) {
+          touchDownPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+        }
+        assignTouch(t);
+      }
     }
 
     if (joyTouchId.current !== null) {
@@ -420,6 +439,7 @@ export default function PlayScreen() {
     const changed = (evt?.nativeEvent?.changedTouches as any[]) ?? [];
     let camChanged = false;
     for (const c of changed) {
+      touchDownPos.current.delete(c.identifier);
       if (joyTouchId.current === c.identifier) { endJoystick(); continue; }
       const idx = camTouchIds.current.indexOf(c.identifier);
       if (idx !== -1) {
