@@ -128,7 +128,11 @@ function AvatarPreview() {
         let parts = partsCache.current[itemId];
         if (!parts) {
           try {
-            const r = await api(`/shop/items/${itemId}`);
+            // Orice item echipat vine din Clothes Shop (/clothes/...), nu din Shop-ul general
+            // de modele/scripturi (/shop/...) - cele doua magazine au fost separate, dar acest
+            // apel ramasese pe vechiul endpoint si intorcea mereu 404 pentru haine, deci nimic
+            // echipat nu se randa aici.
+            const r = await api(`/clothes/items/${itemId}`);
             parts = Array.isArray(r?.item?.parts) ? r.item.parts : [];
             partsCache.current[itemId] = parts;
           } catch { parts = []; }
