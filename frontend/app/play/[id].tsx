@@ -381,6 +381,33 @@ export default function PlayScreen() {
     }) as T;
   }
 
+  // Scoate un deget din tracking-ul de camera (camTouchIds/camTouchPos/camTouchStartPos),
+  // fara sa decida inca ce se intampla cu gestul ramas - asta e treaba lui finalizeCamTouchChange().
+  // Extras ca functie separata ca sa poata fi folosit atat la ridicarea reala a unui deget
+  // (onResponderRelease/Terminate), cat si la reconcilierea defensiva din onResponderMove de mai jos.
+  function removeCamTouchId(tid: number): boolean {
+    const idx = camTouchIds.current.indexOf(tid);
+    if (idx === -1) return false;
+    camTouchIds.current.splice(idx, 1);
+    camTouchPos.current.delete(tid);
+    camTouchStartPos.current.delete(tid);
+    return true;
+  }
+
+  // Dupa ce unul sau ambele degete de camera au fost scoase: oprim pinch-ul in curs si,
+  // daca a mai ramas exact un deget, il "promovam" la rotatie (pozitie de start = pozitia lui
+  // curenta, baseline = unghiul curent), exact cum se intampla cand incepe un gest nou cu 1 deget.
+  function finalizeCamTouchChange() {
+    camPinchStartDist.current = null;
+    if (camTouchIds.current.length === 1) {
+      const tid = camTouchIds.current[0];
+      const pos2 = camTouchPos.current.get(tid);
+      if (pos2) camTouchStartPos.current.set(tid, pos2);
+      lastCamAngle.current = camAngle.current;
+      lastCamPolar.current = camPolar.current;
+    }
+  }
+
   const onRootResponderGrant = safeHandler((evt: any) => {
     const t = evt.nativeEvent.changedTouches?.[0] ?? evt.nativeEvent;
     if (!touchDownPos.current.has(t.identifier)) {
@@ -391,6 +418,30 @@ export default function PlayScreen() {
 
   const onRootResponderMove = safeHandler((evt: any) => {
     const touches = touchesOf(evt);
+
+    // BUG GASIT (al treilea): cand sunt 2 degete jos (pinch) si se ridica DOAR unul dintre
+    // ele, React Native nu trimite onResponderRelease/onResponderTerminate pentru acel deget -
+    // acelea se declanseaza doar cand ajunge la 0 degete pe ecran. Disparitia unui deget din
+    // mijlocul unui gest multi-touch se vede DOAR aici, in onResponderMove, prin faptul ca
+    // identificatorul lui pur si simplu nu mai apare in `touches`. Codul vechi nu verifica
+    // niciodata asta, asa ca ramanea in camTouchIds un deget "fantoma" cu pozitia inghetata la
+    // ultima valoare cunoscuta - camTouchIds.current.length ramanea blocat la 2 pentru totdeauna,
+    // deci ramura de rotatie cu 1 deget nu se mai activa NICIODATA dupa aceea (si pinch-ul urmator
+    // combina un deget real cu fantoma inghetata, deci rezultate aparent aleatorii/fara reactie).
+    // Exact simptomul "merge o data normal, apoi camera nu mai raspunde deloc la rotire/pinch".
+    // Reconciliem aici, la fiecare onResponderMove, tracking-ul cu lista REALA de degete active.
+    const activeIds = new Set(touches.map(t => t.identifier));
+    if (joyTouchId.current !== null && !activeIds.has(joyTouchId.current)) {
+      endJoystick();
+    }
+    let camChanged = false;
+    for (const tid of [...camTouchIds.current]) {
+      if (!activeIds.has(tid) && removeCamTouchId(tid)) camChanged = true;
+    }
+    for (const key of Array.from(touchDownPos.current.keys())) {
+      if (!activeIds.has(key)) touchDownPos.current.delete(key);
+    }
+    if (camChanged) finalizeCamTouchChange();
 
     for (const t of touches) {
       const known = joyTouchId.current === t.identifier || camTouchIds.current.includes(t.identifier);
@@ -441,24 +492,9 @@ export default function PlayScreen() {
     for (const c of changed) {
       touchDownPos.current.delete(c.identifier);
       if (joyTouchId.current === c.identifier) { endJoystick(); continue; }
-      const idx = camTouchIds.current.indexOf(c.identifier);
-      if (idx !== -1) {
-        camTouchIds.current.splice(idx, 1);
-        camTouchPos.current.delete(c.identifier);
-        camTouchStartPos.current.delete(c.identifier);
-        camChanged = true;
-      }
+      if (removeCamTouchId(c.identifier)) camChanged = true;
     }
-    if (camChanged) {
-      camPinchStartDist.current = null;
-      if (camTouchIds.current.length === 1) {
-        const tid = camTouchIds.current[0];
-        const pos2 = camTouchPos.current.get(tid);
-        if (pos2) camTouchStartPos.current.set(tid, pos2);
-        lastCamAngle.current = camAngle.current;
-        lastCamPolar.current = camPolar.current;
-      }
-    }
+    if (camChanged) finalizeCamTouchChange();
   });
 
   useEffect(() => {
