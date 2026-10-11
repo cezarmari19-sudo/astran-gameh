@@ -22,6 +22,11 @@ export default function AvatarEditor() {
   const [saved, setSaved] = useState(false);
 
   const [body, setBody] = useState<AvatarBody>(defaultBody());
+  // Acest ecran editeaza doar parametrii de corp, dar PUT /avatar/me asteapta starea
+  // COMPLETA (body + equipped), nu un patch partial - trebuie tinut minte ce avea userul
+  // echipat la incarcare si retrimis neschimbat, altfel fiecare Salvare de aici ii scoate
+  // toate hainele/accesoriile echipate (vezi save()).
+  const equippedRef = useRef<Record<string, string | null>>({});
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -53,6 +58,7 @@ export default function AvatarEditor() {
         const r = await api("/avatar/me");
         const a = r?.avatar;
         if (a?.body) setBody({ ...defaultBody(), ...a.body });
+        if (a?.equipped && typeof a.equipped === "object") equippedRef.current = a.equipped;
       } catch (e: any) {
         setErr(e?.message || "Nu am putut încărca avatarul");
       } finally {
@@ -143,8 +149,9 @@ export default function AvatarEditor() {
   async function save() {
     setBusy(true); setErr(null);
     try {
-      const r = await api("/avatar/me", { method: "PUT", body: JSON.stringify({ body, equipped: {} }) });
+      const r = await api("/avatar/me", { method: "PUT", body: JSON.stringify({ body, equipped: equippedRef.current }) });
       if (r?.avatar?.body) setBody({ ...defaultBody(), ...r.avatar.body });
+      if (r?.avatar?.equipped && typeof r.avatar.equipped === "object") equippedRef.current = r.avatar.equipped;
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {
