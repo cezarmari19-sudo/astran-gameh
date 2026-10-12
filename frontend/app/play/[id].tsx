@@ -219,8 +219,7 @@ export default function PlayScreen() {
   // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
   // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
   // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
-  // gesturi. E o cauza plauzibila pentru rotirea/pinch-ul care "uneori" nu raspunde, independenta
-  // de bug-ul de sincronizare a degetelor rezolvat anterior.
+  // gesturi.
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -823,7 +822,14 @@ const onContextCreate = async (gl: any) => {
         const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
         if (firstPerson.current) {
           camera.position.set(pos.current.x, eyeY, pos.current.z);
-          const pitch = Math.PI / 2 - camPolar.current;
+          // BUG GASIT: formula initiala (Math.PI/2 - camPolar.current) dadea o privire
+          // INVERSATA pe verticala - swipe in sus facea camera sa priveasca in jos si
+          // invers - desi orizontala (camAngle/swipe stanga-dreapta) era deja corecta.
+          // Semnul e inversat aici (camPolar.current - Math.PI/2) ca swipe in sus sa
+          // priveasca in sus, la fel cum swipe la stanga/dreapta se misca deja corect -
+          // fara sa atingem camPolar in sine (ramane neschimbat pentru camera a 3-a
+          // persoana, care nu a fost raportata ca gresita).
+          const pitch = camPolar.current - Math.PI / 2;
           const lookDir = scratchLookDir.current.set(
             Math.sin(camAngle.current) * Math.cos(pitch),
             Math.sin(pitch),
