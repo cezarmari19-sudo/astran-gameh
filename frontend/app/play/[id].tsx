@@ -217,9 +217,7 @@ export default function PlayScreen() {
   // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
   // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
   // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
-  // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
-  // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
-  // gesturi.
+  // thread-ul JS care proceseaza si evenimentele de touch.
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -822,13 +820,6 @@ const onContextCreate = async (gl: any) => {
         const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
         if (firstPerson.current) {
           camera.position.set(pos.current.x, eyeY, pos.current.z);
-          // BUG GASIT: formula initiala (Math.PI/2 - camPolar.current) dadea o privire
-          // INVERSATA pe verticala - swipe in sus facea camera sa priveasca in jos si
-          // invers - desi orizontala (camAngle/swipe stanga-dreapta) era deja corecta.
-          // Semnul e inversat aici (camPolar.current - Math.PI/2) ca swipe in sus sa
-          // priveasca in sus, la fel cum swipe la stanga/dreapta se misca deja corect -
-          // fara sa atingem camPolar in sine (ramane neschimbat pentru camera a 3-a
-          // persoana, care nu a fost raportata ca gresita).
           const pitch = camPolar.current - Math.PI / 2;
           const lookDir = scratchLookDir.current.set(
             Math.sin(camAngle.current) * Math.cos(pitch),
@@ -841,9 +832,9 @@ const onContextCreate = async (gl: any) => {
           const target = scratchTarget.current.set(pos.current.x, eyeY, pos.current.z);
           const r = camDist.current, th = camAngle.current, ph = camPolar.current;
           camera.position.set(
-            target.x + r * Math.sin(ph) * Math.sin(th),
+            target.x - r * Math.sin(ph) * Math.sin(th),
             target.y + r * Math.cos(ph),
-            target.z + r * Math.sin(ph) * Math.cos(th)
+            target.z - r * Math.sin(ph) * Math.cos(th)
           );
           camera.lookAt(target);
         }
