@@ -214,6 +214,23 @@ export default function PlayScreen() {
   const velY = useRef(0);
   const facingAngle = useRef(0);
 
+  // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
+  // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
+  // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
+  // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
+  // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
+  // gesturi. E o cauza plauzibila pentru rotirea/pinch-ul care "uneori" nu raspunde, independenta
+  // de bug-ul de sincronizare a degetelor rezolvat anterior.
+  const scratchCamForward = useRef(new THREE.Vector3());
+  const scratchCamRight = useRef(new THREE.Vector3());
+  const scratchMoveDir = useRef(new THREE.Vector3());
+  const scratchPrevPos = useRef(new THREE.Vector3());
+  const scratchNextPos = useRef(new THREE.Vector3());
+  const scratchResolvedPos = useRef(new THREE.Vector3());
+  const scratchTarget = useRef(new THREE.Vector3());
+  const scratchLookDir = useRef(new THREE.Vector3());
+  const scratchLookAt = useRef(new THREE.Vector3());
+
   const camAngle = useRef(0.0);
   const camPolar = useRef(1.15);
   const camDist = useRef(4.5);
@@ -277,12 +294,6 @@ export default function PlayScreen() {
   const camTouchStartPos = useRef<Map<number, TouchXY>>(new Map());
   const camPinchStartDist = useRef<number | null>(null);
   const camPinchStartCamDist = useRef(4.5);
-  // BUG GASIT (al doilea, separat de cel din Studio): retine pozitia initiala REALA (jos-deget)
-  // a oricarei atingeri neclasificate inca - inclusiv a celor care pornesc in marja de 28px din
-  // jurul joystick-ului (JOY_SAFETY_MARGIN) si raman "in asteptare" cateva cadre. Fara asta,
-  // assignTouch() foloseste pozitia CURENTA (deja miscata) in momentul in care degetul in sfarsit
-  // iese din marja - miscarea facuta pana atunci se pierde complet, exact senzatia de "greu" si
-  // "uneori nu citeste swipe-ul" pentru swipe-urile care pornesc langa joystick.
   const touchDownPos = useRef<Map<number, TouchXY>>(new Map());
 
   function touchesOf(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
@@ -318,47 +329,28 @@ export default function PlayScreen() {
   }
 
   function startCameraTouch(t: { identifier: number; pageX: number; pageY: number }) {
-    if (camTouchIds.current.length >= 2) return; // doar 1 (rotire) sau 2 degete (pinch)
+    if (camTouchIds.current.length >= 2) return;
     camTouchIds.current.push(t.identifier);
     camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
-    // Folosim pozitia de jos-deget REALA (nu cea curenta) ca punct de start al rotatiei,
-    // ca sa nu pierdem miscarea facuta de utilizator cat timp atingerea a fost "in asteptare"
-    // in marja din jurul joystick-ului (vezi touchDownPos mai sus si assignTouch mai jos).
     const down = touchDownPos.current.get(t.identifier) ?? { x: t.pageX, y: t.pageY };
     camTouchStartPos.current.set(t.identifier, down);
 
     if (camTouchIds.current.length === 1) {
-      // primul deget: incepe o rotatie noua, fata de pozitia curenta a camerei
       lastCamAngle.current = camAngle.current;
       lastCamPolar.current = camPolar.current;
     } else if (camTouchIds.current.length === 2) {
-      // al doilea deget a intrat: trecem pe pinch-to-zoom; rotatia se opreste cat timp
-      // sunt 2 degete
       const [idA, idB] = camTouchIds.current;
       const a = camTouchPos.current.get(idA);
       const b = camTouchPos.current.get(idB);
-      // GARDA: in mod normal ambele pozitii exista deja - dar o secventa rara de
-      // ridicare/atingere foarte rapida a degetelor poate lasa starea inconsistenta
-      // pentru o fractiune de secunda ("Cannot read property 'x' of undefined" gasit
-      // anterior). Daca se intampla, renuntam silentios la pornirea pinch-ului.
       if (!a || !b) {
         camPinchStartDist.current = null;
         return;
       }
-      // Prag minim (1px): daca cele 2 degete pornesc la coordonate identice/aproape
-      // identice, distanta initiala ar fi 0, iar urmatoarea scalare (distanta/0) ar
-      // produce NaN/Infinity (bug-ul "camDist=NaN" gasit anterior).
       camPinchStartDist.current = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       camPinchStartCamDist.current = camDist.current;
     }
   }
 
-  // Zona camerei acopera ACUM TOT ecranul, in afara joystick-ului (+ o marja de
-  // siguranta) - inainte era doar o fasie din dreapta (40-55% din latime), iar restul
-  // ecranului (stanga, in afara micii cutii a joystick-ului) era complet "mort": orice
-  // swipe/pinch acolo nu era asignat NICIUNUI gest, parand ca "nu inregistreaza nimic".
-  // Marja de 28px in jurul joystick-ului previne ca un deget aproape de marginea lui sa
-  // fie confundat cu un gest de camera.
   const JOY_SAFETY_MARGIN = 28;
   function assignTouch(t: { identifier: number; pageX: number; pageY: number }) {
     const jz = joyZoneLayout.current;
@@ -381,10 +373,6 @@ export default function PlayScreen() {
     }) as T;
   }
 
-  // Scoate un deget din tracking-ul de camera (camTouchIds/camTouchPos/camTouchStartPos),
-  // fara sa decida inca ce se intampla cu gestul ramas - asta e treaba lui finalizeCamTouchChange().
-  // Extras ca functie separata ca sa poata fi folosit atat la ridicarea reala a unui deget
-  // (onResponderRelease/Terminate), cat si la reconcilierea defensiva din onResponderMove de mai jos.
   function removeCamTouchId(tid: number): boolean {
     const idx = camTouchIds.current.indexOf(tid);
     if (idx === -1) return false;
@@ -394,9 +382,6 @@ export default function PlayScreen() {
     return true;
   }
 
-  // Dupa ce unul sau ambele degete de camera au fost scoase: oprim pinch-ul in curs si,
-  // daca a mai ramas exact un deget, il "promovam" la rotatie (pozitie de start = pozitia lui
-  // curenta, baseline = unghiul curent), exact cum se intampla cand incepe un gest nou cu 1 deget.
   function finalizeCamTouchChange() {
     camPinchStartDist.current = null;
     if (camTouchIds.current.length === 1) {
@@ -419,17 +404,6 @@ export default function PlayScreen() {
   const onRootResponderMove = safeHandler((evt: any) => {
     const touches = touchesOf(evt);
 
-    // BUG GASIT (al treilea): cand sunt 2 degete jos (pinch) si se ridica DOAR unul dintre
-    // ele, React Native nu trimite onResponderRelease/onResponderTerminate pentru acel deget -
-    // acelea se declanseaza doar cand ajunge la 0 degete pe ecran. Disparitia unui deget din
-    // mijlocul unui gest multi-touch se vede DOAR aici, in onResponderMove, prin faptul ca
-    // identificatorul lui pur si simplu nu mai apare in `touches`. Codul vechi nu verifica
-    // niciodata asta, asa ca ramanea in camTouchIds un deget "fantoma" cu pozitia inghetata la
-    // ultima valoare cunoscuta - camTouchIds.current.length ramanea blocat la 2 pentru totdeauna,
-    // deci ramura de rotatie cu 1 deget nu se mai activa NICIODATA dupa aceea (si pinch-ul urmator
-    // combina un deget real cu fantoma inghetata, deci rezultate aparent aleatorii/fara reactie).
-    // Exact simptomul "merge o data normal, apoi camera nu mai raspunde deloc la rotire/pinch".
-    // Reconciliem aici, la fiecare onResponderMove, tracking-ul cu lista REALA de degete active.
     const activeIds = new Set(touches.map(t => t.identifier));
     if (joyTouchId.current !== null && !activeIds.has(joyTouchId.current)) {
       endJoystick();
@@ -655,7 +629,7 @@ export default function PlayScreen() {
 
   function resolveCollisions(next: THREE.Vector3, prev: THREE.Vector3): THREE.Vector3 {
     const r = PLAYER_RADIUS;
-    const result = next.clone();
+    const result = scratchResolvedPos.current.copy(next);
     for (const box of solidBoxesRef.current) {
       const withinY = result.y < box.maxY && result.y + playerHalfHeight.current * 2 > box.minY;
       if (!withinY) continue;
@@ -810,16 +784,16 @@ const onContextCreate = async (gl: any) => {
         const jv = joyVec.current;
         const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
         if (moveMag > 0.05) {
-          const camForward = new THREE.Vector3(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
-          const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
-          const moveDir = new THREE.Vector3()
+          const camForward = scratchCamForward.current.set(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+          const camRight = scratchCamRight.current.set(camForward.z, 0, -camForward.x);
+          const moveDir = scratchMoveDir.current.set(0, 0, 0)
             .addScaledVector(camForward, jv.y)
             .addScaledVector(camRight, jv.x);
           if (moveDir.lengthSq() > 0.0001) {
             moveDir.normalize();
             facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
-            const prev = pos.current.clone();
-            const next = prev.clone().addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
+            const prev = scratchPrevPos.current.copy(pos.current);
+            const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
             const resolved = resolveCollisions(next, prev);
             pos.current.set(resolved.x, pos.current.y, resolved.z);
           }
@@ -849,18 +823,16 @@ const onContextCreate = async (gl: any) => {
         const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
         if (firstPerson.current) {
           camera.position.set(pos.current.x, eyeY, pos.current.z);
-          // camPolar aplicat ACUM si in prima persoana (privire sus-jos) - inainte era
-          // complet ignorat aici, deci swipe-ul vertical nu avea niciun efect vizibil la
-          // zoom minim (exact "nu se misca sus-jos" raportat).
           const pitch = Math.PI / 2 - camPolar.current;
-          const lookDir = new THREE.Vector3(
+          const lookDir = scratchLookDir.current.set(
             Math.sin(camAngle.current) * Math.cos(pitch),
             Math.sin(pitch),
             Math.cos(camAngle.current) * Math.cos(pitch)
           );
-          camera.lookAt(camera.position.clone().add(lookDir));
+          const lookAt = scratchLookAt.current.copy(camera.position).add(lookDir);
+          camera.lookAt(lookAt);
         } else {
-          const target = new THREE.Vector3(pos.current.x, eyeY, pos.current.z);
+          const target = scratchTarget.current.set(pos.current.x, eyeY, pos.current.z);
           const r = camDist.current, th = camAngle.current, ph = camPolar.current;
           camera.position.set(
             target.x + r * Math.sin(ph) * Math.sin(th),
