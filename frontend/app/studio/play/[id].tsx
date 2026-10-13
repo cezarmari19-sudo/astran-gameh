@@ -751,9 +751,9 @@ export default function PlayScreen() {
         const target = scratchTarget.current.set(pos.current.x, eyeY, pos.current.z);
         const r = camDist.current, th = camAngle.current, ph = camPolar.current;
         camera.position.set(
-          target.x + r * Math.sin(ph) * Math.sin(th),
+          target.x - r * Math.sin(ph) * Math.sin(th),
           target.y + r * Math.cos(ph),
-          target.z + r * Math.sin(ph) * Math.cos(th)
+          target.z - r * Math.sin(ph) * Math.cos(th)
         );
         camera.lookAt(target);
       }
