@@ -65,6 +65,12 @@ def _enum(options: tuple[str, ...]):
     return validate
 
 
+def _bool():
+    def validate(v: Any) -> bool | None:
+        return v if isinstance(v, bool) else None
+    return validate
+
+
 # (cheie, default, validator) - vezi QUALITY_LABELS/RENDER_DISTANCES/GRAPHICS_LEVELS in
 # frontend/app/play/[id].tsx pentru ce inseamna fiecare interval.
 SETTINGS_SCHEMA: list[tuple[str, Any, Any]] = [
@@ -75,6 +81,7 @@ SETTINGS_SCHEMA: list[tuple[str, Any, Any]] = [
     ("music_volume", 1.0, _float_range(0.0, 1.0)),
     ("sfx_volume", 1.0, _float_range(0.0, 1.0)),
     ("camera_sensitivity", 1.0, _float_range(0.2, 3.0)),
+    ("shift_lock", True, _bool()),  # avatarul priveste mereu spre camera (ca in Roblox); off = priveste spre directia de mers
 ]
 
 
