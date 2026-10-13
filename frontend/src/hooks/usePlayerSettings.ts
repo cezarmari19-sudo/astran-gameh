@@ -19,6 +19,7 @@ export type PlayerSettings = {
   music_volume: number;              // 0..1 - rezervat
   sfx_volume: number;                // 0..1 - rezervat
   camera_sensitivity: number;        // 0.2..3 - rezervat
+  shift_lock: boolean;               // avatarul priveste mereu spre camera (ca in Roblox); off = priveste spre directia de mers
 };
 
 // Trebuie sa ramana identic cu default_settings() din backend/astran_sandbox/user_settings_routes.py -
@@ -32,6 +33,7 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   music_volume: 1,
   sfx_volume: 1,
   camera_sensitivity: 1,
+  shift_lock: true,
 };
 
 const SAVE_DEBOUNCE_MS = 500;
