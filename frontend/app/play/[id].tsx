@@ -223,10 +223,7 @@ export default function PlayScreen() {
   // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
   // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
   // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
-  // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
-  // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
-  // gesturi. E o cauza plauzibila pentru rotirea/pinch-ul care "uneori" nu raspunde, independenta
-  // de bug-ul de sincronizare a degetelor rezolvat anterior.
+  // thread-ul JS care proceseaza si evenimentele de touch.
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -790,17 +787,6 @@ const onContextCreate = async (gl: any) => {
         const jv = joyVec.current;
         const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
         if (moveMag > 0.05) {
-          // BUG GASIT (shift-lock inversat pe toate cele 4 directii):
-          // 1) camRight calcula de fapt STANGA, nu dreapta. Dreapta reala a camerei (in
-          //    coordonate world, pt vectorul "forward" F) e cross(F, up) = (-F.z, 0, F.x) -
-          //    formula veche (F.z, 0, -F.x) e exact opusul (stanga).
-          // 2) jv.y vine din coordonate de ecran (Y creste in JOS): cand tragi joystick-ul
-          //    in SUS (intentia de "inainte"), jv.y e NEGATIV. Formula veche folosea jv.y
-          //    direct ca inmultitor pentru camForward, deci "inainte" pe joystick aplica de
-          //    fapt -camForward (inapoi fata de directia in care priveste camera acum,
-          //    reparata in pasul anterior). De-aia mersul inainte/inapoi ERA inversat, si -
-          //    pentru ca avatarul se orienteaza dupa moveDir mai jos - la fel si privirea lui.
-          // Impreuna, cele doua inversari explicau toate cele 4 directii raportate gresite.
           const camForward = scratchCamForward.current.set(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
           const camRight = scratchCamRight.current.set(-camForward.z, 0, camForward.x);
           const moveDir = scratchMoveDir.current.set(0, 0, 0)
@@ -808,10 +794,6 @@ const onContextCreate = async (gl: any) => {
             .addScaledVector(camRight, jv.x);
           if (moveDir.lengthSq() > 0.0001) {
             moveDir.normalize();
-            // Shift Lock ON (implicit, ca in Roblox): avatarul priveste mereu spre directia
-            // camerei (camAngle), indiferent incotro se deplaseaza - poate "strafe" lateral
-            // sau merge cu spatele fara sa se intoarca. Shift Lock OFF: avatarul se intoarce
-            // mereu cu fata spre directia in care merge (comportamentul vechi).
             if (!shiftLockRef.current) {
               facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
             }
@@ -822,8 +804,6 @@ const onContextCreate = async (gl: any) => {
           }
         }
         if (shiftLockRef.current) {
-          // Cu Shift Lock pornit, avatarul priveste spre camera in FIECARE cadru - nu doar
-          // cand se misca - exact ca in Roblox (chiar si stand pe loc, fata urmeaza camera).
           facingAngle.current = camAngle.current;
         }
 
@@ -1052,7 +1032,10 @@ const onContextCreate = async (gl: any) => {
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
           <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={(e: any) => e.stopPropagation?.()}>
-            <ScrollView showsVerticalScrollIndicator={false}>
+            {/* flex:1 e necesar aici, nu doar maxHeight pe container: fara el, ScrollView-ul
+                tinde sa se dimensioneze dupa continutul lui (ignorand limita parintelui), iar
+                in loc sa deruleze, pur si simplu depasea/se taia la marginea ecranului. */}
+            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
               <Text style={styles.menuTitle}>Settings</Text>
 
               <Text style={styles.settingLabel}>Viziune</Text>
@@ -1112,7 +1095,7 @@ const styles = StyleSheet.create({
   aBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
   aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
   menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
-  menuBox: { width: "100%", maxWidth: 340, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  menuBox: { width: "100%", maxWidth: 340, maxHeight: "85%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
   menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
   crashMessage: { color: colors.onSurface2, fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginBottom: 6 },
