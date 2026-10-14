@@ -186,6 +186,12 @@ export default function PlayScreen() {
   const renderDistance = RENDER_DISTANCES[renderLevel - 1];
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
+  const shiftLock = playerSettings.shift_lock;
+  // Citita in bucla de randare (closure creat o singura data in onContextCreate), la fel ca
+  // graphicsLevelRef mai sus - altfel randarea ar vedea mereu valoarea de la montare, nu
+  // schimbarea facuta ulterior din Settings.
+  const shiftLockRef = useRef(shiftLock);
+  shiftLockRef.current = shiftLock;
   const [glMountKey, setGlMountKey] = useState(0);
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
@@ -217,7 +223,10 @@ export default function PlayScreen() {
   // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
   // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
   // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
-  // thread-ul JS care proceseaza si evenimentele de touch.
+  // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
+  // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
+  // gesturi. E o cauza plauzibila pentru rotirea/pinch-ul care "uneori" nu raspunde, independenta
+  // de bug-ul de sincronizare a degetelor rezolvat anterior.
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -781,19 +790,41 @@ const onContextCreate = async (gl: any) => {
         const jv = joyVec.current;
         const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
         if (moveMag > 0.05) {
+          // BUG GASIT (shift-lock inversat pe toate cele 4 directii):
+          // 1) camRight calcula de fapt STANGA, nu dreapta. Dreapta reala a camerei (in
+          //    coordonate world, pt vectorul "forward" F) e cross(F, up) = (-F.z, 0, F.x) -
+          //    formula veche (F.z, 0, -F.x) e exact opusul (stanga).
+          // 2) jv.y vine din coordonate de ecran (Y creste in JOS): cand tragi joystick-ul
+          //    in SUS (intentia de "inainte"), jv.y e NEGATIV. Formula veche folosea jv.y
+          //    direct ca inmultitor pentru camForward, deci "inainte" pe joystick aplica de
+          //    fapt -camForward (inapoi fata de directia in care priveste camera acum,
+          //    reparata in pasul anterior). De-aia mersul inainte/inapoi ERA inversat, si -
+          //    pentru ca avatarul se orienteaza dupa moveDir mai jos - la fel si privirea lui.
+          // Impreuna, cele doua inversari explicau toate cele 4 directii raportate gresite.
           const camForward = scratchCamForward.current.set(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
-          const camRight = scratchCamRight.current.set(camForward.z, 0, -camForward.x);
+          const camRight = scratchCamRight.current.set(-camForward.z, 0, camForward.x);
           const moveDir = scratchMoveDir.current.set(0, 0, 0)
-            .addScaledVector(camForward, jv.y)
+            .addScaledVector(camForward, -jv.y)
             .addScaledVector(camRight, jv.x);
           if (moveDir.lengthSq() > 0.0001) {
             moveDir.normalize();
-            facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+            // Shift Lock ON (implicit, ca in Roblox): avatarul priveste mereu spre directia
+            // camerei (camAngle), indiferent incotro se deplaseaza - poate "strafe" lateral
+            // sau merge cu spatele fara sa se intoarca. Shift Lock OFF: avatarul se intoarce
+            // mereu cu fata spre directia in care merge (comportamentul vechi).
+            if (!shiftLockRef.current) {
+              facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+            }
             const prev = scratchPrevPos.current.copy(pos.current);
             const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
             const resolved = resolveCollisions(next, prev);
             pos.current.set(resolved.x, pos.current.y, resolved.z);
           }
+        }
+        if (shiftLockRef.current) {
+          // Cu Shift Lock pornit, avatarul priveste spre camera in FIECARE cadru - nu doar
+          // cand se misca - exact ca in Roblox (chiar si stand pe loc, fata urmeaza camera).
+          facingAngle.current = camAngle.current;
         }
 
         const groundY = groundHeightAt(pos.current.x, pos.current.z);
@@ -1039,6 +1070,25 @@ const onContextCreate = async (gl: any) => {
               <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
               <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
 
+              <Text style={styles.settingLabel}>Shift Lock</Text>
+              <Pressable
+                testID="play-shiftlock-toggle"
+                onPress={() => updateSetting("shift_lock", !shiftLock)}
+                style={styles.shiftLockRow}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
+                  <Text style={styles.shiftLockDesc}>
+                    {shiftLock
+                      ? "Avatarul privește mereu spre cameră."
+                      : "Avatarul privește spre direcția de mers."}
+                  </Text>
+                </View>
+                <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
+                  <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
+                </View>
+              </Pressable>
+
               <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
                 <Text style={styles.menuCloseBtnText}>Close</Text>
               </Pressable>
@@ -1078,6 +1128,13 @@ const styles = StyleSheet.create({
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   qualityChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
+  shiftLockRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
+  shiftLockTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
+  shiftLockDesc: { color: colors.onSurface3, fontSize: 11, marginTop: 2 },
+  switchTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.15)", padding: 3, justifyContent: "center" },
+  switchTrackOn: { backgroundColor: colors.brand },
+  switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff", transform: [{ translateX: 0 }] },
+  switchThumbOn: { transform: [{ translateX: 18 }] },
   menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
   menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
 });
