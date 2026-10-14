@@ -16,23 +16,29 @@ import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
+// ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
-  gravity?: number; air?: number;
-  density?: number; friction?: number; bounce?: number; liquid?: boolean;
-  material?: string; anchored?: boolean; collide?: boolean;
+  // fizica (vezi backend/astran_sandbox/prelude.luau si runner.sanitize_ops)
+  gravity?: number; air?: number;                          // op: "world"
+  density?: number; friction?: number; bounce?: number; liquid?: boolean; // op: "material"
+  material?: string; anchored?: boolean; collide?: boolean; // pe "create"/"set"
   vx?: number; vy?: number; vz?: number;
 };
 type MeshState = { x: number; y: number; z: number; scale: number };
 
+// ---------- Spawn Points & Checkpoints (vezi si sceneShared.ts pentru campurile de pe SceneObj) ----------
+// Reprezentarea "de runtime" a unui Spawn Point/Checkpoint activ (enabled !== false), extrasa
+// o singura data la incarcarea scenei. Nu depinde de niciun numar fix de puncte - poate fi orice
+// numar de Spawn Points/Checkpoints, exact cerinta din Game Studio.
 type SpawnRuntime = {
   id: string;
   kind: "spawn" | "checkpoint";
   initial: boolean;
   x: number; y: number; z: number;
-  ry: number;
-  radius: number;
+  ry: number;    // orientarea (grade) cu care playerul trebuie sa apara la acest punct
+  radius: number; // raza zonei de activare (doar pt checkpoint) / nefolosita pt spawn simplu
 };
 
 function placeMesh(m: THREE.Mesh) {
@@ -45,6 +51,7 @@ function disposeMesh(m: THREE.Mesh) {
   (m.material as THREE.Material).dispose();
 }
 function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: PhysicsWorld, op: ScriptOp) {
+  // "world" si "material" nu au un mesh asociat: schimba starea globala a lumii fizice.
   if (op.op === "world") {
     if (op.gravity !== undefined) physics.setGravity(op.gravity);
     if (op.air !== undefined) physics.setAirDensity(op.air);
@@ -72,6 +79,8 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
     m.userData = state;
     scene.add(m);
     meshes.set(op.id, m);
+    // Implicit piesele create de script sunt FIXE (Anchored = true), la fel ca inainte
+    // de fizica reala - devin mobile doar daca scriptul seteaza explicit Anchored-ul = false.
     physics.upsert({
       id: op.id, type: shapeType, x: state.x, y: state.y, z: state.z, scale: state.scale,
       anchored: op.anchored ?? true, collide: op.collide, materialId: op.material,
@@ -91,6 +100,8 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
   if (op.scale !== undefined) s.scale = op.scale;
   if (op.color) (m.material as THREE.MeshStandardMaterial).color.set(op.color);
   if (op.type) { m.geometry.dispose(); m.geometry = geometryFor(op.type); }
+  // Corpul mobil isi ia pozitia din fizica in fiecare cadru (vezi bucla de render);
+  // aici doar aplicam pe corpul fizic schimbarile explicite venite din script.
   if (op.x !== undefined || op.y !== undefined || op.z !== undefined) physics.setPosition(op.id, op.x, op.y, op.z);
   if (op.scale !== undefined) physics.setScale(op.id, op.scale);
   if (op.type) physics.setShapeType(op.id, op.type as PhysicsShapeType);
@@ -98,9 +109,12 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
   if (op.anchored !== undefined) physics.setAnchored(op.id, op.anchored);
   if (op.collide !== undefined) physics.setCollide(op.id, op.collide);
   if (op.vx !== undefined || op.vy !== undefined || op.vz !== undefined) physics.setVelocity(op.id, op.vx, op.vy, op.vz);
+  // Daca e mobil, pozitia vizuala reala vine din fizica la urmatorul cadru - nu suprascriem
+  // aici cu placeMesh() valorile explicite de mai sus, ca sa nu "sara" inainte de primul step.
   if (physics.isAnchored(op.id)) placeMesh(m);
 }
 
+// ---------- constante de gameplay ----------
 const PLAYER_RADIUS = 0.35;
 const PLAYER_HALF_HEIGHT_DEFAULT = 0.9;
 const MOVE_SPEED = 3.2;
@@ -109,17 +123,28 @@ const JOYSTICK_RADIUS = 52;
 const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
 const CAM_FIRST_PERSON_THRESHOLD = 0.6;
+// Raza zonei de activare a unui Checkpoint, relativa la scala discului sau (vezi geometryFor
+// "spawn" in sceneShared.ts: disc de raza 0.6 * scale). Facuta putin mai mare decat discul
+// vizual, ca activarea sa se simta naturala (nu trebuie calcat exact pe centrul discului).
 const CHECKPOINT_RADIUS_FACTOR = 1.4;
 const CHECKPOINT_MIN_RADIUS = 0.6;
 
+// Numele afisate in Settings. Valorile interne (low/medium/high) raman
+// neschimbate si controleaza in continuare pixel ratio-ul; se schimba doar textul.
 const QUALITY_LABELS: Record<GraphicsQuality, string> = {
   low: "Viziunea 1",
   medium: "Viziunea 2",
   high: "Viziunea 3",
 };
 
+// ---------- Render: 10 niveluri de distanta de randare (metri) ----------
+// Nivelul 4 = 60m, adica valoarea de dinainte. Vechile 30/60/100/150 sunt nivelurile 2/4/6/8.
 const RENDER_DISTANCES = [20, 30, 45, 60, 80, 100, 125, 150, 200, 250];
 
+// ---------- Grafica: 10 niveluri de calitate a iluminarii ----------
+// Nivelul 5 = exact aspectul de dinainte (ambient 0.55 + directionala 1.1).
+// Sub 5: iluminare mai plata. Peste 5: mai bogata (lumina de cer/sol + lumina de umplere).
+// Nu foloseste pixel ratio: acela ramane la "Viziune" (vezi nota din useEffect-ul [quality]).
 type Lights = {
   ambient: THREE.AmbientLight;
   dir: THREE.DirectionalLight;
@@ -127,16 +152,16 @@ type Lights = {
   fill: THREE.DirectionalLight;
 };
 const GRAPHICS_LEVELS: { ambient: number; dir: number; hemi: number; fill: number }[] = [
-  { ambient: 1.0,  dir: 0.0,  hemi: 0.0,  fill: 0.0 },
-  { ambient: 0.85, dir: 0.45, hemi: 0.0,  fill: 0.0 },
-  { ambient: 0.7,  dir: 0.8,  hemi: 0.0,  fill: 0.0 },
-  { ambient: 0.6,  dir: 1.0,  hemi: 0.0,  fill: 0.0 },
-  { ambient: 0.55, dir: 1.1,  hemi: 0.0,  fill: 0.0 },
-  { ambient: 0.45, dir: 1.1,  hemi: 0.25, fill: 0.0 },
-  { ambient: 0.4,  dir: 1.15, hemi: 0.3,  fill: 0.25 },
-  { ambient: 0.35, dir: 1.2,  hemi: 0.35, fill: 0.35 },
-  { ambient: 0.3,  dir: 1.25, hemi: 0.4,  fill: 0.45 },
-  { ambient: 0.25, dir: 1.3,  hemi: 0.45, fill: 0.55 },
+  { ambient: 1.0,  dir: 0.0,  hemi: 0.0,  fill: 0.0 },  // 1
+  { ambient: 0.85, dir: 0.45, hemi: 0.0,  fill: 0.0 },  // 2
+  { ambient: 0.7,  dir: 0.8,  hemi: 0.0,  fill: 0.0 },  // 3
+  { ambient: 0.6,  dir: 1.0,  hemi: 0.0,  fill: 0.0 },  // 4
+  { ambient: 0.55, dir: 1.1,  hemi: 0.0,  fill: 0.0 },  // 5 (ca inainte)
+  { ambient: 0.45, dir: 1.1,  hemi: 0.25, fill: 0.0 },  // 6
+  { ambient: 0.4,  dir: 1.15, hemi: 0.3,  fill: 0.25 }, // 7
+  { ambient: 0.35, dir: 1.2,  hemi: 0.35, fill: 0.35 }, // 8
+  { ambient: 0.3,  dir: 1.25, hemi: 0.4,  fill: 0.45 }, // 9
+  { ambient: 0.25, dir: 1.3,  hemi: 0.45, fill: 0.55 }, // 10
 ];
 function applyGraphicsLevel(lights: Lights, level: number) {
   const cfg = GRAPHICS_LEVELS[Math.max(1, Math.min(10, level)) - 1];
@@ -146,6 +171,7 @@ function applyGraphicsLevel(lights: Lights, level: number) {
   lights.fill.intensity = cfg.fill;
 }
 
+// Selector cu 10 puncte: casutele 1..valoare sunt aprinse, cea aleasa e plina.
 function LevelPicker({ value, onChange, testIDPrefix }: { value: number; onChange: (n: number) => void; testIDPrefix: string }) {
   return (
     <View style={styles.levelRow}>
@@ -175,6 +201,9 @@ export default function PlayScreen() {
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
+  // Setarile PLAYERULUI (Graphics Quality, Render Distance, etc) - persistente, aceleasi in
+  // orice joc, salvate automat la fiecare schimbare (fara buton de Save). Vezi
+  // src/hooks/usePlayerSettings.ts si backend/astran_sandbox/user_settings_routes.py.
   const { settings: playerSettings, loaded: settingsLoaded, update: updateSetting } = usePlayerSettings();
   const quality = playerSettings.graphics_quality;
   const renderLevel = playerSettings.render_level;
@@ -182,24 +211,45 @@ export default function PlayScreen() {
   const renderDistance = RENDER_DISTANCES[renderLevel - 1];
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
+  const shiftLock = playerSettings.shift_lock;
+  const shiftLockRef = useRef(shiftLock);
+  shiftLockRef.current = shiftLock;
+  // Cheia de remontare a GLView-ului: creste la fiecare schimbare REALA de
+  // orientare a device-ului (nu la orice mica variatie de screenW/screenH,
+  // gen bare de sistem). Vezi useEffect-ul de mai jos, bazat pe evenimentul
+  // nativ de orientare, nu pe screenW/screenH.
   const [glMountKey, setGlMountKey] = useState(0);
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
   const avatarBodyRef = useRef<AvatarBody>(defaultBody());
   const characterPartsRef = useRef<Part[] | null>(null);
+  // Spawn-ul initial al jocului (rezolvat o data la incarcarea scenei - vezi onContextCreate).
+  // Are mereu o valoare valida (fallback (0,0,0) daca jocul nu are niciun Spawn Point configurat -
+  // compatibil cu jocurile foarte vechi, dinainte de aceasta functionalitate).
   const spawnPointRef = useRef<{ x: number; y: number; z: number; ry: number }>({ x: 0, y: 0, z: 0, ry: 0 });
+  // Toate Checkpoint-urile active (enabled !== false) din scena - oricate, nu doar unul.
   const checkpointsRef = useRef<SpawnRuntime[]>([]);
+  // Checkpoint-ul activ AL ACESTUI PLAYER in sesiunea curenta - independent de alti jucatori,
+  // pentru ca fiecare client isi tine propria stare locala (nu exista sincronizare de server
+  // pentru progresul de checkpoint-uri). null = niciun checkpoint activat inca.
   const activeCheckpointRef = useRef<SpawnRuntime | null>(null);
   const solidBoxesRef = useRef<AABB[]>([]);
 
+  // Asteptam setarile playerului ca sa pornim Play Mode cu ele deja aplicate (cerinta punctul
+  // 4: "incarca setarile -> aplica -> apoi porneste jocul", nu default-uri urmate de un "sarit"
+  // vizual cand ajunge raspunsul). O mica intarziere, o singura data, la intrarea in orice joc.
   const canStartGL = settingsLoaded && !!game;
 
+  // Three.js
   const rendererRef = useRef<Renderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const lightsRef = useRef<Lights | null>(null);
   const physicsRef = useRef<PhysicsWorld | null>(null);
+  // Referinta catre contextul GL, ca sa putem citi dimensiunile REALE ale
+  // drawing buffer-ului (in pixeli fizici) de fiecare data cand se schimba
+  // orientarea/dimensiunea ecranului - nu doar o data, la creare.
   const glRef = useRef<any>(null);
   const playerGroupRef = useRef<THREE.Group | null>(null);
   const playerHalfHeight = useRef(PLAYER_HALF_HEIGHT_DEFAULT);
@@ -210,6 +260,13 @@ export default function PlayScreen() {
   const velY = useRef(0);
   const facingAngle = useRef(0);
 
+  // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
+  // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
+  // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
+  // thread-ul JS care proceseaza si evenimentele de touch - un touch care "cade" exact in acel
+  // moment poate fi intarziat/pierdut de Android inainte sa ajunga vreodata la codul nostru de
+  // gesturi. E o cauza plauzibila pentru rotirea/pinch-ul care "uneori" nu raspunde, independenta
+  // de bug-ul de sincronizare a degetelor rezolvat anterior (identic cu fix-ul din app/play/[id].tsx).
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -220,6 +277,7 @@ export default function PlayScreen() {
   const scratchLookDir = useRef(new THREE.Vector3());
   const scratchLookAt = useRef(new THREE.Vector3());
 
+  // Camera: DOAR swipe + pinch. Fara giroscop/inclinare.
   const camAngle = useRef(0.0);
   const camPolar = useRef(1.15);
   const camDist = useRef(4.5);
@@ -227,14 +285,45 @@ export default function PlayScreen() {
   const lastCamPolar = useRef(1.15);
   const firstPerson = useRef(false);
 
+  // La remontarea GLView-ului (schimbare de orientare) contextul GL, scena,
+  // camera si renderer-ul se recreeaza de la zero. Ca sa nu se vada un reset
+  // (jucatorul sarind la spawn, camera revenind la unghiul implicit), pastram
+  // aici pozitia curenta si unghiul camerei INAINTE de remontare, si le
+  // restauram in noul onContextCreate. Ref, nu state: nu trebuie sa declanseze
+  // re-render, doar sa supravietuiasca intre demontare/montare.
   const preservedStateRef = useRef<{
     pos: THREE.Vector3; velY: number; facingAngle: number;
     camAngle: number; camPolar: number; camDist: number;
   } | null>(null);
 
+  // ============================================================================================
+  // MULTI-TOUCH REAL - DE CE E UN SINGUR RESPONDER, NU DOUA:
+  //
+  // Incercarea veche (pastrata ca istoric in alte fisiere ale proiectului) avea doua View-uri
+  // SEPARATE, fiecare cu propriul onStartShouldSetResponder + onResponderTerminationRequest.
+  // Asta era bug-ul: React Native are UN SINGUR "responder" activ pentru intreaga aplicatie.
+  // Cand primul deget atinge, de ex., zona joystick-ului, acel View devine responder-ul curent.
+  // Cand al doilea deget atinge zona camerei, RN intreaba responder-ul curent (joystick-ul)
+  // daca accepta sa cedeze (onResponderTerminationRequest) - raspunsul era mereu "false", deci
+  // cererea e refuzata si zona camerei NU primeste niciodata evenimentele acelui deget (si
+  // invers, daca ordinea era inversa). De-aia joystick-ul si camera se blocau reciproc.
+  //
+  // SOLUTIA CORECTA: UN SINGUR View responder, care acopera tot ecranul si citeste el insusi
+  // toate touch-urile active (nativeEvent.touches). Fiecare touch nou e asignat, dupa pozitia
+  // lui pe ecran, fie joystick-ului fie camerei (vezi assignTouch mai jos); apoi, la fiecare
+  // miscare, se actualizeaza independent starea joystick-ului si starea camerei pentru touch-
+  // urile care le apartin. Nu mai exista NICIUN alt View cu care sa se negocieze "cine e
+  // responder-ul" - deci nu mai exista cine sa refuze pe cine, si cele doua zone chiar
+  // functioneaza simultan.
+  // ============================================================================================
+
+  // Pozitia absoluta pe ecran a fiecarei zone (masurata prin onLayout) - necesara ca sa
+  // convertim coordonatele absolute (pageX/pageY) ale unui touch in coordonate relative la
+  // zona lui, si ca sa stim in ce zona a "cazut" un touch nou.
   const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
   const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
 
+  // --- Joystick: un singur deget, propriul identifier ---
   const joyTouchId = useRef<number | null>(null);
   const joyActive = useRef(false);
   const joyVec = useRef({ x: 0, y: 0 });
@@ -242,11 +331,23 @@ export default function PlayScreen() {
   const [joyVisible, setJoyVisible] = useState(false);
   const [joyOrigin, setJoyOrigin] = useState({ x: 80, y: 80 });
 
+  // --- Camera: 1 deget = rotatie, al 2-lea deget (tot in zona camerei) = zoom (pinch) ---
   const camTouchIds = useRef<number[]>([]);
   const camTouchPos = useRef<Map<number, TouchXY>>(new Map());
   const camTouchStartPos = useRef<Map<number, TouchXY>>(new Map());
   const camPinchStartDist = useRef<number | null>(null);
   const camPinchStartCamDist = useRef(4.5);
+  // BUG GASIT #1 (cel mai sever): camZoneLayout de mai sus era legat de styles.cameraZone, o
+  // fasie de doar 40% (landscape) / 55% (portret) din latimea ecranului - exact bug-ul vechi
+  // documentat deja ca reparat in frontend/app/play/[id].tsx, dar care aici inca exista.
+  // Orice swipe pornit in restul ecranului (stanga/centru, in afara joystick-ului) nu era
+  // asignat NICIUNUI gest - "nu citea" swipe-ul deloc. Vezi assignTouch() mai jos, rescris sa
+  // acopere tot ecranul in afara joystick-ului, la fel ca in app/play/[id].tsx.
+  //
+  // BUG GASIT #2: retine pozitia initiala REALA (jos-deget) a oricarei atingeri neclasificate
+  // inca, inclusiv a celor din marja de siguranta din jurul joystick-ului, ca sa nu se piarda
+  // miscarea facuta de utilizator pana cand atingerea e in sfarsit clasificata drept gest de
+  // camera (vezi startCameraTouch mai jos).
   const touchDownPos = useRef<Map<number, TouchXY>>(new Map());
 
   function touchesOf(evt: any): Array<{ identifier: number; pageX: number; pageY: number }> {
@@ -254,7 +355,7 @@ export default function PlayScreen() {
   }
 
   function startJoystick(t: { identifier: number; pageX: number; pageY: number }) {
-    if (joyTouchId.current !== null) return;
+    if (joyTouchId.current !== null) return; // deja avem un deget pe joystick
     joyTouchId.current = t.identifier;
     const ox = t.pageX - joyZoneLayout.current.x;
     const oy = t.pageY - joyZoneLayout.current.y;
@@ -271,6 +372,7 @@ export default function PlayScreen() {
     const ang = Math.atan2(dy0, dx0);
     const kx = Math.cos(ang) * dist, ky = Math.sin(ang) * dist;
     setJoyKnob({ x: kx, y: ky });
+    // ky pozitiv = deget tras in jos fata de centrul joystick-ului (coordonate ecran standard)
     joyVec.current = { x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS };
   }
   function endJoystick() {
@@ -282,24 +384,36 @@ export default function PlayScreen() {
   }
 
   function startCameraTouch(t: { identifier: number; pageX: number; pageY: number }) {
-    if (camTouchIds.current.length >= 2) return;
+    if (camTouchIds.current.length >= 2) return; // doar 1 (rotire) sau 2 degete (pinch)
     camTouchIds.current.push(t.identifier);
     camTouchPos.current.set(t.identifier, { x: t.pageX, y: t.pageY });
+    // Folosim pozitia de jos-deget REALA (nu cea curenta) ca punct de start al rotatiei, ca sa
+    // nu pierdem miscarea facuta cat timp atingerea a fost "in asteptare" in marja de siguranta
+    // din jurul joystick-ului (vezi touchDownPos mai sus).
     const down = touchDownPos.current.get(t.identifier) ?? { x: t.pageX, y: t.pageY };
     camTouchStartPos.current.set(t.identifier, down);
 
     if (camTouchIds.current.length === 1) {
+      // primul deget: incepe o rotatie noua, fata de pozitia curenta a camerei
       lastCamAngle.current = camAngle.current;
       lastCamPolar.current = camPolar.current;
     } else if (camTouchIds.current.length === 2) {
+      // al doilea deget a intrat: trecem pe pinch-to-zoom; rotatia se opreste cat timp
+      // sunt 2 degete
       const [idA, idB] = camTouchIds.current;
       const a = camTouchPos.current.get(idA), b = camTouchPos.current.get(idB);
+      // GARDA: o secventa rara de ridicare/atingere foarte rapida a degetelor poate lasa
+      // starea inconsistenta pentru o fractiune de secunda - renuntam silentios la pinch.
       if (!a || !b) { camPinchStartDist.current = null; return; }
+      // Prag minim (1px): evita o distanta initiala de 0 care ar produce NaN/Infinity la scalare.
       camPinchStartDist.current = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       camPinchStartCamDist.current = camDist.current;
     }
   }
 
+  // Zona camerei acopera TOT ecranul, in afara joystick-ului (+ o marja de siguranta de 28px
+  // in jurul lui) - nu doar fasia dreapta de 40-55% din styles.cameraZone (acel View ramane
+  // doar pentru randarea vizuala, pointerEvents="none", input-ul vine mereu de aici).
   const JOY_SAFETY_MARGIN = 28;
   function assignTouch(t: { identifier: number; pageX: number; pageY: number }) {
     const jz = joyZoneLayout.current;
@@ -311,6 +425,10 @@ export default function PlayScreen() {
     if (!nearJoyZone && camTouchIds.current.length < 2) startCameraTouch(t);
   }
 
+  // Scoate un deget din tracking-ul de camera (camTouchIds/camTouchPos/camTouchStartPos),
+  // fara sa decida inca ce se intampla cu gestul ramas - asta e treaba lui finalizeCamTouchChange().
+  // Folosit atat la ridicarea reala a unui deget (onResponderRelease/Terminate), cat si la
+  // reconcilierea defensiva din onResponderMove de mai jos.
   function removeCamTouchId(tid: number): boolean {
     const idx = camTouchIds.current.indexOf(tid);
     if (idx === -1) return false;
@@ -320,6 +438,10 @@ export default function PlayScreen() {
     return true;
   }
 
+  // Dupa ce unul sau ambele degete de camera au fost scoase: oprim pinch-ul in curs si,
+  // daca a mai ramas exact un deget, il "promovam" la rotatie (pozitie de start = pozitia lui
+  // curenta, baseline = unghiul curent) - re-pornim rotatia de la pozitia curenta a acestui
+  // deget, ca sa nu sara camera brusc.
   function finalizeCamTouchChange() {
     camPinchStartDist.current = null;
     if (camTouchIds.current.length === 1) {
@@ -342,6 +464,14 @@ export default function PlayScreen() {
   const onRootResponderMove = (evt: any) => {
     const touches = touchesOf(evt);
 
+    // BUG GASIT: cand sunt 2 degete jos (pinch) si se ridica DOAR unul dintre ele, React
+    // Native nu trimite onResponderRelease/onResponderTerminate pentru acel deget - acelea
+    // se declanseaza doar cand ajunge la 0 degete pe ecran. Disparitia unui deget din mijlocul
+    // unui gest multi-touch se vede DOAR aici, in onResponderMove, prin faptul ca identificatorul
+    // lui nu mai apare in `touches`. Fara reconcilierea de mai jos, camTouchIds ramanea "blocat"
+    // cu un deget fantoma (pozitie inghetata), deci ramura de rotatie cu 1 deget nu se mai activa
+    // NICIODATA dupa aceea - exact simptomul "merge o data normal, apoi camera nu mai raspunde
+    // deloc la rotire/pinch".
     const activeIds = new Set(touches.map(t => t.identifier));
     if (joyTouchId.current !== null && !activeIds.has(joyTouchId.current)) {
       endJoystick();
@@ -355,6 +485,9 @@ export default function PlayScreen() {
     }
     if (camChanged) finalizeCamTouchChange();
 
+    // Deget nou aparut (al doilea/al treilea, intrat cat timp altele sunt deja active) - nu
+    // trece prin onResponderGrant (acela se declanseaza o singura data, la primul deget care
+    // revendica responder-ul); il detectam aici si il asignam zonei lui.
     for (const t of touches) {
       const known = joyTouchId.current === t.identifier || camTouchIds.current.includes(t.identifier);
       if (!known) {
@@ -416,6 +549,7 @@ export default function PlayScreen() {
     };
   }, []);
 
+  // ---------- rotatia ecranului: Play Mode elibereaza orientarea, si o reblocheaza pe portrait la iesire ----------
   useEffect(() => {
     if (Platform.OS === "web") return;
     ScreenOrientation.unlockAsync().catch(() => {});
@@ -424,6 +558,7 @@ export default function PlayScreen() {
     };
   }, []);
 
+  // ---------- remontare GLView la FIECARE schimbare reala de orientare ----------
   const currentOrientationRef = useRef<ScreenOrientation.Orientation | null>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -431,8 +566,12 @@ export default function PlayScreen() {
     let cancelled = false;
 
     const remountFor = (orientation: ScreenOrientation.Orientation) => {
-      if (currentOrientationRef.current === orientation) return;
+      if (currentOrientationRef.current === orientation) return; // acelasi unghi, nimic de facut
       currentOrientationRef.current = orientation;
+      // Salvam starea curenta INAINTE de remontare, ca sa o restauram in noul
+      // context GL (vezi inceputul lui onContextCreate). La primul apel
+      // (montarea initiala a ecranului) inca nu exista o scena activa - nu
+      // salvam nimic, jucatorul porneste normal din spawn.
       if (sceneRef.current) {
         preservedStateRef.current = {
           pos: pos.current.clone(),
@@ -450,6 +589,8 @@ export default function PlayScreen() {
     };
 
     (async () => {
+      // Citim orientarea curenta o data, la montare, ca sa avem o valoare de
+      // start (fara sa declansam remontare - e chiar prima montare a GLView).
       try {
         const initial = await ScreenOrientation.getOrientationAsync();
         if (!cancelled) currentOrientationRef.current = initial;
@@ -466,6 +607,7 @@ export default function PlayScreen() {
     };
   }, []);
 
+  // ---------- incarcare joc + instanta de server ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -705,19 +847,28 @@ export default function PlayScreen() {
       const jv = joyVec.current;
       const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
       if (moveMag > 0.05) {
+        // BUG GASIT (shift-lock inversat pe toate cele 4 directii) - vezi comentariul
+        // identic din app/play/[id].tsx: camRight calcula stanga in loc de dreapta, si
+        // jv.y (negativ cand tragi joystick-ul in SUS, coordonate ecran) se folosea direct
+        // ca inmultitor pentru camForward, aplicand de fapt -camForward la "inainte".
         const camForward = scratchCamForward.current.set(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
-        const camRight = scratchCamRight.current.set(camForward.z, 0, -camForward.x);
+        const camRight = scratchCamRight.current.set(-camForward.z, 0, camForward.x);
         const moveDir = scratchMoveDir.current.set(0, 0, 0)
-          .addScaledVector(camForward, jv.y)
+          .addScaledVector(camForward, -jv.y)
           .addScaledVector(camRight, jv.x);
         if (moveDir.lengthSq() > 0.0001) {
           moveDir.normalize();
-          facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+          if (!shiftLockRef.current) {
+            facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+          }
           const prev = scratchPrevPos.current.copy(pos.current);
           const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
           const resolved = resolveCollisions(next, prev);
           pos.current.set(resolved.x, pos.current.y, resolved.z);
         }
+      }
+      if (shiftLockRef.current) {
+        facingAngle.current = camAngle.current;
       }
 
       const groundY = groundHeightAt(pos.current.x, pos.current.z);
@@ -750,6 +901,11 @@ export default function PlayScreen() {
       } else {
         const target = scratchTarget.current.set(pos.current.x, eyeY, pos.current.z);
         const r = camDist.current, th = camAngle.current, ph = camPolar.current;
+        // BUG GASIT (shift-lock inversat): vezi comentariul identic din app/play/[id].tsx -
+        // camera statea in fata jucatorului fata de unghiul th si privea inapoi, opus fata de
+        // directia "inainte" (sin th, cos th) folosita de miscarea cu joystick-ul. Scazand
+        // offset-ul camera ajunge sa stea in spatele jucatorului si sa priveasca in aceeasi
+        // directie ca miscarea.
         camera.position.set(
           target.x - r * Math.sin(ph) * Math.sin(th),
           target.y + r * Math.cos(ph),
@@ -901,6 +1057,25 @@ export default function PlayScreen() {
               <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
               <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
 
+              <Text style={styles.settingLabel}>Shift Lock</Text>
+              <Pressable
+                testID="play-shiftlock-toggle"
+                onPress={() => updateSetting("shift_lock", !shiftLock)}
+                style={styles.shiftLockRow}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
+                  <Text style={styles.shiftLockDesc}>
+                    {shiftLock
+                      ? "Avatarul privește mereu spre cameră."
+                      : "Avatarul privește spre direcția de mers."}
+                  </Text>
+                </View>
+                <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
+                  <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
+                </View>
+              </Pressable>
+
               <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
                 <Text style={styles.menuCloseBtnText}>Close</Text>
               </Pressable>
@@ -940,6 +1115,13 @@ const styles = StyleSheet.create({
   qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   qualityChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
+  shiftLockRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
+  shiftLockTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
+  shiftLockDesc: { color: colors.onSurface3, fontSize: 11, marginTop: 2 },
+  switchTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.15)", padding: 3, justifyContent: "center" },
+  switchTrackOn: { backgroundColor: colors.brand },
+  switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff", transform: [{ translateX: 0 }] },
+  switchThumbOn: { transform: [{ translateX: 18 }] },
   menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
   menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
 });
