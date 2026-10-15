@@ -187,9 +187,6 @@ export default function PlayScreen() {
   const graphicsLevelRef = useRef(graphicsLevel);
   graphicsLevelRef.current = graphicsLevel;
   const shiftLock = playerSettings.shift_lock;
-  // Citita in bucla de randare (closure creat o singura data in onContextCreate), la fel ca
-  // graphicsLevelRef mai sus - altfel randarea ar vedea mereu valoarea de la montare, nu
-  // schimbarea facuta ulterior din Settings.
   const shiftLockRef = useRef(shiftLock);
   shiftLockRef.current = shiftLock;
   const [glMountKey, setGlMountKey] = useState(0);
@@ -220,10 +217,6 @@ export default function PlayScreen() {
   const velY = useRef(0);
   const facingAngle = useRef(0);
 
-  // Vectori refolositi in bucla de randare (vezi render() mai jos), in loc sa alocam Vector3
-  // noi la FIECARE cadru (60/secunda). Alocarile repetate in hot-loop produc presiune de
-  // garbage collection; pe Android, un GC poate "ingheta" pentru cateva milisecunde chiar
-  // thread-ul JS care proceseaza si evenimentele de touch.
   const scratchCamForward = useRef(new THREE.Vector3());
   const scratchCamRight = useRef(new THREE.Vector3());
   const scratchMoveDir = useRef(new THREE.Vector3());
@@ -1031,11 +1024,14 @@ const onContextCreate = async (gl: any) => {
 
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
-          <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={(e: any) => e.stopPropagation?.()}>
-            {/* flex:1 e necesar aici, nu doar maxHeight pe container: fara el, ScrollView-ul
-                tinde sa se dimensioneze dupa continutul lui (ignorand limita parintelui), iar
-                in loc sa deruleze, pur si simplu depasea/se taia la marginea ecranului. */}
-            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+          <Pressable
+            style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}
+            onPress={(e: any) => e.stopPropagation?.()}
+          >
+            <ScrollView
+              style={{ maxHeight: Math.max(220, Math.round(screenH * 0.7) - spacing.lg * 2) }}
+              showsVerticalScrollIndicator={false}
+            >
               <Text style={styles.menuTitle}>Settings</Text>
 
               <Text style={styles.settingLabel}>Viziune</Text>
