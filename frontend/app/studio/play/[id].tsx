@@ -105,6 +105,7 @@ const PLAYER_RADIUS = 0.35;
 const PLAYER_HALF_HEIGHT_DEFAULT = 0.9;
 const MOVE_SPEED = 3.2;
 const GRAVITY = -18;
+const JUMP_SPEED = 7.5; // viteza verticala initiala la saritura (m/s); cu GRAVITY=-18 da o saritura de ~1.56m
 const JOYSTICK_RADIUS = 52;
 const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
@@ -211,6 +212,8 @@ export default function PlayScreen() {
 
   const pos = useRef(new THREE.Vector3(0, 0, 0));
   const velY = useRef(0);
+  const groundedRef = useRef(true); // true cand personajul sta pe sol (vezi bucla de gravitatie mai jos)
+  const jumpRequestedRef = useRef(false); // setat de butonul Jump; consumat o singura data per apasare, nu in fiecare frame cat e tinut
   const facingAngle = useRef(0);
 
   const scratchCamForward = useRef(new THREE.Vector3());
@@ -666,6 +669,7 @@ export default function PlayScreen() {
     } else {
       pos.current.set(initial.x, initial.y, initial.z);
       velY.current = 0;
+      groundedRef.current = true;
       facingAngle.current = (initial.ry * Math.PI) / 180;
     }
 
@@ -729,9 +733,18 @@ export default function PlayScreen() {
       }
 
       const groundY = groundHeightAt(pos.current.x, pos.current.z);
+      if (jumpRequestedRef.current) {
+        jumpRequestedRef.current = false;
+        // doar daca personajul e efectiv pe sol (nu in aer) - previne dublele sarituri/zborul
+        if (groundedRef.current) {
+          velY.current = JUMP_SPEED;
+          groundedRef.current = false;
+        }
+      }
       velY.current += GRAVITY * dt;
       let nextY = pos.current.y + velY.current * dt;
-      if (nextY <= groundY) { nextY = groundY; velY.current = 0; }
+      if (nextY <= groundY) { nextY = groundY; velY.current = 0; groundedRef.current = true; }
+      else { groundedRef.current = false; }
       pos.current.y = nextY;
 
       for (const cp of checkpointsRef.current) {
@@ -777,8 +790,17 @@ export default function PlayScreen() {
     const target = activeCheckpointRef.current ?? spawnPointRef.current;
     pos.current.set(target.x, target.y, target.z);
     velY.current = 0;
+    groundedRef.current = true;
+    jumpRequestedRef.current = false;
     facingAngle.current = (target.ry * Math.PI) / 180;
     setShowMenu(false);
+  }
+
+  function doJump() {
+    // un singur "flag" per apasare: onPressIn se declanseaza o singura data la atingere,
+    // deci tinerea apasata a butonului NU repeta saritura (vezi bucla de gravitatie, care
+    // consuma si reseteaza acest flag o singura data pe frame).
+    jumpRequestedRef.current = true;
   }
   async function doLeave() {
     const inst = instanceRef.current;
@@ -809,6 +831,9 @@ export default function PlayScreen() {
   }, [renderDistance]);
 
   const isLandscape = screenW > screenH;
+  // Dimensiune adaptiva: proportionala cu latura mica a ecranului, limitata intre 60-84px,
+  // ca sa ramana usor de apasat cu degetul mare atat pe telefoane mici, cat si pe cele mari/tablete.
+  const jumpBtnSize = Math.max(60, Math.min(84, Math.round(Math.min(screenW, screenH) * 0.17)));
 
   return (
     <View style={styles.root}>
@@ -867,6 +892,23 @@ export default function PlayScreen() {
           <Text style={styles.aBtnText}>A</Text>
         </Pressable>
       </SafeAreaView>
+
+      {ready && Platform.OS !== "web" ? (
+        <SafeAreaView edges={["bottom", "right"]} style={styles.jumpBtnWrap} pointerEvents="box-none">
+          <Pressable
+            testID="play-jump-btn"
+            onPressIn={doJump}
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.jumpBtn,
+              { width: jumpBtnSize, height: jumpBtnSize, borderRadius: jumpBtnSize / 2 },
+              pressed && styles.jumpBtnPressed,
+            ]}
+          >
+            <MaterialCommunityIcons name="arrow-up-bold" size={Math.round(jumpBtnSize * 0.46)} color={colors.brand} />
+          </Pressable>
+        </SafeAreaView>
+      ) : null}
 
       <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
@@ -957,6 +999,11 @@ const styles = StyleSheet.create({
   aBtnWrap: { position: "absolute", top: 0, left: 0, padding: spacing.md },
   aBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
   aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
+  // Butonul Jump: coltul din dreapta-jos, deasupra zonei de camera/joystick, fara sa se suprapuna cu ele
+  // (joystick-ul e in coltul opus, stanga-jos). Stil asemanator cu Roblox mobil: cerc semitransparent.
+  jumpBtnWrap: { position: "absolute", bottom: 0, right: 0, padding: spacing.lg },
+  jumpBtn: { backgroundColor: "rgba(255,255,255,0.14)", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", alignItems: "center", justifyContent: "center" },
+  jumpBtnPressed: { backgroundColor: "rgba(204,255,0,0.3)", borderColor: "rgba(204,255,0,0.85)" },
   menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
   menuBox: { width: "100%", maxWidth: 340, maxHeight: "85%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
   menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
