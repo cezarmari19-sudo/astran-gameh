@@ -7,8 +7,17 @@
 // (exact ca intr-un repo Git), plus lista explicita `folders` pentru folderele goale
 // (altfel un folder fara niciun fisier in el ar disparea din proiect).
 
-export type ProjectFile = { path: string; source: string };
+// "server" (implicit): fisierul se compileaza/ruleaza in sandbox-ul Luau de pe server
+// (vezi backend/astran_sandbox/routes.py luau_bundle) - singurul runtime care exista azi.
+// "client": fisierul e salvat si exclus EXPLICIT din executia de pe server, dar nu
+// exista inca un runtime pe telefon care sa-l ruleze - vezi nota din CodeStudio.tsx.
+export type FileTarget = "server" | "client";
+export type ProjectFile = { path: string; source: string; target?: FileTarget };
 export type ProjectState = { files: ProjectFile[]; folders: string[] };
+
+export function targetOf(file: ProjectFile): FileTarget {
+  return file.target === "client" ? "client" : "server";
+}
 
 export type TreeNode =
   | { kind: "file"; path: string; name: string }
