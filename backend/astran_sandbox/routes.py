@@ -171,6 +171,17 @@ def parent_folders(path: str) -> list[str]:
     return out
 
 
+VALID_TARGETS = {"server", "client"}
+DEFAULT_TARGET = "server"  # comportamentul dinainte de acest camp: totul rula "pe server" (singurul loc care executa Luau)
+
+
+def _clean_target(raw: Any) -> str:
+    """Normalizeaza target-ul unui fisier: doar 'server'/'client' sunt valide: orice
+    altceva (lipsa, None, valoare straina) devine 'server', ca sa nu schimbe tacit
+    comportamentul jocurilor vechi (salvate inainte sa existe campul asta)."""
+    return raw if raw in VALID_TARGETS else DEFAULT_TARGET
+
+
 def validate_project(files: list[dict], folders: list[Any]) -> tuple[list[dict], list[str]]:
     """Valideaza intreg arborele de proiect. Ridica ValueError cu un mesaj clar la
     prima problema gasita (path invalid, duplicat, fisier/folder in conflict, etc)."""
@@ -199,7 +210,7 @@ def validate_project(files: list[dict], folders: list[Any]) -> tuple[list[dict],
             raise ValueError(f"Duplicate path: {path}")
         seen_paths.add(path)
         total += len(source)
-        clean_files.append({"path": path, "source": source})
+        clean_files.append({"path": path, "source": source, "target": _clean_target(f.get("target"))})
     if total > MAX_PROJECT_TOTAL_CHARS:
         raise ValueError(f"Project is too large together (max {MAX_PROJECT_TOTAL_CHARS} characters)")
 
@@ -247,10 +258,19 @@ def luau_name_for(path: str) -> str:
 
 
 def luau_bundle(files: list[dict]) -> list[dict]:
-    """Din tot proiectul, extrage DOAR fisierele .lua/.luau ca listă {name, source} -
+    """Din tot proiectul, extrage DOAR fisierele .lua/.luau marcate target="server"
+    (sau fara target deloc - jocuri vechi, inainte de acest camp) ca listă {name, source} -
     exact formatul pe care runner.py/validate_files/run_files il asteapta neschimbat.
-    Restul fisierelor (orice alta extensie) sunt organizare pura, nu ajung aici."""
-    return [{"name": luau_name_for(f["path"]), "source": f["source"]} for f in files if is_luau_path(f["path"])]
+
+    Fisierele .lua/.luau marcate explicit target="client" NU ajung niciodata aici: nu
+    se compileaza, nu se executa, nu influenteaza in niciun fel rularea de pe server -
+    sunt pastrate doar ca organizare/cod de proiect pentru un viitor runtime pe telefon
+    (nu exista inca), exact ca restul fisierelor cu alta extensie."""
+    return [
+        {"name": luau_name_for(f["path"]), "source": f["source"]}
+        for f in files
+        if is_luau_path(f["path"]) and _clean_target(f.get("target")) == "server"
+    ]
 
 
 def _migrate_legacy_files(raw: list[dict]) -> list[dict]:
@@ -262,14 +282,22 @@ def _migrate_legacy_files(raw: list[dict]) -> list[dict]:
         if not isinstance(f, dict):
             continue
         if "path" in f and isinstance(f.get("path"), str):
-            out.append({"path": f["path"], "source": f.get("source", "") if isinstance(f.get("source"), str) else ""})
+            out.append({
+                "path": f["path"],
+                "source": f.get("source", "") if isinstance(f.get("source"), str) else "",
+                "target": _clean_target(f.get("target")),
+            })
             continue
         name = f.get("name")
         if not isinstance(name, str):
             continue
         last_segment = name.split("/")[-1]
         path = name if "." in last_segment else f"{name}.lua"
-        out.append({"path": path, "source": f.get("source", "") if isinstance(f.get("source"), str) else ""})
+        out.append({
+            "path": path,
+            "source": f.get("source", "") if isinstance(f.get("source"), str) else "",
+            "target": _clean_target(f.get("target")),
+        })
     return out
 
 
@@ -278,6 +306,12 @@ def _migrate_legacy_files(raw: list[dict]) -> list[dict]:
 class ProjectFileBody(BaseModel):
     path: str = Field(min_length=1, max_length=MAX_PATH_CHARS)
     source: str = Field(default="", max_length=MAX_FILE_CHARS)
+    # "server" (implicit): fisierul .lua/.luau se compileaza/executa in sandbox-ul de pe
+    # server (vezi luau_bundle) - singurul runtime care exista azi, deci si comportamentul
+    # dinainte de acest camp. "client": fisierul e salvat si vizibil in editor, dar EXCLUS
+    # explicit din executia de pe server; nu exista inca un runtime pe telefon care sa-l
+    # ruleze (vezi nota din CodeStudio.tsx) - nu pretindem ca ar exista.
+    target: str = Field(default="server", max_length=16)
 
 
 class SaveProjectBody(BaseModel):
@@ -423,7 +457,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         check_rate_limit(current["user_id"])
         try:
             if body.files is not None:
-                project_files = [{"path": f.path, "source": f.source} for f in body.files]
+                project_files = [{"path": f.path, "source": f.source, "target": _clean_target(f.target)} for f in body.files]
                 files = luau_bundle(project_files)
             elif body.source is not None:
                 files = files_from_source(body.source)
