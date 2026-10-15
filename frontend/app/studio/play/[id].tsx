@@ -16,7 +16,6 @@ import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 
-// ---------- operatii de script (redate silentios; erorile se logheaza, nu se afiseaza in UI) ----------
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
@@ -891,8 +890,14 @@ export default function PlayScreen() {
 
       <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
-          <Pressable style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]} onPress={(e: any) => e.stopPropagation?.()}>
-            <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+          <Pressable
+            style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}
+            onPress={(e: any) => e.stopPropagation?.()}
+          >
+            <ScrollView
+              style={{ maxHeight: Math.max(220, Math.round(screenH * 0.7) - spacing.lg * 2) }}
+              showsVerticalScrollIndicator={false}
+            >
               <Text style={styles.menuTitle}>Settings</Text>
 
               <Text style={styles.settingLabel}>Viziune</Text>
