@@ -642,3 +642,586 @@ export default function PlayScreen() {
     }
     return group;
   }
+  // Figura generica pentru un jucator de la distanta (vezi useRealtime.ts) - NU e avatarul
+  // lui real (culoare/haine), pentru ca protocolul de sincronizare trimite doar pozitie/
+  // rotatie/animatie, nu si configuratia corpului lui - e o limitare reala, documentata si
+  // in realtime.py. Un capsul simplu, colorat distinct, e suficient ca sa se vada "cineva e
+  // acolo si se misca", fara sa pretinda ca arata exact ca jucatorul respectiv.
+  function buildRemotePlayerMesh(): THREE.Group {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.32, 0.9, 4, 8),
+      new THREE.MeshStandardMaterial({ color: 0x4ea8ff })
+    );
+    body.position.y = 0.95;
+    group.add(body);
+    return group;
+  }
+
+  function resolveCollisions(next: THREE.Vector3, prev: THREE.Vector3): THREE.Vector3 {
+    const r = PLAYER_RADIUS;
+    const result = scratchResolvedPos.current.copy(next);
+    for (const box of solidBoxesRef.current) {
+      const withinY = result.y < box.maxY && result.y + playerHalfHeight.current * 2 > box.minY;
+      if (!withinY) continue;
+      if (result.x + r > box.minX && result.x - r < box.maxX && result.z + r > box.minZ && result.z - r < box.maxZ) {
+        const prevOutsideX = prev.x + r <= box.minX || prev.x - r >= box.maxX;
+        const prevOutsideZ = prev.z + r <= box.minZ || prev.z - r >= box.maxZ;
+        if (prevOutsideX) result.x = prev.x;
+        if (prevOutsideZ) result.z = prev.z;
+        if (!prevOutsideX && !prevOutsideZ) { result.x = prev.x; result.z = prev.z; }
+      }
+    }
+    return result;
+  }
+
+  function groundHeightAt(x: number, z: number): number {
+    let maxTop = 0;
+    for (const box of solidBoxesRef.current) {
+      if (x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ) {
+        if (box.maxY > maxTop) maxTop = box.maxY;
+      }
+    }
+    return maxTop;
+  }
+const onContextCreate = async (gl: any) => {
+    if (!game) return;
+    try {
+    glRef.current = gl;
+    const { drawingBufferWidth: w, drawingBufferHeight: h } = gl;
+    const renderer = new Renderer({ gl });
+    renderer.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+    renderer.setSize(w, h);
+    rendererRef.current = renderer as any;
+    const sky = game.scene?.sky || "#0F1012";
+    renderer.setClearColor(new THREE.Color(sky), 1);
+
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+    const camera = new THREE.PerspectiveCamera(70, w / h, 0.05, renderDistance);
+    cameraRef.current = camera;
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+    dir.position.set(5, 10, 4);
+    const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x1a1d21, 0);
+    const fill = new THREE.DirectionalLight(0xffffff, 0);
+    fill.position.set(-5, 4, -4);
+    scene.add(ambient);
+    scene.add(dir);
+    scene.add(hemi);
+    scene.add(fill);
+    lightsRef.current = { ambient, dir, hemi, fill };
+    applyGraphicsLevel(lightsRef.current, graphicsLevelRef.current);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(80, 80, 1, 1),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color(game.scene?.ground || "#1A1D21") })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    const physics = new PhysicsWorld();
+    physicsRef.current = physics;
+    physics.addGroundPlane();
+
+    const boxes: AABB[] = [];
+    const spawns: SpawnRuntime[] = [];
+    (game.scene?.objects || []).forEach((o: SceneObj) => {
+      if (o.type === SPAWN_TYPE) {
+        if (o.enabled !== false) {
+          spawns.push({
+            id: o.id,
+            kind: spawnKindOf(o),
+            initial: o.initial === true,
+            x: o.x, y: o.y, z: o.z,
+            ry: o.ry ?? 0,
+            radius: Math.max(CHECKPOINT_MIN_RADIUS, 0.6 * (o.scale ?? 1) * CHECKPOINT_RADIUS_FACTOR),
+          });
+        }
+        if (o.visible === true) scene.add(buildMesh(o));
+        if (o.solid === true) boxes.push(aabbFor(o));
+        return;
+      }
+      const isVisible = o.visible !== false;
+      if (isVisible) scene.add(buildMesh(o));
+      const isSolid = o.solid !== false;
+      if (isSolid) boxes.push(aabbFor(o));
+      physics.addStudioObject(o);
+    });
+    solidBoxesRef.current = boxes;
+
+    const spawnKindPoints = spawns.filter(p => p.kind === "spawn");
+    const resolvedInitial = spawnKindPoints.find(p => p.initial) ?? spawnKindPoints[0] ?? null;
+    const initial = resolvedInitial
+      ? { x: resolvedInitial.x, y: resolvedInitial.y, z: resolvedInitial.z, ry: resolvedInitial.ry }
+      : { x: 0, y: 0, z: 0, ry: 0 };
+    spawnPointRef.current = initial;
+    checkpointsRef.current = spawns.filter(p => p.kind === "checkpoint");
+    activeCheckpointRef.current = null;
+
+    const preserved = preservedStateRef.current;
+    if (preserved) {
+      pos.current.copy(preserved.pos);
+      velY.current = preserved.velY;
+      facingAngle.current = preserved.facingAngle;
+      camAngle.current = preserved.camAngle;
+      lastCamAngle.current = preserved.camAngle;
+      camPolar.current = preserved.camPolar;
+      lastCamPolar.current = preserved.camPolar;
+      camDist.current = preserved.camDist;
+      preservedStateRef.current = null;
+    } else {
+      pos.current.set(initial.x, initial.y, initial.z);
+      velY.current = 0;
+      groundedRef.current = true;
+      facingAngle.current = (initial.ry * Math.PI) / 180;
+    }
+
+    const playerGroup = buildPlayerVisual();
+    playerGroup.position.copy(pos.current);
+    scene.add(playerGroup);
+    playerGroupRef.current = playerGroup;
+
+    const scriptOps = scriptOpsRef.current;
+    const scriptMeshes = new Map<string, THREE.Mesh>();
+    let nextOp = 0;
+    const startedAt = Date.now();
+    let lastFrame = Date.now();
+
+    const render = () => {
+      if (!alive.current) return;
+      try {
+        const now = Date.now();
+        const dt = Math.min(0.05, (now - lastFrame) / 1000);
+        lastFrame = now;
+
+        const elapsed = (now - startedAt) / 1000;
+        while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
+          applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
+          nextOp += 1;
+        }
+
+        physics.step(dt);
+        for (const [opId, mesh] of scriptMeshes) {
+          if (physics.isAnchored(opId)) continue;
+          const t = physics.getTransform(opId);
+          if (!t) continue;
+          mesh.position.copy(t.position);
+          mesh.quaternion.copy(t.quaternion);
+          const s = mesh.userData as MeshState;
+          s.x = t.position.x; s.y = t.position.y; s.z = t.position.z;
+        }
+
+        const jv = joyVec.current;
+        const moveMag = Math.min(1, Math.hypot(jv.x, jv.y));
+        if (moveMag > 0.05) {
+          const camForward = scratchCamForward.current.set(Math.sin(camAngle.current), 0, Math.cos(camAngle.current));
+          const camRight = scratchCamRight.current.set(-camForward.z, 0, camForward.x);
+          const moveDir = scratchMoveDir.current.set(0, 0, 0)
+            .addScaledVector(camForward, -jv.y)
+            .addScaledVector(camRight, jv.x);
+          if (moveDir.lengthSq() > 0.0001) {
+            moveDir.normalize();
+            if (!shiftLockRef.current) {
+              facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
+            }
+            const prev = scratchPrevPos.current.copy(pos.current);
+            const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
+            const resolved = resolveCollisions(next, prev);
+            pos.current.set(resolved.x, pos.current.y, resolved.z);
+          }
+        }
+        if (shiftLockRef.current) {
+          facingAngle.current = camAngle.current;
+        }
+
+        const groundY = groundHeightAt(pos.current.x, pos.current.z);
+        if (jumpRequestedRef.current) {
+          jumpRequestedRef.current = false;
+          // doar daca personajul e efectiv pe sol (nu in aer) - previne dublele sarituri/zborul
+          if (groundedRef.current) {
+            velY.current = JUMP_SPEED;
+            groundedRef.current = false;
+          }
+        }
+        velY.current += GRAVITY * dt;
+        let nextY = pos.current.y + velY.current * dt;
+        if (nextY <= groundY) { nextY = groundY; velY.current = 0; groundedRef.current = true; }
+        else { groundedRef.current = false; }
+        pos.current.y = nextY;
+
+        // Multiplayer live: trimitem starea noastra (nu mai des decat SEND_INTERVAL_MS din
+        // useRealtime.ts - sendState doar retine "ultima stare", nu trimite pe retea aici)
+        // si desenam/actualizam/stergem mesh-urile celorlalti jucatori din aceeasi instanta.
+        realtimeRef.current?.sendState({
+          x: pos.current.x, y: pos.current.y, z: pos.current.z, ry: facingAngle.current,
+          anim: !groundedRef.current ? "jump" : moveMag > 0.05 ? "walk" : "idle",
+        });
+        if (realtimeRef.current && sceneRef.current) {
+          const remotes = realtimeRef.current.remotePlayers;
+          const meshes = remoteMeshesRef.current;
+          for (const [uid, state] of remotes) {
+            let mesh = meshes.get(uid);
+            if (!mesh) {
+              mesh = buildRemotePlayerMesh();
+              sceneRef.current.add(mesh);
+              meshes.set(uid, mesh);
+            }
+            mesh.position.set(state.x, state.y, state.z);
+            mesh.rotation.y = state.ry;
+          }
+          for (const [uid, mesh] of meshes) {
+            if (!remotes.has(uid)) {
+              sceneRef.current.remove(mesh);
+              mesh.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+              meshes.delete(uid);
+            }
+          }
+        }
+
+        for (const cp of checkpointsRef.current) {
+          const dx = pos.current.x - cp.x, dz = pos.current.z - cp.z;
+          if (dx * dx + dz * dz <= cp.radius * cp.radius) {
+            if (activeCheckpointRef.current?.id !== cp.id) activeCheckpointRef.current = cp;
+            break;
+          }
+        }
+
+        if (playerGroupRef.current) {
+          playerGroupRef.current.position.copy(pos.current);
+          playerGroupRef.current.rotation.y = facingAngle.current;
+          playerGroupRef.current.visible = !firstPerson.current;
+        }
+
+        firstPerson.current = camDist.current <= CAM_FIRST_PERSON_THRESHOLD;
+        const eyeY = pos.current.y + playerHalfHeight.current * 1.8;
+        if (firstPerson.current) {
+          camera.position.set(pos.current.x, eyeY, pos.current.z);
+          const pitch = camPolar.current - Math.PI / 2;
+          const lookDir = scratchLookDir.current.set(
+            Math.sin(camAngle.current) * Math.cos(pitch),
+            Math.sin(pitch),
+            Math.cos(camAngle.current) * Math.cos(pitch)
+          );
+          const lookAt = scratchLookAt.current.copy(camera.position).add(lookDir);
+          camera.lookAt(lookAt);
+        } else {
+          const target = scratchTarget.current.set(pos.current.x, eyeY, pos.current.z);
+          const r = camDist.current, th = camAngle.current, ph = camPolar.current;
+          camera.position.set(
+            target.x - r * Math.sin(ph) * Math.sin(th),
+            target.y + r * Math.cos(ph),
+            target.z - r * Math.sin(ph) * Math.cos(th)
+          );
+          camera.lookAt(target);
+        }
+
+        if (
+          !isFiniteNum(pos.current.x) || !isFiniteNum(pos.current.y) || !isFiniteNum(pos.current.z) ||
+          !isFiniteNum(camera.position.x) || !isFiniteNum(camera.position.y) || !isFiniteNum(camera.position.z) ||
+          !isFiniteNum(camAngle.current) || !isFiniteNum(camPolar.current) || !isFiniteNum(camDist.current)
+        ) {
+          throw new Error(
+            `Pozitie invalida (NaN/Infinity): player=(${pos.current.x}, ${pos.current.y}, ${pos.current.z}) ` +
+            `camera=(${camera.position.x}, ${camera.position.y}, ${camera.position.z}) ` +
+            `camAngle=${camAngle.current} camPolar=${camPolar.current} camDist=${camDist.current} ` +
+            `velY=${velY.current} dt=${dt}`
+          );
+        }
+
+        renderer.render(scene, camera);
+        gl.endFrameEXP();
+      } catch (e: any) {
+        console.log("[play] render loop crashed", e);
+        if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+        return;
+      }
+      rafId.current = requestAnimationFrame(render);
+    };
+    render();
+    setReady(true);
+    } catch (e: any) {
+      console.log("[play] onContextCreate crashed", e);
+      setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  };
+
+  function doRespawn() {
+    const target = activeCheckpointRef.current ?? spawnPointRef.current;
+    pos.current.set(target.x, target.y, target.z);
+    velY.current = 0;
+    groundedRef.current = true;
+    jumpRequestedRef.current = false;
+    facingAngle.current = (target.ry * Math.PI) / 180;
+    setShowMenu(false);
+  }
+
+  function doJump() {
+    // un singur "flag" per apasare: onPressIn se declanseaza o singura data la atingere,
+    // deci tinerea apasata a butonului NU repeta saritura (vezi bucla de gravitatie, care
+    // consuma si reseteaza acest flag o singura data pe frame).
+    jumpRequestedRef.current = true;
+  }
+  async function doLeave() {
+    const inst = instanceRef.current;
+    if (inst) api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: inst.instance_id }) }).catch(() => {});
+    router.replace({ pathname: "/game/[id]", params: { id } } as any);
+  }
+
+  function doRetryAfterCrash() {
+    setCrashError(null);
+    physicsRef.current?.dispose();
+    physicsRef.current = null;
+    disposeSceneResources();
+    setReady(false);
+    setGlMountKey(k => k + 1);
+  }
+
+  useEffect(() => {
+    try {
+      const r = rendererRef.current as any;
+      const cam = cameraRef.current;
+      if (!r) return;
+      r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+      if (cam) {
+        const size = new THREE.Vector2();
+        r.getSize(size);
+        if (size.x > 0 && size.y > 0) {
+          cam.aspect = size.x / size.y;
+          cam.updateProjectionMatrix();
+        }
+      }
+    } catch (e: any) {
+      console.log("[play] quality effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [quality]);
+  useEffect(() => {
+    try {
+      if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
+    } catch (e: any) {
+      console.log("[play] graphicsLevel effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [graphicsLevel]);
+  useEffect(() => {
+    try {
+      const cam = cameraRef.current;
+      if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
+    } catch (e: any) {
+      console.log("[play] renderDistance effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [renderDistance]);
+
+  const isLandscape = screenW > screenH;
+  // Dimensiune adaptiva: proportionala cu latura mica a ecranului, limitata intre 60-84px,
+  // ca sa ramana usor de apasat cu degetul mare atat pe telefoane mici, cat si pe cele mari/tablete.
+  const jumpBtnSize = Math.max(60, Math.min(84, Math.round(Math.min(screenW, screenH) * 0.17)));
+
+  return (
+    <View style={styles.root}>
+      {Platform.OS === "web" || !canStartGL ? (
+        <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
+          <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
+          <Text style={styles.webText}>{game?.title || ""}</Text>
+        </View>
+      ) : (
+        <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+      )}
+
+      {ready && Platform.OS !== "web" ? (
+        <View
+          style={StyleSheet.absoluteFillObject}
+          onStartShouldSetResponder={() => true}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={onRootResponderGrant}
+          onResponderMove={onRootResponderMove}
+          onResponderRelease={onRootResponderEnd}
+          onResponderTerminate={onRootResponderEnd}
+          onResponderTerminationRequest={() => false}
+        >
+          <View
+            style={styles.joystickZone}
+            pointerEvents="none"
+            onLayout={e => {
+              const { x, y, width, height } = e.nativeEvent.layout;
+              joyZoneLayout.current = { x, y, w: width, h: height };
+            }}
+          >
+            {joyVisible ? (
+              <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
+                <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
+              </View>
+            ) : (
+              <View style={styles.joyHint} pointerEvents="none">
+                <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
+              </View>
+            )}
+          </View>
+        </View>
+      ) : null}
+
+      <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
+        <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
+          <Text style={styles.aBtnText}>A</Text>
+        </Pressable>
+      </SafeAreaView>
+
+      {ready && Platform.OS !== "web" ? (
+        <SafeAreaView edges={["bottom", "right"]} style={styles.jumpBtnWrap} pointerEvents="box-none">
+          <Pressable
+            testID="play-jump-btn"
+            onPressIn={doJump}
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.jumpBtn,
+              { width: jumpBtnSize, height: jumpBtnSize, borderRadius: jumpBtnSize / 2 },
+              pressed && styles.jumpBtnPressed,
+            ]}
+          >
+            <MaterialCommunityIcons name="arrow-up-bold" size={Math.round(jumpBtnSize * 0.46)} color={colors.brand} />
+          </Pressable>
+        </SafeAreaView>
+      ) : null}
+
+      <Modal visible={!!crashError} transparent animationType="fade" onRequestClose={() => {}}>
+        <View style={styles.menuBackdrop}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
+            <MaterialCommunityIcons name="alert-circle-outline" size={28} color={colors.error} style={{ marginBottom: 10 }} />
+            <Text style={styles.menuTitle}>Jocul s-a oprit cu o eroare</Text>
+            <ScrollView style={{ maxHeight: 160 }}>
+              <Text style={styles.crashMessage}>{crashError}</Text>
+            </ScrollView>
+            <Pressable testID="play-crash-retry" onPress={doRetryAfterCrash} style={styles.menuCloseBtn}>
+              <Text style={styles.menuCloseBtnText}>Retry</Text>
+            </Pressable>
+            <Pressable testID="play-crash-leave" onPress={doLeave} style={[styles.menuRow, { justifyContent: "center", marginTop: 4 }]}>
+              <MaterialCommunityIcons name="exit-run" size={18} color={colors.error} />
+              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
+        <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
+            <Text style={styles.menuTitle}>{game?.title}</Text>
+            <Pressable testID="play-menu-respawn" onPress={doRespawn} style={styles.menuRow}>
+              <MaterialCommunityIcons name="restart" size={20} color={colors.brand} />
+              <Text style={styles.menuRowText}>Respawn</Text>
+            </Pressable>
+            <Pressable testID="play-menu-settings" onPress={() => { setShowMenu(false); setShowSettings(true); }} style={styles.menuRow}>
+              <MaterialCommunityIcons name="cog-outline" size={20} color={colors.brand} />
+              <Text style={styles.menuRowText}>Settings</Text>
+            </Pressable>
+            <Pressable testID="play-menu-leave" onPress={doLeave} style={styles.menuRow}>
+              <MaterialCommunityIcons name="exit-run" size={20} color={colors.error} />
+              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
+        <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
+          <Pressable
+            style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}
+            onPress={(e: any) => e.stopPropagation?.()}
+          >
+            <ScrollView
+              style={{ maxHeight: Math.max(220, Math.round(screenH * 0.7) - spacing.lg * 2) }}
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={styles.menuTitle}>Settings</Text>
+
+              <Text style={styles.settingLabel}>Viziune</Text>
+              <View style={styles.qualityRow}>
+                {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
+                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
+                    <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
+              <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
+
+              <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
+              <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
+
+              <Text style={styles.settingLabel}>Shift Lock</Text>
+              <Pressable
+                testID="play-shiftlock-toggle"
+                onPress={() => updateSetting("shift_lock", !shiftLock)}
+                style={styles.shiftLockRow}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
+                  <Text style={styles.shiftLockDesc}>
+                    {shiftLock
+                      ? "Avatarul privește mereu spre cameră."
+                      : "Avatarul privește spre direcția de mers."}
+                  </Text>
+                </View>
+                <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
+                  <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
+                </View>
+              </Pressable>
+
+              <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
+                <Text style={styles.menuCloseBtnText}>Close</Text>
+              </Pressable>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.surface },
+  webFallback: { alignItems: "center", justifyContent: "center", gap: 12 },
+  webText: { color: colors.onSurface, fontWeight: "800", fontSize: 18 },
+  joystickZone: { position: "absolute", left: 0, bottom: 0, width: 180, height: 180 },
+  joyBase: { position: "absolute", width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(255,255,255,0.12)", borderWidth: 2, borderColor: "rgba(255,255,255,0.35)", alignItems: "center", justifyContent: "center" },
+  joyKnob: { width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(204,255,0,0.85)" },
+  joyHint: { position: "absolute", left: 24, bottom: 24, width: 44, height: 44, borderRadius: 22, borderWidth: 2, borderColor: "rgba(255,255,255,0.25)", alignItems: "center", justifyContent: "center" },
+  aBtnWrap: { position: "absolute", top: 0, left: 0, padding: spacing.md },
+  aBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
+  aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
+  // Butonul Jump: coltul din dreapta-jos, deasupra zonei de camera/joystick, fara sa se suprapuna cu ele
+  // (joystick-ul e in coltul opus, stanga-jos). Stil asemanator cu Roblox mobil: cerc semitransparent.
+  jumpBtnWrap: { position: "absolute", bottom: 0, right: 0, padding: spacing.lg },
+  jumpBtn: { backgroundColor: "rgba(255,255,255,0.14)", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", alignItems: "center", justifyContent: "center" },
+  jumpBtnPressed: { backgroundColor: "rgba(204,255,0,0.3)", borderColor: "rgba(204,255,0,0.85)" },
+  menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  menuBox: { width: "100%", maxWidth: 340, maxHeight: "85%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
+  menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
+  crashMessage: { color: colors.onSurface2, fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginBottom: 6 },
+  menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
+  menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
+  settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
+  qualityRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  levelRow: { flexDirection: "row", gap: 5 },
+  levelChip: { flex: 1, height: 34, borderRadius: 8, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  levelChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  levelChipCurrent: { backgroundColor: colors.brand },
+  levelChipText: { color: colors.onSurface2, fontWeight: "800", fontSize: 11 },
+  qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  qualityChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
+  shiftLockRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
+  shiftLockTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
+  shiftLockDesc: { color: colors.onSurface3, fontSize: 11, marginTop: 2 },
+  switchTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.15)", padding: 3, justifyContent: "center" },
+  switchTrackOn: { backgroundColor: colors.brand },
+  switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff", transform: [{ translateX: 0 }] },
+  switchThumbOn: { transform: [{ translateX: 18 }] },
+  menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
+  menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
+});
