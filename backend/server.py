@@ -52,6 +52,13 @@ except Exception as exc:  # noqa: BLE001
     make_sandbox_router = None
     log.warning("Luau sandbox disabled: %s", exc)
 
+# Sincronizarea live intre jucatori (WebSocket) - vezi realtime.py pentru protocol si limitari.
+try:
+    from realtime import make_realtime_router
+except Exception as exc:  # noqa: BLE001
+    make_realtime_router = None
+    log.warning("Realtime multiplayer disabled: %s", exc)
+
 # Magazinul de obiecte de joc (Modele + Scripturi) e la fel de optional.
 try:
     from astran_sandbox.shop_routes import make_shop_router
@@ -271,31 +278,36 @@ class HeartbeatBody(BaseModel):
     instance_id: str
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-
+async def resolve_user_from_token(token: str) -> Optional[dict]:
+    """Logica reala de autentificare (sesiune sau JWT), extrasa din get_current_user ca sa
+    poata fi refolosita si de WebSocket-ul din realtime.py - acolo nu exista header
+    "Authorization" (clientul WebSocket din React Native nu poate seta header-e custom la
+    handshake), deci token-ul vine ca query param si trebuie decodat manual, fara sa
+    duplicam regulile de validare intr-un loc separat."""
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if sess:
         exp = sess.get("expires_at")
         if isinstance(exp, datetime) and exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
         if exp and exp < now_utc():
-            raise HTTPException(status_code=401, detail="Session expired")
-        user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0, "password_hash": 0})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
+            return None
+        return await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0, "password_hash": 0})
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        user = await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0, "password_hash": 0})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
+        return await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0, "password_hash": 0})
     except jwt.PyJWTError:
+        return None
+
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    user = await resolve_user_from_token(token)
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
+    return user
 
 
 @app.on_event("startup")
@@ -753,8 +765,6 @@ async def delete_game(game_id: str, current=Depends(get_current_user)):
     await db.game_collaborators.delete_many({"game_id": game_id})
     await db.game_testers.delete_many({"game_id": game_id})
     return {"ok": True}
-
-
 @api.get("/games/discover")
 async def discover(section: str = "for_you", current=Depends(get_current_user)):
     age = current.get("age_category", "under_18")
@@ -1491,6 +1501,12 @@ async def languages():
 # Sandbox Luau: /api/sandbox/run si /api/sandbox/games/{game_id}/run
 if make_sandbox_router is not None:
     api.include_router(make_sandbox_router(get_current_user, db))
+
+# Multiplayer live (WebSocket): /ws/games/{game_id}/instances/{instance_id} - vezi realtime.py.
+# Montat direct pe `app`, NU pe `api` (fara prefixul /api) - WebSocket-urile sunt oricum o
+# ruta separata de REST, nu are rost sa poarte acelasi prefix ca restul API-ului HTTP.
+if make_realtime_router is not None:
+    app.include_router(make_realtime_router(resolve_user_from_token, db))
 
 # Shop de obiecte de joc (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
 if make_shop_router is not None:
