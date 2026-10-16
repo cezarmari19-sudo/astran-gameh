@@ -50,6 +50,18 @@ export async function api<T = any>(
   return data as T;
 }
 
+// Construieste link-ul catre WebSocket-ul de multiplayer live (vezi backend/realtime.py).
+// Montat direct pe `app` (NU sub /api, vezi server.py) - de-aia `path` aici e absolut
+// ("/ws/games/..."), nu trece prin acelasi prefix ca restul lui `api()` de mai sus.
+// Token-ul merge ca query param: un WebSocket din React Native nu poate seta header-ul
+// Authorization la handshake, asa ca serverul il decodeaza manual (vezi resolve_user_from_token).
+export async function wsUrl(path: string): Promise<string> {
+  const token = await getToken();
+  const wsBase = BASE.replace(/^http/i, "ws"); // http(s):// -> ws(s)://
+  const sep = path.includes("?") ? "&" : "?";
+  return `${wsBase}${path}${sep}token=${encodeURIComponent(token ?? "")}`;
+}
+
 export const authApi = {
   register: (body: any) => api("/auth/register", { method: "POST", body: JSON.stringify(body) }),
   login: (body: any) => api("/auth/login", { method: "POST", body: JSON.stringify(body) }),
