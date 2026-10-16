@@ -14,8 +14,8 @@ import { api } from "@/src/api/client";
 import FileExplorer from "./FileExplorer";
 import CodeEditor from "./CodeEditor";
 import {
-  ProjectState, ProjectFile, nameOf, parentPath, joinPath, rewritePrefix,
-  isSameOrInside, movedInto, ancestorsOf, isRunnable,
+  ProjectState, ProjectFile, FileTarget, nameOf, parentPath, joinPath, rewritePrefix,
+  isSameOrInside, movedInto, ancestorsOf, isRunnable, targetOf,
 } from "@/src/studio/projectTree";
 
 type RunLine = { kind: "log" | "error"; text: string };
@@ -172,6 +172,14 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
     openTab(candidate);
   }
 
+  // Server/Client: doar pentru fisierele .lua/.luau conteaza (vezi isRunnable) - restul
+  // fisierelor (README, etc.) nu ajung oricum in sandbox, indiferent de target.
+  function handleSetTarget(path: string, target: FileTarget) {
+    const next: ProjectFile[] = project.files.map(f => (f.path === path ? { ...f, target } : f));
+    updateProject({ ...project, files: next });
+    setDirtyPaths(prev => new Set(prev).add(path));
+  }
+
   // ---------- Run: testeaza doar subsetul .lua/.luau din proiectul curent ----------
 
   async function runProject() {
@@ -284,6 +292,32 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
                     </Text>
                   </React.Fragment>
                 ))}
+                {activeFile && isRunnable(activeFile.path) ? (
+                  <View style={styles.targetRow}>
+                    <Pressable
+                      testID="cs-target-server"
+                      onPress={() => handleSetTarget(activeFile.path, "server")}
+                      style={[styles.targetChip, targetOf(activeFile) === "server" && styles.targetChipActiveServer]}
+                    >
+                      <Text style={[styles.targetChipText, targetOf(activeFile) === "server" && styles.targetChipTextActive]}>Server</Text>
+                    </Pressable>
+                    <Pressable
+                      testID="cs-target-client"
+                      onPress={() => handleSetTarget(activeFile.path, "client")}
+                      style={[styles.targetChip, targetOf(activeFile) === "client" && styles.targetChipActiveClient]}
+                    >
+                      <Text style={[styles.targetChipText, targetOf(activeFile) === "client" && styles.targetChipTextActive]}>Client</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+            {activeFile && isRunnable(activeFile.path) && targetOf(activeFile) === "client" ? (
+              <View style={styles.targetHint}>
+                <MaterialCommunityIcons name="information-outline" size={13} color={colors.onSurface3} />
+                <Text style={styles.targetHintText}>
+                  Marcat Client: exclus din rularea de pe server. Nu ruleaza inca pe telefon (runtime-ul de client nu exista inca) - e salvat ca pregatire pentru el.
+                </Text>
               </View>
             ) : null}
 
@@ -363,6 +397,15 @@ const styles = StyleSheet.create({
   breadcrumbBar: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.surface2, borderBottomWidth: 1, borderColor: colors.border },
   breadcrumbText: { color: colors.onSurface3, fontSize: 10.5, fontFamily: "monospace" },
   breadcrumbSep: { color: colors.onSurface3, fontSize: 10.5, marginHorizontal: 1 },
+  // Toggle Server/Client: doar pentru fisierele .lua/.luau (vezi isRunnable), langa breadcrumbs.
+  targetRow: { flexDirection: "row", marginLeft: "auto", gap: 4 },
+  targetChip: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  targetChipActiveServer: { backgroundColor: colors.brandTint, borderColor: colors.brand },
+  targetChipActiveClient: { backgroundColor: "rgba(255,180,0,0.18)", borderColor: "#FFB400" },
+  targetChipText: { color: colors.onSurface3, fontSize: 10, fontWeight: "800" },
+  targetChipTextActive: { color: colors.onSurface },
+  targetHint: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: "rgba(255,180,0,0.08)", borderBottomWidth: 1, borderColor: colors.border },
+  targetHintText: { flex: 1, color: colors.onSurface3, fontSize: 10.5, lineHeight: 14 },
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: spacing.xl },
   emptyStateText: { color: colors.onSurface3, fontSize: 13, textAlign: "center" },
   console: { borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface2, padding: spacing.sm },
@@ -374,7 +417,7 @@ const styles = StyleSheet.create({
   sheetTitle: { color: colors.onSurface, fontSize: 15, fontWeight: "800", marginBottom: 8 },
   hintSmall: { color: colors.onSurface3, fontSize: 12, marginBottom: 8 },
   dialogRow: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: spacing.md },
-  ghostBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center" },
+  ghostBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: radius.pill, alignItems: "center" },
   ghostBtnText: { color: colors.onSurface2, fontWeight: "700", fontSize: 13 },
   primaryBtn: { backgroundColor: colors.brand, paddingHorizontal: 16, paddingVertical: 10, borderRadius: radius.pill, alignItems: "center" },
   primaryBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
