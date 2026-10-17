@@ -859,7 +859,9 @@ const onContextCreate = async (gl: any) => {
           anim: !groundedRef.current ? "jump" : moveMag > 0.05 ? "walk" : "idle",
         });
         if (realtimeRef.current && sceneRef.current) {
-          const remotes = realtimeRef.current.remotePlayers;
+          // Pozitii INTERPOLATE (vezi getRenderState in useRealtime.ts), nu brute - altfel
+          // ceilalti jucatori ar sari vizibil intre pachete, la fiecare ~70ms+jitter.
+          const remotes = realtimeRef.current.getRenderState(now);
           const meshes = remoteMeshesRef.current;
           for (const [uid, state] of remotes) {
             let mesh = meshes.get(uid);
