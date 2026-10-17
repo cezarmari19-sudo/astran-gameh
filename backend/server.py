@@ -54,9 +54,10 @@ except Exception as exc:  # noqa: BLE001
 
 # Sincronizarea live intre jucatori (WebSocket) - vezi realtime.py pentru protocol si limitari.
 try:
-    from realtime import make_realtime_router
+    from realtime import make_realtime_router, maybe_connect_redis
 except Exception as exc:  # noqa: BLE001
     make_realtime_router = None
+    maybe_connect_redis = None
     log.warning("Realtime multiplayer disabled: %s", exc)
 
 # Magazinul de obiecte de joc (Modele + Scripturi) e la fel de optional.
@@ -312,6 +313,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
 
 @app.on_event("startup")
 async def startup():
+    if maybe_connect_redis is not None:
+        await maybe_connect_redis()
     await db.users.create_index("user_id", unique=True)
     await db.users.create_index("email", unique=True, sparse=True)
     await db.users.create_index("username", unique=True)
