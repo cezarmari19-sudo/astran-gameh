@@ -32,13 +32,17 @@ export type RemotePlayerState = {
 type Sample = { x: number; y: number; z: number; ry: number; anim?: string; t: number };
 
 export type RenderState = { x: number; y: number; z: number; ry: number; anim?: string };
+// Alias separat, NU inline - un generic scris direct ca tip de retur al unei functii
+// (`function f(): Map<string, X>`) a blocat parser-ul Babel folosit de Metro la build-ul
+// EAS (desi e sintaxa TS perfect valida, acceptata de tsc) - vezi getRenderState() mai jos.
+export type RenderStateMap = Map<string, RenderState>;
 
 export type RealtimeHandle = {
   remotePlayers: Map<string, RemotePlayerState>; // starea bruta, "ultima primita" - pastrata pentru roster/UI, NU pentru desenat (vezi getRenderState)
   // Pozitiile INTERPOLATE, gata de desenat, pentru momentul `now` dat (de obicei Date.now()
   // din bucla de randare). Recalculeaza putin la fiecare apel (cateva operatii per jucator) -
   // apelabil in siguranta o data pe frame.
-  getRenderState: (now: number) => Map<string, RenderState>;
+  getRenderState: (now: number) => RenderStateMap;
   // Nu trimite imediat pe retea - doar retine "ultima stare cunoscuta", trimisa la
   // urmatorul tick al timer-ului intern (vezi SEND_INTERVAL_MS). Apelabil in fiecare
   // frame de randare, fara sa coste un send() de fiecare data.
@@ -117,4 +121,97 @@ export function connectRealtime(
     onRosterChange?.();
   }
 
-  function getRenderState(now: number): Map
+  function getRenderState(now: number): RenderStateMap {
+    const renderTime = now - RENDER_DELAY_MS;
+    const out: RenderStateMap = new Map(); // tipul vine din adnotarea variabilei, nu dintr-un generic inline pe new Map() - vezi nota de mai sus
+    for (const [user_id, h] of history) {
+      const { prev: p, next: n } = h;
+      if (n.t <= p.t || renderTime <= p.t) {
+        out.set(user_id, { x: p.x, y: p.y, z: p.z, ry: p.ry, anim: p.anim });
+        continue;
+      }
+      if (renderTime >= n.t) {
+        // n e cel mai nou punct cunoscut, dar "acum" a trecut deja de el - nu extrapolam
+        // (ar putea "goni" in directia gresita daca jucatorul s-a oprit brusc); ramanem la n.
+        out.set(user_id, { x: n.x, y: n.y, z: n.z, ry: n.ry, anim: n.anim });
+        continue;
+      }
+      const t = (renderTime - p.t) / (n.t - p.t); // intotdeauna in [0,1] aici
+      out.set(user_id, {
+        x: lerp(p.x, n.x, t),
+        y: lerp(p.y, n.y, t),
+        z: lerp(p.z, n.z, t),
+        ry: lerpAngle(p.ry, n.ry, t),
+        anim: n.anim,
+      });
+    }
+    return out;
+  }
+
+  async function connect() {
+    if (closedByUs) return;
+    try {
+      const url = await wsUrl(`/ws/games/${gameId}/instances/${instanceId}`);
+      const socket = new WebSocket(url);
+      ws = socket;
+      socket.onopen = () => { isConnected = true; };
+      socket.onmessage = (ev: any) => {
+        let msg: any;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (!msg || typeof msg !== "object") return;
+        if (msg.t === "roster" && Array.isArray(msg.players)) {
+          for (const p of msg.players) {
+            if (p && typeof p.user_id === "string") applyState(p.user_id, p);
+          }
+        } else if (msg.t === "state" && typeof msg.user_id === "string") {
+          applyState(msg.user_id, msg);
+        } else if (msg.t === "join") {
+          onRosterChange?.(); // fara stare inca - va aparea la primul "state" de la el
+        } else if (msg.t === "leave" && typeof msg.user_id === "string") {
+          remotePlayers.delete(msg.user_id);
+          history.delete(msg.user_id);
+          onRosterChange?.();
+        }
+      };
+      socket.onclose = () => {
+        isConnected = false;
+        // o cadere scurta de retea nu trebuie sa scoata jucatorul definitiv din sincronizare -
+        // reconectare automata, doar daca noi (clientul) n-am inchis-o intentionat (vezi close() mai jos)
+        if (!closedByUs) setTimeout(connect, RECONNECT_DELAY_MS);
+      };
+      socket.onerror = () => {
+        try { socket.close(); } catch {}
+      };
+    } catch {
+      if (!closedByUs) setTimeout(connect, RECONNECT_DELAY_MS);
+    }
+  }
+  connect();
+
+  const sendTimer = setInterval(() => {
+    if (!pendingState || !ws || ws.readyState !== WebSocket.OPEN) return;
+    try { ws.send(JSON.stringify({ t: "state", ...pendingState })); } catch {}
+  }, SEND_INTERVAL_MS);
+
+  const staleTimer = setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+    for (const [uid, p] of remotePlayers) {
+      if (now - p.updatedAt > STALE_AFTER_MS) { remotePlayers.delete(uid); history.delete(uid); changed = true; }
+    }
+    if (changed) onRosterChange?.();
+  }, STALE_CHECK_INTERVAL_MS);
+
+  return {
+    remotePlayers,
+    getRenderState,
+    sendState: (s) => { pendingState = s; },
+    connected: () => isConnected,
+    close: () => {
+      closedByUs = true;
+      clearInterval(sendTimer);
+      clearInterval(staleTimer);
+      try { ws?.close(); } catch {}
+    },
+  };
+}
