@@ -347,6 +347,7 @@ export default function StudioEditor() {
   // Modelele publicate ale utilizatorului, pentru selectorul de Player Character
   const [myModels, setMyModels] = useState<ModelPick[]>([]);
   const [showCharacterPicker, setShowCharacterPicker] = useState(false);
+
   const meshMap = useRef<Record<string, THREE.Mesh>>({});
   const sceneRef = useRef<THREE.Scene | null>(null);
   const groundRef = useRef<THREE.Mesh | null>(null);
@@ -668,6 +669,7 @@ export default function StudioEditor() {
     } catch (e: any) { setErr(e.message); setShowCode(false); setShowMeta(true); }
     finally { setBusy(false); }
   }
+
   async function del() {
     if (!editingId) return;
     setBusy(true);
@@ -942,6 +944,7 @@ export default function StudioEditor() {
         <Text style={styles.title} numberOfLines={1}>{saved ? "Salvat ✓" : (title || t("create_game"))}</Text>
         <Pressable onPress={() => setShowMeta(true)} testID="editor-meta"><MaterialCommunityIcons name="cog" size={22} color={colors.onSurface} /></Pressable>
       </View>
+
       <View style={styles.canvas}>
         {Platform.OS === "web" ? (
           <View style={[StyleSheet.absoluteFillObject, { alignItems: "center", justifyContent: "center" }]}>
@@ -1207,6 +1210,7 @@ export default function StudioEditor() {
         saving={busy}
         saved={saved}
       />
+
       <AssetPicker
         visible={showAssets}
         assetIds={assetIds}
