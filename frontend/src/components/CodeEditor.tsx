@@ -35,67 +35,67 @@ type Props = {
 // silentios pe "fara highlighting" daca nu reuseste (extensie exotica, CDN indisponibil etc).
 const LANG_IMPORTS: Record<LangId, string> = {
   lua: `
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { lua } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/lua?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { lua } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/lua");
     return StreamLanguage.define(lua);
   `,
   python: `
-    const { python } = await import("https://esm.sh/@codemirror/lang-python@6?bundle");
+    const { python } = await import("https://esm.sh/@codemirror/lang-python@6");
     return python();
   `,
   javascript: `
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: false, typescript: false });
   `,
   jsx: `
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: true, typescript: false });
   `,
   typescript: `
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: false, typescript: true });
   `,
   tsx: `
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: true, typescript: true });
   `,
   cpp: `
-    const { cpp } = await import("https://esm.sh/@codemirror/lang-cpp@6?bundle");
+    const { cpp } = await import("https://esm.sh/@codemirror/lang-cpp@6");
     return cpp();
   `,
   csharp: `
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { csharp } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { csharp } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike");
     return StreamLanguage.define(csharp);
   `,
   kotlin: `
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { kotlin } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { kotlin } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike");
     return StreamLanguage.define(kotlin);
   `,
   json: `
-    const { json } = await import("https://esm.sh/@codemirror/lang-json@6?bundle");
+    const { json } = await import("https://esm.sh/@codemirror/lang-json@6");
     return json();
   `,
   markdown: `
-    const { markdown } = await import("https://esm.sh/@codemirror/lang-markdown@6?bundle");
+    const { markdown } = await import("https://esm.sh/@codemirror/lang-markdown@6");
     return markdown();
   `,
   html: `
-    const { html } = await import("https://esm.sh/@codemirror/lang-html@6?bundle");
+    const { html } = await import("https://esm.sh/@codemirror/lang-html@6");
     return html();
   `,
   css: `
-    const { css } = await import("https://esm.sh/@codemirror/lang-css@6?bundle");
+    const { css } = await import("https://esm.sh/@codemirror/lang-css@6");
     return css();
   `,
   yaml: `
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { yaml } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/yaml?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { yaml } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/yaml");
     return StreamLanguage.define(yaml);
   `,
   xml: `
-    const { xml } = await import("https://esm.sh/@codemirror/lang-xml@6?bundle");
+    const { xml } = await import("https://esm.sh/@codemirror/lang-xml@6");
     return xml();
   `,
   plain: `return null;`,
@@ -153,67 +153,67 @@ function buildHtml(bg: string, fg: string, gutterBg: string, gutterFg: string, s
       let ext = null;
       switch (langId) {
         case "lua": { 
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { lua } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/lua?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { lua } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/lua");
     return StreamLanguage.define(lua);
    }
         case "python": { 
-    const { python } = await import("https://esm.sh/@codemirror/lang-python@6?bundle");
+    const { python } = await import("https://esm.sh/@codemirror/lang-python@6");
     return python();
    }
         case "javascript": { 
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: false, typescript: false });
    }
         case "jsx": { 
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: true, typescript: false });
    }
         case "typescript": { 
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: false, typescript: true });
    }
         case "tsx": { 
-    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6?bundle");
+    const { javascript } = await import("https://esm.sh/@codemirror/lang-javascript@6");
     return javascript({ jsx: true, typescript: true });
    }
         case "cpp": { 
-    const { cpp } = await import("https://esm.sh/@codemirror/lang-cpp@6?bundle");
+    const { cpp } = await import("https://esm.sh/@codemirror/lang-cpp@6");
     return cpp();
    }
         case "csharp": { 
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { csharp } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { csharp } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike");
     return StreamLanguage.define(csharp);
    }
         case "kotlin": { 
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { kotlin } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { kotlin } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/clike");
     return StreamLanguage.define(kotlin);
    }
         case "json": { 
-    const { json } = await import("https://esm.sh/@codemirror/lang-json@6?bundle");
+    const { json } = await import("https://esm.sh/@codemirror/lang-json@6");
     return json();
    }
         case "markdown": { 
-    const { markdown } = await import("https://esm.sh/@codemirror/lang-markdown@6?bundle");
+    const { markdown } = await import("https://esm.sh/@codemirror/lang-markdown@6");
     return markdown();
    }
         case "html": { 
-    const { html } = await import("https://esm.sh/@codemirror/lang-html@6?bundle");
+    const { html } = await import("https://esm.sh/@codemirror/lang-html@6");
     return html();
    }
         case "css": { 
-    const { css } = await import("https://esm.sh/@codemirror/lang-css@6?bundle");
+    const { css } = await import("https://esm.sh/@codemirror/lang-css@6");
     return css();
    }
         case "yaml": { 
-    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6?bundle");
-    const { yaml } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/yaml?bundle");
+    const { StreamLanguage } = await import("https://esm.sh/@codemirror/language@6");
+    const { yaml } = await import("https://esm.sh/@codemirror/legacy-modes@6/mode/yaml");
     return StreamLanguage.define(yaml);
    }
         case "xml": { 
-    const { xml } = await import("https://esm.sh/@codemirror/lang-xml@6?bundle");
+    const { xml } = await import("https://esm.sh/@codemirror/lang-xml@6");
     return xml();
    }
         case "plain": { return null; }
@@ -235,14 +235,14 @@ function buildHtml(bg: string, fg: string, gutterBg: string, gutterFg: string, s
     // care motorul WebView nu declanseaza deloc evenimentul "unhandledrejection".
     try {
       const { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection } =
-        await import("https://esm.sh/@codemirror/view@6?bundle");
-      const { EditorState, Compartment } = await import("https://esm.sh/@codemirror/state@6?bundle");
-      const { defaultKeymap, history, historyKeymap, indentWithTab } = await import("https://esm.sh/@codemirror/commands@6?bundle");
-      const { search, searchKeymap, openSearchPanel } = await import("https://esm.sh/@codemirror/search@6?bundle");
+        await import("https://esm.sh/@codemirror/view@6");
+      const { EditorState, Compartment } = await import("https://esm.sh/@codemirror/state@6");
+      const { defaultKeymap, history, historyKeymap, indentWithTab } = await import("https://esm.sh/@codemirror/commands@6");
+      const { search, searchKeymap, openSearchPanel } = await import("https://esm.sh/@codemirror/search@6");
       const { indentOnInput, bracketMatching, syntaxHighlighting, defaultHighlightStyle, foldGutter, foldKeymap } =
-        await import("https://esm.sh/@codemirror/language@6?bundle");
-      const { closeBrackets, closeBracketsKeymap } = await import("https://esm.sh/@codemirror/autocomplete@6?bundle");
-      const { oneDark } = await import("https://esm.sh/@codemirror/theme-one-dark@6?bundle");
+        await import("https://esm.sh/@codemirror/language@6");
+      const { closeBrackets, closeBracketsKeymap } = await import("https://esm.sh/@codemirror/autocomplete@6");
+      const { oneDark } = await import("https://esm.sh/@codemirror/theme-one-dark@6");
 
       window.__cm = { EditorView, EditorState, Compartment };
       const langCompartment = new Compartment();
@@ -317,7 +317,7 @@ function buildHtml(bg: string, fg: string, gutterBg: string, gutterFg: string, s
       applyLoad(msg.path, msg.source, msg.language);
     } else if (msg.type === "find") {
       if (window.__view) {
-        import("https://esm.sh/@codemirror/search@6?bundle").then(({ openSearchPanel }) => {
+        import("https://esm.sh/@codemirror/search@6").then(({ openSearchPanel }) => {
           openSearchPanel(window.__view);
         });
       }
