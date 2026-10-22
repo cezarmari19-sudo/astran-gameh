@@ -33,17 +33,6 @@ type ModelPick = { model_id: string; name: string; part_count: number };
 
 const EMPTY_PROJECT: ProjectState = { files: [], folders: [] };
 
-// Scaffold-ul implicit cu care incepe ORICE joc nou (fizica, anti-cheat, reguli de
-// lume, randare) - IDENTIC, caracter cu caracter, cu backend/server.py:_default_game_scripts().
-// BUG REPARAT: inainte, un joc nou pornea cu `project = EMPTY_PROJECT` (fisiere: [])
-// pana la primul Save - Code Editor-ul parea gol, desi backend-ul avea deja scaffold-ul
-// (inserat la POST /games). Si mai grav: daca userul atingea Code Editor-ul inainte de
-// primul Save (projectDirty = true), PUT-ul de mai jos din save() suprascria orbeste acel
-// scaffold cu proiectul local gol, stergandu-l definitiv. Solutia: proiectul local pentru
-// UN JOC NOU porneste cu ACELASI continut ca scaffold-ul din backend, nu gol - astfel
-// Code Editor-ul il arata de la inceput (si il poti edita), iar daca userul nu-l modifica
-// deloc, save() nu mai trimite niciun PUT (projectDirty ramane false), deci nu mai exista
-// nicio fereastra in care scaffold-ul backend-ului sa fie suprascris cu ceva gol.
 // Scaffold-ul implicit cu care incepe ORICE joc nou (main.lua, fizica, anti-cheat,
 // reguli de lume, randare) - IDENTIC, caracter cu caracter, cu backend/server.py:
 // _default_game_scripts(). main.lua e punctul de intrare cerut de sandbox (ENTRY_NAME
@@ -322,3 +311,245 @@ type MoveKey = "forward" | "back" | "left" | "right" | "up" | "down";
 
 // Pas de ajustare rapida pentru butoanele +/- din panoul de Baseplate.
 const GROUND_STEP = 10;
+            ) : null}
+
+            <Pressable onPress={() => setIsPublic(v => !v)} style={styles.toggle} testID="editor-toggle-public">
+              <MaterialCommunityIcons name={isPublic ? "eye" : "eye-off"} size={20} color={isPublic ? colors.brand : colors.onSurface3} />
+              <Text style={{ color: colors.onSurface, flex: 1, fontWeight: "700" }}>{t("public_game")}</Text>
+              <View style={[styles.switch, isPublic && styles.switchOn]}><View style={[styles.knob, isPublic && styles.knobOn]} /></View>
+            </Pressable>
+            {err ? <Text style={styles.err}>{err}</Text> : null}
+            <View style={{ marginTop: 16 }}>
+              <PrimaryButton testID="editor-meta-done" label="Done" onPress={() => setShowMeta(false)} />
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showCharacterPicker} transparent animationType="fade" onRequestClose={() => setShowCharacterPicker(false)}>
+        <Pressable style={styles.pickerBackdrop} onPress={() => setShowCharacterPicker(false)}>
+          <View style={styles.pickerBox}>
+            <Text style={styles.sheetTitle}>Player Character</Text>
+            <Pressable
+              testID="character-pick-personal"
+              onPress={() => { setPlayerCharacterId(null); setShowCharacterPicker(false); }}
+              style={[styles.characterRow, !playerCharacterId && styles.characterRowActive]}
+            >
+              <MaterialCommunityIcons name="account-outline" size={20} color={colors.brand} />
+              <Text style={styles.characterRowText}>Personal avatar (each player's own)</Text>
+              {!playerCharacterId ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+            </Pressable>
+            <ScrollView style={{ maxHeight: 260 }}>
+              {myModels.map(m => (
+                <Pressable
+                  key={m.model_id}
+                  testID={`character-pick-${m.model_id}`}
+                  onPress={() => { setPlayerCharacterId(m.model_id); setShowCharacterPicker(false); }}
+                  style={[styles.characterRow, playerCharacterId === m.model_id && styles.characterRowActive]}
+                >
+                  <MaterialCommunityIcons name="cube-scan" size={20} color={colors.brand} />
+                  <Text style={styles.characterRowText} numberOfLines={1}>{m.name}</Text>
+                  {playerCharacterId === m.model_id ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+                </Pressable>
+              ))}
+              {myModels.length === 0 ? <Text style={styles.hintSmall}>Publish a model in Shop first to use it as a character.</Text> : null}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.surface },
+  center: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, gap: 10 },
+  title: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "800" },
+  canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, margin: spacing.md, overflow: "hidden" },
+  hintPill: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
+  hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
+  boxSelectRect: { position: "absolute", borderWidth: 2, borderColor: colors.brand, backgroundColor: "rgba(204,255,0,0.15)" },
+  viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
+  dpad: { position: "absolute", left: 14, bottom: 14, width: 138, height: 138 },
+  vpad: { position: "absolute", right: 14, bottom: 14, width: 52, height: 138 },
+  dpadBtn: {
+    position: "absolute", width: 46, height: 46, borderRadius: 23,
+    backgroundColor: "rgba(15,16,18,0.72)", borderWidth: 1, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  vpadLabel: { color: colors.onSurface3, fontSize: 7, fontWeight: "800", marginTop: -2 },
+  toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
+  toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
+  toolBtn: { alignItems: "center", justifyContent: "center", width: 68, paddingVertical: 8, backgroundColor: colors.surface3, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, gap: 2 },
+  toolBtnText: { color: colors.onSurface, fontSize: 10, fontWeight: "700" },
+  objList: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8 },
+  objListTitle: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1.5, paddingHorizontal: 14, marginBottom: 6 },
+  objChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface3, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
+  objChipText: { color: colors.onSurface, fontSize: 11, fontWeight: "700", textTransform: "capitalize" },
+  baseplatePanel: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, padding: spacing.md },
+  baseplateHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
+  baseplateTitle: { flex: 1, color: colors.onSurface, fontSize: 11, fontWeight: "800", letterSpacing: 1.5 },
+  baseplateCloseBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center" },
+  baseplateRow: { flexDirection: "row", gap: 12 },
+  baseplateField: { flex: 1 },
+  baseplateLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 6 },
+  baseplateStepperRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  baseplateStepBtn: { width: 32, height: 32, borderRadius: radius.sm, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  baseplateInput: { flex: 1, textAlign: "center", backgroundColor: colors.surface3, color: colors.onSurface, fontWeight: "800", fontSize: 14, borderRadius: radius.sm, paddingVertical: 8, borderWidth: 1, borderColor: colors.border },
+  baseplateHint: { color: colors.onSurface3, fontSize: 10, marginTop: 10 },
+  baseplateResetText: { color: colors.brand, fontSize: 11, fontWeight: "700", marginTop: 10 },
+  footer: { flexDirection: "row", alignItems: "center", gap: 8, padding: spacing.md, borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  delBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.error, alignItems: "center", justifyContent: "center" },
+  playBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  sheet: { maxHeight: "88%", backgroundColor: colors.surface, padding: spacing.lg, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderTopWidth: 1, borderColor: colors.border },
+  sheetTitle: { color: colors.onSurface, fontSize: 20, fontWeight: "900", marginBottom: 12 },
+  thumbBox: { height: 140, borderRadius: radius.md, overflow: "hidden", marginBottom: 4, borderWidth: 1, borderColor: colors.border },
+  thumbOverlay: { position: "absolute", right: 8, bottom: 8, flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill },
+  thumbText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  lab: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14 },
+  hintSmall: { color: colors.onSurface3, fontSize: 11, marginTop: 6 },
+  input: { marginTop: 6, backgroundColor: colors.surface2, color: colors.onSurface, fontSize: 15, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: colors.border },
+  pill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  pillActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
+  pillText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
+  ageBtn: { flex: 1, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
+  ageBtnActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
+  ageBtnText: { color: colors.onSurface2, fontWeight: "700" },
+  characterPick: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 6, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  characterPickText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+  groupPill: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6, padding: 12, backgroundColor: colors.brandTint, borderRadius: radius.md, borderWidth: 1, borderColor: colors.brand },
+  groupPillText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+  toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  switch: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.surface3, padding: 3 },
+  switchOn: { backgroundColor: colors.brand },
+  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.onSurface2 },
+  knobOn: { backgroundColor: colors.onBrand, marginLeft: "auto" },
+  err: { color: colors.error, marginTop: 8, fontSize: 12, fontWeight: "600" },
+  pickerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  pickerBox: { width: "100%", maxWidth: 400, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  characterRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  characterRowActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  characterRowText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+});
+            ) : null}
+
+            <Pressable onPress={() => setIsPublic(v => !v)} style={styles.toggle} testID="editor-toggle-public">
+              <MaterialCommunityIcons name={isPublic ? "eye" : "eye-off"} size={20} color={isPublic ? colors.brand : colors.onSurface3} />
+              <Text style={{ color: colors.onSurface, flex: 1, fontWeight: "700" }}>{t("public_game")}</Text>
+              <View style={[styles.switch, isPublic && styles.switchOn]}><View style={[styles.knob, isPublic && styles.knobOn]} /></View>
+            </Pressable>
+            {err ? <Text style={styles.err}>{err}</Text> : null}
+            <View style={{ marginTop: 16 }}>
+              <PrimaryButton testID="editor-meta-done" label="Done" onPress={() => setShowMeta(false)} />
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showCharacterPicker} transparent animationType="fade" onRequestClose={() => setShowCharacterPicker(false)}>
+        <Pressable style={styles.pickerBackdrop} onPress={() => setShowCharacterPicker(false)}>
+          <View style={styles.pickerBox}>
+            <Text style={styles.sheetTitle}>Player Character</Text>
+            <Pressable
+              testID="character-pick-personal"
+              onPress={() => { setPlayerCharacterId(null); setShowCharacterPicker(false); }}
+              style={[styles.characterRow, !playerCharacterId && styles.characterRowActive]}
+            >
+              <MaterialCommunityIcons name="account-outline" size={20} color={colors.brand} />
+              <Text style={styles.characterRowText}>Personal avatar (each player's own)</Text>
+              {!playerCharacterId ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+            </Pressable>
+            <ScrollView style={{ maxHeight: 260 }}>
+              {myModels.map(m => (
+                <Pressable
+                  key={m.model_id}
+                  testID={`character-pick-${m.model_id}`}
+                  onPress={() => { setPlayerCharacterId(m.model_id); setShowCharacterPicker(false); }}
+                  style={[styles.characterRow, playerCharacterId === m.model_id && styles.characterRowActive]}
+                >
+                  <MaterialCommunityIcons name="cube-scan" size={20} color={colors.brand} />
+                  <Text style={styles.characterRowText} numberOfLines={1}>{m.name}</Text>
+                  {playerCharacterId === m.model_id ? <MaterialCommunityIcons name="check" size={18} color={colors.brand} /> : null}
+                </Pressable>
+              ))}
+              {myModels.length === 0 ? <Text style={styles.hintSmall}>Publish a model in Shop first to use it as a character.</Text> : null}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.surface },
+  center: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, gap: 10 },
+  title: { flex: 1, color: colors.onSurface, fontSize: 16, fontWeight: "800" },
+  canvas: { flex: 1, backgroundColor: colors.surface2, borderRadius: radius.md, margin: spacing.md, overflow: "hidden" },
+  hintPill: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill },
+  hintText: { color: colors.onSurface3, fontSize: 11, fontWeight: "600" },
+  boxSelectRect: { position: "absolute", borderWidth: 2, borderColor: colors.brand, backgroundColor: "rgba(204,255,0,0.15)" },
+  viewBtn: { position: "absolute", top: 10, right: 10, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center" },
+  dpad: { position: "absolute", left: 14, bottom: 14, width: 138, height: 138 },
+  vpad: { position: "absolute", right: 14, bottom: 14, width: 52, height: 138 },
+  dpadBtn: {
+    position: "absolute", width: 46, height: 46, borderRadius: 23,
+    backgroundColor: "rgba(15,16,18,0.72)", borderWidth: 1, borderColor: colors.border,
+    alignItems: "center", justifyContent: "center",
+  },
+  vpadLabel: { color: colors.onSurface3, fontSize: 7, fontWeight: "800", marginTop: -2 },
+  toolbar: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingVertical: 10 },
+  toolLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 2, paddingHorizontal: 14, marginBottom: 6 },
+  toolBtn: { alignItems: "center", justifyContent: "center", width: 68, paddingVertical: 8, backgroundColor: colors.surface3, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, gap: 2 },
+  toolBtnText: { color: colors.onSurface, fontSize: 10, fontWeight: "700" },
+  objList: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8 },
+  objListTitle: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1.5, paddingHorizontal: 14, marginBottom: 6 },
+  objChip: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: colors.surface3, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1 },
+  objChipText: { color: colors.onSurface, fontSize: 11, fontWeight: "700", textTransform: "capitalize" },
+  baseplatePanel: { backgroundColor: colors.surface2, borderTopWidth: 1, borderColor: colors.border, padding: spacing.md },
+  baseplateHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
+  baseplateTitle: { flex: 1, color: colors.onSurface, fontSize: 11, fontWeight: "800", letterSpacing: 1.5 },
+  baseplateCloseBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center" },
+  baseplateRow: { flexDirection: "row", gap: 12 },
+  baseplateField: { flex: 1 },
+  baseplateLabel: { color: colors.onSurface3, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 6 },
+  baseplateStepperRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  baseplateStepBtn: { width: 32, height: 32, borderRadius: radius.sm, backgroundColor: colors.surface3, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  baseplateInput: { flex: 1, textAlign: "center", backgroundColor: colors.surface3, color: colors.onSurface, fontWeight: "800", fontSize: 14, borderRadius: radius.sm, paddingVertical: 8, borderWidth: 1, borderColor: colors.border },
+  baseplateHint: { color: colors.onSurface3, fontSize: 10, marginTop: 10 },
+  baseplateResetText: { color: colors.brand, fontSize: 11, fontWeight: "700", marginTop: 10 },
+  footer: { flexDirection: "row", alignItems: "center", gap: 8, padding: spacing.md, borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  delBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.error, alignItems: "center", justifyContent: "center" },
+  playBtn: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  sheet: { maxHeight: "88%", backgroundColor: colors.surface, padding: spacing.lg, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, borderTopWidth: 1, borderColor: colors.border },
+  sheetTitle: { color: colors.onSurface, fontSize: 20, fontWeight: "900", marginBottom: 12 },
+  thumbBox: { height: 140, borderRadius: radius.md, overflow: "hidden", marginBottom: 4, borderWidth: 1, borderColor: colors.border },
+  thumbOverlay: { position: "absolute", right: 8, bottom: 8, flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill },
+  thumbText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  lab: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14 },
+  hintSmall: { color: colors.onSurface3, fontSize: 11, marginTop: 6 },
+  input: { marginTop: 6, backgroundColor: colors.surface2, color: colors.onSurface, fontSize: 15, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: colors.border },
+  pill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  pillActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
+  pillText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
+  ageBtn: { flex: 1, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
+  ageBtnActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
+  ageBtnText: { color: colors.onSurface2, fontWeight: "700" },
+  characterPick: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 6, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  characterPickText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+  groupPill: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6, padding: 12, backgroundColor: colors.brandTint, borderRadius: radius.md, borderWidth: 1, borderColor: colors.brand },
+  groupPillText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+  toggle: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 14, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
+  switch: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.surface3, padding: 3 },
+  switchOn: { backgroundColor: colors.brand },
+  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.onSurface2 },
+  knobOn: { backgroundColor: colors.onBrand, marginLeft: "auto" },
+  err: { color: colors.error, marginTop: 8, fontSize: 12, fontWeight: "600" },
+  pickerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
+  pickerBox: { width: "100%", maxWidth: 400, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
+  characterRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  characterRowActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
+  characterRowText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+});
