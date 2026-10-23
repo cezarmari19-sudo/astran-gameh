@@ -238,6 +238,21 @@ export default function PlayScreen() {
     camAngle: number; camPolar: number; camDist: number;
   } | null>(null);
 
+  // Starea "live" a scriptului (ce operatii s-au rulat deja, cat timp a trecut, si
+  // unde a ajuns fizic fiecare obiect mobil creat de script) - vezi remountFor() mai
+  // jos: la schimbarea orientarii, GLView se remonteaza (contextul GL se poate pierde
+  // la rotire pe unele telefoane), iar fara asta scriptul repornea mereu de la t=0,
+  // adica exact bug-ul "se duce la cea de la inceput cand rotesc telefonul".
+  type ScriptRuntimeSnapshot = {
+    nextOp: number;
+    elapsed: number;
+    bodies: Map<string, { x: number; y: number; z: number; qx: number; qy: number; qz: number; qw: number; vx: number; vy: number; vz: number }>;
+  };
+  const preservedScriptRuntimeRef = useRef<ScriptRuntimeSnapshot | null>(null);
+  const scriptMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  const nextOpRef = useRef(0);
+  const scriptElapsedRef = useRef(0);
+
   const joyZoneLayout = useRef({ x: 0, y: 0, w: 180, h: 180 });
   const camZoneLayout = useRef({ x: 0, y: 0, w: 0, h: 0 });
 
@@ -448,6 +463,21 @@ export default function PlayScreen() {
           camPolar: camPolar.current,
           camDist: camDist.current,
         };
+      }
+      if (physicsRef.current) {
+        const bodies: ScriptRuntimeSnapshot["bodies"] = new Map();
+        for (const opId of scriptMeshesRef.current.keys()) {
+          if (physicsRef.current.isAnchored(opId)) continue; // cele fixe se recreeaza identic din scriptOps, nu au nevoie de snapshot
+          const t = physicsRef.current.getTransform(opId);
+          const v = physicsRef.current.getVelocity(opId);
+          if (!t || !v) continue;
+          bodies.set(opId, {
+            x: t.position.x, y: t.position.y, z: t.position.z,
+            qx: t.quaternion.x, qy: t.quaternion.y, qz: t.quaternion.z, qw: t.quaternion.w,
+            vx: v.x, vy: v.y, vz: v.z,
+          });
+        }
+        preservedScriptRuntimeRef.current = { nextOp: nextOpRef.current, elapsed: scriptElapsedRef.current, bodies };
       }
       physicsRef.current?.dispose();
       physicsRef.current = null;
@@ -680,9 +710,33 @@ export default function PlayScreen() {
 
     const scriptOps = scriptOpsRef.current;
     const scriptMeshes = new Map<string, THREE.Mesh>();
+    scriptMeshesRef.current = scriptMeshes;
     let nextOp = 0;
-    const startedAt = Date.now();
+    let startedAt = Date.now();
     let lastFrame = Date.now();
+
+    const runtimeSnapshot = preservedScriptRuntimeRef.current;
+    preservedScriptRuntimeRef.current = null;
+    if (runtimeSnapshot) {
+      // Rulam instant (fara sa mai asteptam timpul "t" al fiecarei operatii) tot ce
+      // scriptul executase deja inainte de rotire, ca sa recream acelasi obiecte si
+      // acelasi material/fizica - altfel scena ramanea doar cu obiectele Studio.
+      while (nextOp < runtimeSnapshot.nextOp && nextOp < scriptOps.length) {
+        applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
+        nextOp += 1;
+      }
+      // applyOp de mai sus pune fiecare obiect la pozitia lui "de creare" - o suprascriem
+      // cu pozitia/viteza reala, rezultata din simularea fizica pana la rotire.
+      for (const [opId, t] of runtimeSnapshot.bodies) {
+        physics.setPosition(opId, t.x, t.y, t.z);
+        physics.setVelocity(opId, t.vx, t.vy, t.vz);
+        const mesh = scriptMeshes.get(opId);
+        if (mesh) { mesh.position.set(t.x, t.y, t.z); mesh.quaternion.set(t.qx, t.qy, t.qz, t.qw); }
+      }
+      startedAt = Date.now() - runtimeSnapshot.elapsed * 1000;
+    }
+    nextOpRef.current = nextOp;
+    scriptElapsedRef.current = runtimeSnapshot?.elapsed ?? 0;
 
     const render = () => {
       if (!alive.current) return;
@@ -693,9 +747,11 @@ export default function PlayScreen() {
       lastFrame = now;
 
       const elapsed = (now - startedAt) / 1000;
+      scriptElapsedRef.current = elapsed;
       while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
         applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
         nextOp += 1;
+        nextOpRef.current = nextOp;
       }
 
       physics.step(dt);
