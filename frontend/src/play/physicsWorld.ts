@@ -390,6 +390,13 @@ export class PhysicsWorld {
     return this.bodies.get(id)?.anchored ?? true;
   }
 
+  getVelocity(id: string): { x: number; y: number; z: number } | null {
+    const entry = this.bodies.get(id);
+    if (!entry) return null;
+    const v = entry.body.velocity;
+    return { x: v.x, y: v.y, z: v.z };
+  }
+
   dispose() {
     for (const entry of this.bodies.values()) this.world.removeBody(entry.body);
     this.bodies.clear();
