@@ -189,7 +189,7 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
     try {
       const r = await api("/sandbox/run", {
         method: "POST",
-        body: JSON.stringify({ files: project.files.map(f => ({ path: f.path, source: f.source })) }),
+        body: JSON.stringify({ files: project.files.map(f => ({ path: f.path, source: f.source, target: targetOf(f) })) }),
       });
       const lines: RunLine[] = [];
       // r.output e un array de {level, msg} (vezi runner.py), nu de string-uri brute -
