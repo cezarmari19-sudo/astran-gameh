@@ -33,11 +33,44 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
+      # Reduce cat de des batem Maven Central: pastram cache-ul Gradle intre rulari
+      # (wrapper + dependinte descarcate), asa ca majoritatea build-urilor nu mai
+      # descarca de la zero pachete ca gson care au picat cu 429.
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('frontend/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: EAS Build (local, Android)
         working-directory: frontend
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform android --profile preview --local --non-interactive --output ../app-build.apk
+          # Spunem Gradle-ului sa reincerce singur cererile catre Maven Central / Gradle
+          # Plugin Portal cand acestea raspund cu 429 (Too Many Requests), in loc sa
+          # abandoneze imediat build-ul la prima eroare trecatoare de retea.
+          GRADLE_OPTS: "-Dorg.gradle.internal.repository.max.retries=10 -Dorg.gradle.internal.repository.initial.backoff.ms=2000"
+        run: |
+          set +e
+          for attempt in 1 2 3; do
+            echo "::group::Build attempt $attempt"
+            eas build --platform android --profile preview --local --non-interactive --output ../app-build.apk
+            status=$?
+            echo "::endgroup::"
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+            echo "Attempt $attempt a esuat (exit $status)."
+            if [ "$attempt" -lt 3 ]; then
+              echo "Astept 90s inainte sa reincerc, ca sa treaca eventualul rate-limit de la Maven..."
+              sleep 90
+            fi
+          done
+          exit "$status"
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
