@@ -56,23 +56,31 @@ local Physics = require("server/physics")
 local AntiCheat = require("server/anticheat")
 local World = require("server/world")
 
+-- Aceste 3 linii sunt ce conecteaza physics.lua la Play Mode real: valorile tale de
+-- mai jos (gravitate, saritura, viteza de mers) chiar schimba cum se joaca jocul, nu
+-- doar ce apare printat in consola de Run. Sterge-le doar daca nu mai vrei ca Physics
+-- din acest fisier sa controleze miscarea personajului.
+workspace.Gravity = math.abs(Physics.GRAVITY)
+workspace.JumpSpeed = Physics.JUMP_SPEED
+workspace.MoveSpeed = Physics.MOVE_SPEED
+
 print("physics.lua loaded - GRAVITY=" .. tostring(Physics.GRAVITY) .. ", JUMP_SPEED=" .. tostring(Physics.JUMP_SPEED) .. ", MOVE_SPEED=" .. tostring(Physics.MOVE_SPEED))
 print("anticheat.lua loaded - MAX_MOVE_PER_TICK=" .. tostring(AntiCheat.MAX_MOVE_PER_TICK) .. ", MAX_VERTICAL_SPEED=" .. tostring(AntiCheat.MAX_VERTICAL_SPEED))
 print("world.lua loaded - GRAVITY=" .. tostring(World.GRAVITY) .. ", AIR_DENSITY=" .. tostring(World.AIR_DENSITY))
-print("Edit any value above, press Run again, and you'll see it change here.")
+print("Edit any value above, press Save, then Play - you'll see it change in the actual game.")
 ` },
       { path: "server/physics.lua", target: "server", source: `-- physics.lua (runs on: SERVER)
 --
 -- Defines the core physics constants and movement/jump rules for this game's characters.
--- This mirrors the default physics engine built into Astran's Play Mode. You can freely
--- change any value or rewrite the functions below - once Astran's live Luau server runtime
--- is available, this file is what will actually compute player movement, instead of the
--- hardcoded engine Play Mode currently uses.
+-- GRAVITY, JUMP_SPEED and MOVE_SPEED below DO affect Play Mode: main.lua assigns them to
+-- workspace.Gravity / workspace.JumpSpeed / workspace.MoveSpeed, which the actual player
+-- movement in Play Mode now reads (instead of its old hardcoded defaults). Change a value,
+-- Save, then Play - you'll feel the difference.
 --
--- CURRENT LIMITATION: Astran does not yet have a live, per-frame Luau server loop that
--- executes this file during gameplay. Today, Play Mode still uses its own built-in
--- movement/physics code. This file is provided now so you can already start customizing
--- your game's physics rules; it will take effect automatically once that runtime ships.
+-- STILL A LIMITATION: Astran does not yet have a live, per-frame Luau server loop, so the
+-- Physics.step()/Physics.tryJump() functions below are not called by Play Mode each tick -
+-- only the 3 constants above (via workspace.*) are wired in today. Rewrite step()/tryJump()
+-- freely for when a live runtime calls them, but don't expect them to run yet.
 
 local Physics = {}
 
@@ -722,8 +730,7 @@ export default function StudioEditor() {
 
     scene.objects.forEach(o => {
       let m = meshMap.current[o.id];
-      if (!m) {
-        m = buildMesh(o);
+      if (!m) {        m = buildMesh(o);
         m.userData.objId = o.id;
         meshMap.current[o.id] = m;
         s.add(m);
@@ -1456,4 +1463,3 @@ const styles = StyleSheet.create({
   characterRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
   characterRowActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   characterRowText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
-});
