@@ -211,12 +211,17 @@ local function colorHex(c)
     return sformat("#%02x%02x%02x", floor(c.R * 255 + 0.5), floor(c.G * 255 + 0.5), floor(c.B * 255 + 0.5))
 end
 
--- ===== lumea fizica: gravitatie si densitatea aerului =====
--- Valorile implicite trebuie sa fie aceleasi ca in aplicatie (physicsWorld.ts).
---   Gravity    : m/s^2, 0..200 (implicit 18)
---   AirDensity : g/cm^3, 0..5  (implicit 0.02; apa = 1)
+-- ===== lumea fizica: gravitatie, densitatea aerului si miscarea personajului =====
+-- Valorile implicite trebuie sa fie aceleasi ca in aplicatie (physicsWorld.ts si
+-- play/[id].tsx / studio/play/[id].tsx - vezi GRAVITY/JUMP_SPEED/MOVE_SPEED de acolo).
+--   Gravity    : m/s^2, 0..200   (implicit 18)
+--   AirDensity : g/cm^3, 0..5    (implicit 0.02; apa = 1)
+--   JumpSpeed  : studs/s, 0..50  (implicit 7.5)
+--   MoveSpeed  : studs/s, 0..50  (implicit 3.2)
 local worldGravity = 18
 local worldAir = 0.02
+local worldJumpSpeed = 7.5
+local worldMoveSpeed = 3.2
 
 local function clampRange(v, lo, hi, what)
     v = tonumber(v)
@@ -610,6 +615,10 @@ workspaceObj = setmetatable({}, {
             return worldGravity
         elseif key == "AirDensity" then
             return worldAir
+        elseif key == "JumpSpeed" then
+            return worldJumpSpeed
+        elseif key == "MoveSpeed" then
+            return worldMoveSpeed
         end
         local method = WorkspaceMethods[key]
         if method ~= nil then
@@ -632,6 +641,12 @@ workspaceObj = setmetatable({}, {
         elseif key == "AirDensity" then
             worldAir = clampRange(value, 0, 5, "AirDensity")
             record({ op = "world", id = "world", air = worldAir })
+        elseif key == "JumpSpeed" then
+            worldJumpSpeed = clampRange(value, 0, 50, "JumpSpeed")
+            record({ op = "world", id = "world", jump_speed = worldJumpSpeed })
+        elseif key == "MoveSpeed" then
+            worldMoveSpeed = clampRange(value, 0, 50, "MoveSpeed")
+            record({ op = "world", id = "world", move_speed = worldMoveSpeed })
         else
             error("workspace is read-only", 2)
         end
