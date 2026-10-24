@@ -921,7 +921,7 @@ part, once Astran's full Luau runtime ships for both server and client.
         {"path": "server/world.lua", "source": world_lua, "target": "server"},
         {"path": "client/rendering.lua", "source": rendering_lua, "target": "client"},
         {"path": "README.md", "source": readme_md, "target": "server"},  # ignorat la executie (nu e .lua) - vezi is_luau_path
-    ]
+        ]
 
 
 @api.post("/games")
@@ -1063,6 +1063,8 @@ async def delete_game(game_id: str, current=Depends(get_current_user)):
     await db.game_collaborators.delete_many({"game_id": game_id})
     await db.game_testers.delete_many({"game_id": game_id})
     return {"ok": True}
+
+
 @api.get("/games/discover")
 async def discover(section: str = "for_you", current=Depends(get_current_user)):
     age = current.get("age_category", "under_18")
@@ -1461,11 +1463,6 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
         "idempotency_key": body.idempotency_key,
         "reference": f"transfer_to:{recipient['username']}",
     }
-    # Scriem randul de ledger INAINTE de a credita destinatarul. Daca insert_one pica (de
-    # exemplu coliziune pe idempotency_key, din doua cereri concurente cu aceeasi cheie),
-    # facem rollback la debitul de mai sus - la fel ca buy_astrans mai jos - in loc sa lasam
-    # expeditorul debitat fara nicio tranzactie inregistrata si fara ca destinatarul sa fi
-    # primit ceva.
     try:
         await db.astran_ledger.insert_one(tx)
     except Exception:
@@ -1720,10 +1717,6 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     if not result.ok:
         raise HTTPException(status_code=402, detail=result.detail or "Payment verification failed")
 
-    # Fiecare plata REALA (identificata unic prin external_id - purchase token la Google,
-    # transaction_id la Apple) se crediteaza O SINGURA DATA. Fara asta, acelasi token
-    # retrimis (retry de retea, buton apasat de doua ori, sau cineva incercand intentionat)
-    # ar credita Astrans de fiecare data, desi userul a platit o singura data.
     if result.external_id:
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
         if existing:
@@ -1749,9 +1742,6 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     try:
         await db.astran_ledger.insert_one(tx)
     except Exception:  # noqa: BLE001
-        # Indexul UNIC pe provider_ref a respins insertia: doua request-uri simultane cu
-        # acelasi token (dublu-click, retry) - creditul a fost deja dat de celalalt request,
-        # deci anulam incrementul facut mai sus si intoarcem tranzactia deja existenta.
         await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": -package["astrans"]}})
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
         return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
@@ -1839,3 +1829,4 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+)
