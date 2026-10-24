@@ -20,7 +20,7 @@ import { connectRealtime, RealtimeHandle } from "@/src/play/useRealtime";
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
   type?: string; x?: number; y?: number; z?: number; color?: string; scale?: number; name?: string;
-  gravity?: number; air?: number;
+  gravity?: number; air?: number; jump_speed?: number; move_speed?: number;
   density?: number; friction?: number; bounce?: number; liquid?: boolean;
   material?: string; anchored?: boolean; collide?: boolean;
   vx?: number; vy?: number; vz?: number;
@@ -107,9 +107,13 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
 
 const PLAYER_RADIUS = 0.35;
 const PLAYER_HALF_HEIGHT_DEFAULT = 0.9;
-const MOVE_SPEED = 3.2;
-const GRAVITY = -18;
-const JUMP_SPEED = 7.5; // viteza verticala initiala la saritura (m/s); cu GRAVITY=-18 da o saritura de ~1.56m
+// Valori implicite - pot fi suprascrise din scriptul jocului (main.lua) prin
+// workspace.MoveSpeed / workspace.Gravity / workspace.JumpSpeed (vezi applyOp -> "world"
+// op mai jos si backend/astran_sandbox/prelude.luau). Refs, nu const, tocmai ca sa poata
+// fi schimbate in timpul rularii cand scriptul seteaza aceste proprietati pe workspace.
+const DEFAULT_MOVE_SPEED = 3.2;
+const DEFAULT_GRAVITY = -18;
+const DEFAULT_JUMP_SPEED = 7.5; // viteza verticala initiala la saritura (m/s); cu GRAVITY=-18 da o saritura de ~1.56m
 const JOYSTICK_RADIUS = 52;
 const CAM_MIN_DIST = 0.15;
 const CAM_MAX_DIST = 7;
@@ -222,6 +226,11 @@ export default function PlayScreen() {
   const pos = useRef(new THREE.Vector3(0, 0, 0));
   const velY = useRef(0);
   const groundedRef = useRef(true); // true cand personajul sta pe sol (vezi bucla de gravitatie mai jos)
+  // Suprascrise de scriptul jocului via workspace.MoveSpeed/.Gravity/.JumpSpeed (op "world") -
+  // vezi bucla de aplicare a ops mai jos. Pornesc cu valorile implicite ale platformei.
+  const moveSpeedRef = useRef(DEFAULT_MOVE_SPEED);
+  const gravityRef = useRef(DEFAULT_GRAVITY);
+  const jumpSpeedRef = useRef(DEFAULT_JUMP_SPEED);
   const jumpRequestedRef = useRef(false); // setat de butonul Jump; consumat o singura data per apasare, nu in fiecare frame cat e tinut
   const facingAngle = useRef(0);
 
@@ -826,7 +835,17 @@ const onContextCreate = async (gl: any) => {
       // scriptul executase deja inainte de rotire, ca sa recream acelasi obiecte si
       // acelasi material/fizica - altfel scena ramanea doar cu obiectele Studio.
       while (nextOp < runtimeSnapshot.nextOp && nextOp < scriptOps.length) {
-        applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
+        const _nextScriptOp = scriptOps[nextOp];
+        applyOp(scene, scriptMeshes, physics, _nextScriptOp);
+        // Scriptul jocului (main.lua) poate suprascrie viteza de mers/saritura/gravitatie
+        // prin workspace.MoveSpeed / workspace.JumpSpeed / workspace.Gravity - vezi
+        // backend/astran_sandbox/prelude.luau. Fara asta, aceste valori raman mereu cele
+        // implicite ale platformei, indiferent ce scrie dezvoltatorul in physics.lua.
+        if (_nextScriptOp.op === "world") {
+          if (_nextScriptOp.move_speed !== undefined) moveSpeedRef.current = _nextScriptOp.move_speed;
+          if (_nextScriptOp.jump_speed !== undefined) jumpSpeedRef.current = _nextScriptOp.jump_speed;
+          if (_nextScriptOp.gravity !== undefined) gravityRef.current = -_nextScriptOp.gravity;
+        }
         nextOp += 1;
       }
       // applyOp de mai sus pune fiecare obiect la pozitia lui "de creare" - o suprascriem
@@ -852,7 +871,17 @@ const onContextCreate = async (gl: any) => {
         const elapsed = (now - startedAt) / 1000;
         scriptElapsedRef.current = elapsed;
         while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
-          applyOp(scene, scriptMeshes, physics, scriptOps[nextOp]);
+          const _nextScriptOp = scriptOps[nextOp];
+          applyOp(scene, scriptMeshes, physics, _nextScriptOp);
+          // Scriptul jocului (main.lua) poate suprascrie viteza de mers/saritura/gravitatie
+          // prin workspace.MoveSpeed / workspace.JumpSpeed / workspace.Gravity - vezi
+          // backend/astran_sandbox/prelude.luau. Fara asta, aceste valori raman mereu cele
+          // implicite ale platformei, indiferent ce scrie dezvoltatorul in physics.lua.
+          if (_nextScriptOp.op === "world") {
+            if (_nextScriptOp.move_speed !== undefined) moveSpeedRef.current = _nextScriptOp.move_speed;
+            if (_nextScriptOp.jump_speed !== undefined) jumpSpeedRef.current = _nextScriptOp.jump_speed;
+            if (_nextScriptOp.gravity !== undefined) gravityRef.current = -_nextScriptOp.gravity;
+          }
           nextOp += 1;
           nextOpRef.current = nextOp;
         }
@@ -882,7 +911,7 @@ const onContextCreate = async (gl: any) => {
               facingAngle.current = Math.atan2(moveDir.x, moveDir.z);
             }
             const prev = scratchPrevPos.current.copy(pos.current);
-            const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, MOVE_SPEED * moveMag * dt);
+            const next = scratchNextPos.current.copy(prev).addScaledVector(moveDir, moveSpeedRef.current * moveMag * dt);
             const resolved = resolveCollisions(next, prev);
             pos.current.set(resolved.x, pos.current.y, resolved.z);
           }
@@ -896,11 +925,11 @@ const onContextCreate = async (gl: any) => {
           jumpRequestedRef.current = false;
           // doar daca personajul e efectiv pe sol (nu in aer) - previne dublele sarituri/zborul
           if (groundedRef.current) {
-            velY.current = JUMP_SPEED;
+            velY.current = jumpSpeedRef.current;
             groundedRef.current = false;
           }
         }
-        velY.current += GRAVITY * dt;
+        velY.current += gravityRef.current * dt;
         let nextY = pos.current.y + velY.current * dt;
         if (nextY <= groundY) { nextY = groundY; velY.current = 0; groundedRef.current = true; }
         else { groundedRef.current = false; }
@@ -1281,4 +1310,3 @@ const styles = StyleSheet.create({
   switchThumbOn: { transform: [{ translateX: 18 }] },
   menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
   menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
-});
