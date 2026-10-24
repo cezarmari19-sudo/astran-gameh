@@ -651,18 +651,47 @@ def _default_game_scripts() -> list[dict]:
     vezi notele din fiecare fisier. Play Mode foloseste inca motorul lui propriu, hardcodat
     in TypeScript, cu exact aceleasi valori implicite ca mai jos. Fisierele astea sunt
     pregatirea pentru ziua in care runtime-ul exista, nu protectie activa azi."""
+    main_lua = """-- main.lua (runs on: SERVER)
+--
+-- Entry point: this is the first (and only) file the sandbox runs when you press Run in
+-- the Code Editor. It doesn't do anything on its own - it just loads the other starter
+-- files with require(...) and prints a few of their values, so pressing Run gives you
+-- immediate, visible proof that your edits to those files are actually being picked up.
+--
+-- require() paths mirror the project's folder structure, without the .lua extension -
+-- "server/physics.lua" becomes require("server/physics"). Feel free to rewrite this file
+-- entirely once you have real game logic to run; it isn't special or protected.
+
+local Physics = require("server/physics")
+local AntiCheat = require("server/anticheat")
+local World = require("server/world")
+
+-- Aceste 3 linii sunt ce conecteaza physics.lua la Play Mode real: valorile tale de
+-- mai jos (gravitate, saritura, viteza de mers) chiar schimba cum se joaca jocul, nu
+-- doar ce apare printat in consola de Run. Sterge-le doar daca nu mai vrei ca Physics
+-- din acest fisier sa controleze miscarea personajului.
+workspace.Gravity = math.abs(Physics.GRAVITY)
+workspace.JumpSpeed = Physics.JUMP_SPEED
+workspace.MoveSpeed = Physics.MOVE_SPEED
+
+print("physics.lua loaded - GRAVITY=" .. tostring(Physics.GRAVITY) .. ", JUMP_SPEED=" .. tostring(Physics.JUMP_SPEED) .. ", MOVE_SPEED=" .. tostring(Physics.MOVE_SPEED))
+print("anticheat.lua loaded - MAX_MOVE_PER_TICK=" .. tostring(AntiCheat.MAX_MOVE_PER_TICK) .. ", MAX_VERTICAL_SPEED=" .. tostring(AntiCheat.MAX_VERTICAL_SPEED))
+print("world.lua loaded - GRAVITY=" .. tostring(World.GRAVITY) .. ", AIR_DENSITY=" .. tostring(World.AIR_DENSITY))
+print("Edit any value above, press Save, then Play - you'll see it change in the actual game.")
+"""
+
     physics_lua = """-- physics.lua (runs on: SERVER)
 --
 -- Defines the core physics constants and movement/jump rules for this game's characters.
--- This mirrors the default physics engine built into Astran's Play Mode. You can freely
--- change any value or rewrite the functions below - once Astran's live Luau server runtime
--- is available, this file is what will actually compute player movement, instead of the
--- hardcoded engine Play Mode currently uses.
+-- GRAVITY, JUMP_SPEED and MOVE_SPEED below DO affect Play Mode: main.lua assigns them to
+-- workspace.Gravity / workspace.JumpSpeed / workspace.MoveSpeed, which the actual player
+-- movement in Play Mode now reads (instead of its old hardcoded defaults). Change a value,
+-- Save, then Play - you'll feel the difference.
 --
--- CURRENT LIMITATION: Astran does not yet have a live, per-frame Luau server loop that
--- executes this file during gameplay. Today, Play Mode still uses its own built-in
--- movement/physics code. This file is provided now so you can already start customizing
--- your game's physics rules; it will take effect automatically once that runtime ships.
+-- STILL A LIMITATION: Astran does not yet have a live, per-frame Luau server loop, so the
+-- Physics.step()/Physics.tryJump() functions below are not called by Play Mode each tick -
+-- only the 3 constants above (via workspace.*) are wired in today. Rewrite step()/tryJump()
+-- freely for when a live runtime calls them, but don't expect them to run yet.
 
 local Physics = {}
 
@@ -876,14 +905,17 @@ purely visual or don't need to be trusted (graphics settings, UI, cosmetic effec
 
 ## Current limitation (please read)
 
-Astran does not yet have a live runtime that executes these Luau files during gameplay.
-Play Mode currently uses its own built-in physics/rendering/anti-cheat behavior, with the
-same default values these files start with. These files are provided now so you can already
-start customizing your game's rules - they will take effect automatically, without any
-changes needed on your part, once Astran's Luau runtime ships for both server and client.
+Astran does not yet have a live runtime that executes these Luau files every frame during
+gameplay. One part IS wired in today though: `main.lua` reads GRAVITY/JUMP_SPEED/MOVE_SPEED
+from `server/physics.lua` and assigns them to `workspace.Gravity` / `workspace.JumpSpeed` /
+`workspace.MoveSpeed` - Play Mode's actual player movement uses those values. Everything else
+(the rest of `physics.lua`'s functions, `anticheat.lua`, `world.lua`, `rendering.lua`) is still
+just a starting point - it will take effect automatically, without any changes needed on your
+part, once Astran's full Luau runtime ships for both server and client.
 """
 
     return [
+        {"path": "main.lua", "source": main_lua, "target": "server"},
         {"path": "server/physics.lua", "source": physics_lua, "target": "server"},
         {"path": "server/anticheat.lua", "source": anticheat_lua, "target": "server"},
         {"path": "server/world.lua", "source": world_lua, "target": "server"},
@@ -1807,4 +1839,3 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-)
