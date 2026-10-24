@@ -390,6 +390,12 @@ def sanitize_ops(raw: Any) -> list[dict]:
             air = _number(op.get("air"))
             if air is not None:
                 item["air"] = _clamp(air, 0.0, 5.0)
+            jump_speed = _number(op.get("jump_speed"))
+            if jump_speed is not None:
+                item["jump_speed"] = _clamp(jump_speed, 0.0, 50.0)
+            move_speed = _number(op.get("move_speed"))
+            if move_speed is not None:
+                item["move_speed"] = _clamp(move_speed, 0.0, 50.0)
             clean.append(item)
             continue
 
