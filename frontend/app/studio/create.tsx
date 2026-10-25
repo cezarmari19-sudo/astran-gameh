@@ -1463,3 +1463,4 @@ const styles = StyleSheet.create({
   characterRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
   characterRowActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
   characterRowText: { flex: 1, color: colors.onSurface, fontWeight: "700", fontSize: 13 },
+});
