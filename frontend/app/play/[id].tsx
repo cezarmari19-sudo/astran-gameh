@@ -1310,3 +1310,4 @@ const styles = StyleSheet.create({
   switchThumbOn: { transform: [{ translateX: 18 }] },
   menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
   menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
+});
