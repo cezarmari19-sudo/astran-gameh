@@ -647,10 +647,15 @@ def _default_game_scripts() -> list[dict]:
     doar punctul de plecare, nu fisiere speciale/protejate.
 
     IMPORTANT, de citit inainte sa te bazezi pe ele: Astran NU are inca un runtime Luau
-    viu (nici pe server, nici pe telefon) care sa execute aceste fisiere in timpul jocului -
-    vezi notele din fiecare fisier. Play Mode foloseste inca motorul lui propriu, hardcodat
-    in TypeScript, cu exact aceleasi valori implicite ca mai jos. Fisierele astea sunt
-    pregatirea pentru ziua in care runtime-ul exista, nu protectie activa azi."""
+    viu (nici pe server, nici pe telefon) care sa execute aceste fisiere FRAME CU FRAME
+    in timpul jocului - vezi notele "CURRENT LIMITATION" din fiecare fisier. O parte E
+    conectata la Play Mode insa: main.lua citeste GRAVITY/JUMP_SPEED/MOVE_SPEED din
+    server/physics.lua si le pune pe workspace.Gravity/.JumpSpeed/.MoveSpeed (vezi
+    prelude.luau), iar miscarea reala a jucatorului din Play Mode (frontend/app/play/[id].tsx
+    si frontend/app/studio/play/[id].tsx) citeste chiar acele valori - NU mai foloseste
+    defaults hardcodate in TypeScript daca scriptul le suprascrie. Restul (functiile
+    Physics.step()/tryJump(), anticheat.lua, world.lua, rendering.lua) raman doar punctul
+    de plecare, pregatirea pentru ziua in care runtime-ul Luau viu exista pe server/client."""
     main_lua = """-- main.lua (runs on: SERVER)
 --
 -- Entry point: this is the first (and only) file the sandbox runs when you press Run in
@@ -912,6 +917,15 @@ from `server/physics.lua` and assigns them to `workspace.Gravity` / `workspace.J
 (the rest of `physics.lua`'s functions, `anticheat.lua`, `world.lua`, `rendering.lua`) is still
 just a starting point - it will take effect automatically, without any changes needed on your
 part, once Astran's full Luau runtime ships for both server and client.
+
+## Trying it out with Run
+
+Press Run (top of the Code Editor) to actually execute these scripts right now, in a real
+Luau sandbox - this works today, independently of the Play Mode limitation above. main.lua
+is the entry point (required by the sandbox); it loads physics.lua, anticheat.lua and
+world.lua with require(...) and prints their current values. Change a value in physics.lua,
+press Run again, and you'll see your change reflected in the console immediately - that's
+how you can confirm an edit actually took effect, even before Play Mode can run these files.
 """
 
     return [
