@@ -717,7 +717,12 @@ export default function PlayScreen() {
     scene.add(playerGroup);
     playerGroupRef.current = playerGroup;
 
-    const scriptOps = scriptOpsRef.current;
+    // BUG REPARAT: vezi explicatia detaliata in frontend/app/play/[id].tsx (acelasi bug,
+    // acelasi fix) - scurt: nu mai luam un snapshot local al scriptOpsRef.current aici (la
+    // crearea contextului GL), pentru ca fetch-ul catre /sandbox/games/{id}/run se termina
+    // mereu MAI TARZIU decat initializarea locala a GLView, si bucla de randare ramanea
+    // legata de array-ul initial gol, nevazand niciodata operatiile reale ale scriptului.
+    // Se citeste scriptOpsRef.current LIVE, de fiecare data, in bucla de mai jos.
     const scriptMeshes = new Map<string, THREE.Mesh>();
     scriptMeshesRef.current = scriptMeshes;
     let nextOp = 0;
@@ -730,8 +735,8 @@ export default function PlayScreen() {
       // Rulam instant (fara sa mai asteptam timpul "t" al fiecarei operatii) tot ce
       // scriptul executase deja inainte de rotire, ca sa recream acelasi obiecte si
       // acelasi material/fizica - altfel scena ramanea doar cu obiectele Studio.
-      while (nextOp < runtimeSnapshot.nextOp && nextOp < scriptOps.length) {
-        const _nextScriptOp = scriptOps[nextOp];
+      while (nextOp < runtimeSnapshot.nextOp && nextOp < scriptOpsRef.current.length) {
+        const _nextScriptOp = scriptOpsRef.current[nextOp];
         applyOp(scene, scriptMeshes, physics, _nextScriptOp);
         // Scriptul jocului (main.lua) poate suprascrie viteza de mers/saritura/gravitatie
         // prin workspace.MoveSpeed / workspace.JumpSpeed / workspace.Gravity - vezi
@@ -767,8 +772,8 @@ export default function PlayScreen() {
 
       const elapsed = (now - startedAt) / 1000;
       scriptElapsedRef.current = elapsed;
-      while (nextOp < scriptOps.length && scriptOps[nextOp].t <= elapsed) {
-        const _nextScriptOp = scriptOps[nextOp];
+      while (nextOp < scriptOpsRef.current.length && scriptOpsRef.current[nextOp].t <= elapsed) {
+        const _nextScriptOp = scriptOpsRef.current[nextOp];
           applyOp(scene, scriptMeshes, physics, _nextScriptOp);
           // Scriptul jocului (main.lua) poate suprascrie viteza de mers/saritura/gravitatie
           // prin workspace.MoveSpeed / workspace.JumpSpeed / workspace.Gravity - vezi
