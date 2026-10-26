@@ -1045,6 +1045,192 @@ const onContextCreate = async (gl: any) => {
       setCrashError(e?.message ? String(e.message) : String(e));
     }
   };
+
+  function doRespawn() {
+    const target = activeCheckpointRef.current ?? spawnPointRef.current;
+    pos.current.set(target.x, target.y, target.z);
+    velY.current = 0;
+    groundedRef.current = true;
+    jumpRequestedRef.current = false;
+    facingAngle.current = (target.ry * Math.PI) / 180;
+    setShowMenu(false);
+  }
+
+  function doJump() {
+    // un singur "flag" per apasare: onPressIn se declanseaza o singura data la atingere,
+    // deci tinerea apasata a butonului NU repeta saritura (vezi bucla de gravitatie, care
+    // consuma si reseteaza acest flag o singura data pe frame).
+    jumpRequestedRef.current = true;
+  }
+  async function doLeave() {
+    const inst = instanceRef.current;
+    if (inst) api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: inst.instance_id }) }).catch(() => {});
+    router.replace({ pathname: "/game/[id]", params: { id } } as any);
+  }
+
+  function doRetryAfterCrash() {
+    setCrashError(null);
+    physicsRef.current?.dispose();
+    physicsRef.current = null;
+    disposeSceneResources();
+    setReady(false);
+    setGlMountKey(k => k + 1);
+  }
+
+  useEffect(() => {
+    try {
+      const r = rendererRef.current as any;
+      const cam = cameraRef.current;
+      if (!r) return;
+      r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
+      if (cam) {
+        const size = new THREE.Vector2();
+        r.getSize(size);
+        if (size.x > 0 && size.y > 0) {
+          cam.aspect = size.x / size.y;
+          cam.updateProjectionMatrix();
+        }
+      }
+    } catch (e: any) {
+      console.log("[play] quality effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [quality]);
+  useEffect(() => {
+    try {
+      if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
+    } catch (e: any) {
+      console.log("[play] graphicsLevel effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [graphicsLevel]);
+  useEffect(() => {
+    try {
+      const cam = cameraRef.current;
+      if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
+    } catch (e: any) {
+      console.log("[play] renderDistance effect crashed", e);
+      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
+    }
+  }, [renderDistance]);
+
+  const isLandscape = screenW > screenH;
+  // Dimensiune adaptiva: proportionala cu latura mica a ecranului, limitata intre 60-84px,
+  // ca sa ramana usor de apasat cu degetul mare atat pe telefoane mici, cat si pe cele mari/tablete.
+  const jumpBtnSize = Math.max(60, Math.min(84, Math.round(Math.min(screenW, screenH) * 0.17)));
+
+  return (
+    <View style={styles.root}>
+      {Platform.OS === "web" || !canStartGL ? (
+        <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
+          <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
+          <Text style={styles.webText}>{game?.title || ""}</Text>
+        </View>
+      ) : (
+        <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
+      )}
+
+      {ready && Platform.OS !== "web" ? (
+        <View
+          style={StyleSheet.absoluteFillObject}
+          onStartShouldSetResponder={() => true}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={onRootResponderGrant}
+          onResponderMove={onRootResponderMove}
+          onResponderRelease={onRootResponderEnd}
+          onResponderTerminate={onRootResponderEnd}
+          onResponderTerminationRequest={() => false}
+        >
+          <View
+            style={styles.joystickZone}
+            pointerEvents="none"
+            onLayout={e => {
+              const { x, y, width, height } = e.nativeEvent.layout;
+              joyZoneLayout.current = { x, y, w: width, h: height };
+            }}
+          >
+            {joyVisible ? (
+              <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
+                <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
+              </View>
+            ) : (
+              <View style={styles.joyHint} pointerEvents="none">
+                <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
+              </View>
+            )}
+          </View>
+        </View>
+      ) : null}
+
+      <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
+        <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
+          <Text style={styles.aBtnText}>A</Text>
+        </Pressable>
+      </SafeAreaView>
+
+      {ready && Platform.OS !== "web" ? (
+        <SafeAreaView edges={["bottom", "right"]} style={styles.jumpBtnWrap} pointerEvents="box-none">
+          <Pressable
+            testID="play-jump-btn"
+            onPressIn={doJump}
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.jumpBtn,
+              { width: jumpBtnSize, height: jumpBtnSize, borderRadius: jumpBtnSize / 2 },
+              pressed && styles.jumpBtnPressed,
+            ]}
+          >
+            <MaterialCommunityIcons name="arrow-up-bold" size={Math.round(jumpBtnSize * 0.46)} color={colors.brand} />
+          </Pressable>
+        </SafeAreaView>
+      ) : null}
+
+      <Modal visible={!!crashError} transparent animationType="fade" onRequestClose={() => {}}>
+        <View style={styles.menuBackdrop}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
+            <MaterialCommunityIcons name="alert-circle-outline" size={28} color={colors.error} style={{ marginBottom: 10 }} />
+            <Text style={styles.menuTitle}>Jocul s-a oprit cu o eroare</Text>
+            <ScrollView style={{ maxHeight: 160 }}>
+              <Text style={styles.crashMessage}>{crashError}</Text>
+            </ScrollView>
+            <Pressable testID="play-crash-retry" onPress={doRetryAfterCrash} style={styles.menuCloseBtn}>
+              <Text style={styles.menuCloseBtnText}>Retry</Text>
+            </Pressable>
+            <Pressable testID="play-crash-leave" onPress={doLeave} style={[styles.menuRow, { justifyContent: "center", marginTop: 4 }]}>
+              <MaterialCommunityIcons name="exit-run" size={18} color={colors.error} />
+              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
+        <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
+          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
+            <Text style={styles.menuTitle}>{game?.title}</Text>
+            <Pressable testID="play-menu-respawn" onPress={doRespawn} style={styles.menuRow}>
+              <MaterialCommunityIcons name="restart" size={20} color={colors.brand} />
+              <Text style={styles.menuRowText}>Respawn</Text>
+            </Pressable>
+            <Pressable testID="play-menu-settings" onPress={() => { setShowMenu(false); setShowSettings(true); }} style={styles.menuRow}>
+              <MaterialCommunityIcons name="cog-outline" size={20} color={colors.brand} />
+              <Text style={styles.menuRowText}>Settings</Text>
+            </Pressable>
+            <Pressable testID="play-menu-leave" onPress={doLeave} style={styles.menuRow}>
+              <MaterialCommunityIcons name="exit-run" size={20} color={colors.error} />
+              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
+        <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
+          <Pressable
+            style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}
+            onPress={(e: any) => e.stopPropagation?.()}
+          >
+            <ScrollView
               style={{ maxHeight: Math.max(220, Math.round(screenH * 0.7) - spacing.lg * 2) }}
               showsVerticalScrollIndicator={false}
             >
