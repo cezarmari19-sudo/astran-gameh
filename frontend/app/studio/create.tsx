@@ -290,11 +290,13 @@ purely visual or don't need to be trusted (graphics settings, UI, cosmetic effec
 
 ## Current limitation (please read)
 
-Astran does not yet have a live runtime that executes these Luau files during gameplay.
-Play Mode currently uses its own built-in physics/rendering/anti-cheat behavior, with the
-same default values these files start with. These files are provided now so you can already
-start customizing your game's rules - they will take effect automatically, without any
-changes needed on your part, once Astran's Luau runtime ships for both server and client.
+Astran does not yet have a live runtime that executes these Luau files every frame during
+gameplay. One part IS wired in today though: \`main.lua\` reads GRAVITY/JUMP_SPEED/MOVE_SPEED
+from \`server/physics.lua\` and assigns them to \`workspace.Gravity\` / \`workspace.JumpSpeed\` /
+\`workspace.MoveSpeed\` - Play Mode's actual player movement uses those values. Everything else
+(the rest of \`physics.lua\`'s functions, \`anticheat.lua\`, \`world.lua\`, \`rendering.lua\`) is still
+just a starting point - it will take effect automatically, without any changes needed on your
+part, once Astran's full Luau runtime ships for both server and client.
 
 ## Trying it out with Run
 
