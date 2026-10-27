@@ -69,3 +69,39 @@ export const authApi = {
   me: () => api("/auth/me"),
   logout: () => api("/auth/logout", { method: "POST" }),
 };
+
+// SECURITY: stergere/recuperare proiect + parola de securitate a proiectului. Oglindeste
+// 1:1 endpointurile din backend/server.py (vezi project_security.py) - fiecare verificare
+// reala (Owner, parola, email, biometrie) se intampla pe server; clientul doar colecteaza
+// datele si afiseaza rezultatul, nu decide niciodata singur daca o actiune e permisa.
+export const projectSecurityApi = {
+  deleteProject: (gameId: string, projectPassword: string) =>
+    api(`/games/${gameId}`, { method: "DELETE", body: JSON.stringify({ project_password: projectPassword, confirm: true }) }),
+  setupPassword: (gameId: string, body: { account_password: string; project_password: string; project_password_confirm: string }) =>
+    api(`/games/${gameId}/security/password/setup`, { method: "POST", body: JSON.stringify(body) }),
+  listTrash: () => api("/games/trash"),
+
+  recoverStart: (gameId: string, accountPassword: string) =>
+    api(`/games/${gameId}/security/recover/start`, { method: "POST", body: JSON.stringify({ account_password: accountPassword }) }),
+  recoverVerifyEmail: (gameId: string, tokenId: string, code: string) =>
+    api(`/games/${gameId}/security/recover/verify-email`, { method: "POST", body: JSON.stringify({ token_id: tokenId, code }) }),
+  recoverConfirm: (gameId: string, tokenId: string) =>
+    api(`/games/${gameId}/security/recover/confirm`, { method: "POST", body: JSON.stringify({ token_id: tokenId }) }),
+
+  resetPasswordStart: (gameId: string, accountPassword: string) =>
+    api(`/games/${gameId}/security/password/reset/start`, { method: "POST", body: JSON.stringify({ account_password: accountPassword }) }),
+  resetPasswordVerifyEmail: (gameId: string, tokenId: string, code: string) =>
+    api(`/games/${gameId}/security/password/reset/verify-email`, { method: "POST", body: JSON.stringify({ token_id: tokenId, code }) }),
+  resetPasswordConfirm: (gameId: string, tokenId: string, newPw: string, newPwConfirm: string) =>
+    api(`/games/${gameId}/security/password/reset/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token_id: tokenId, new_project_password: newPw, new_project_password_confirm: newPwConfirm }),
+    }),
+
+  webauthnForToken: (gameId: string, tokenId: string, challengeId: string, credential: string) =>
+    api(`/games/${gameId}/security/webauthn/verify?token_id=${encodeURIComponent(tokenId)}`, {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: challengeId, credential }),
+    }),
+  webauthnAuthOptions: () => api("/auth/webauthn/authenticate/options", { method: "POST" }),
+};
