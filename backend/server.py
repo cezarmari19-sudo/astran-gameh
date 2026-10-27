@@ -105,6 +105,12 @@ except Exception as exc:  # noqa: BLE001
     make_game_permissions_router = None
     log.warning("Game collaboration/testers disabled: %s", exc)
 
+# SECURE DELETE/RECOVERY: parola de securitate a proiectului (Argon2id), rate limiting,
+# audit log si recuperare (email + WebAuthn biometric) - vezi project_security.py. NU e
+# optional ca celelalte module de mai sus: daca lipseste, stergerea proiectelor ramane
+# dezactivata in loc sa cada inapoi pe fluxul vechi, nesecurizat.
+import astran_sandbox.project_security as psec
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -201,6 +207,10 @@ class GameCreateBody(BaseModel):
     player_character_model_id: Optional[str] = Field(default=None, max_length=64)
     # GROUPS: token privat al unui Group (optional) - daca e valid, jocul se publica sub acel Group
     group_token: Optional[str] = Field(default=None, max_length=64)
+    # SECURITY: parola de securitate a proiectului - OBLIGATORIE la creare (vezi project_security.py).
+    # Nu se stocheaza niciodata in clar: doar hash-ul Argon2id ajunge in baza de date (create_game mai jos).
+    project_password: str = Field(min_length=1, max_length=200)
+    project_password_confirm: str = Field(min_length=1, max_length=200)
 
 
 class GameUpdateBody(BaseModel):
@@ -324,6 +334,8 @@ async def startup():
     await db.games.create_index([("owner_id", 1), ("created_at", -1)])
     await db.games.create_index([("age_category", 1), ("is_public", 1), ("total_plays", -1)])
     await db.games.create_index("group_id")  # GROUPS: lookup rapid al jocurilor unui Group
+    await db.games.create_index([("owner_id", 1), ("deleted", 1)])  # Cosul de gunoi: lista rapida a jocurilor sterse ale unui Owner
+    await psec.create_security_indexes(db)
     await db.friendships.create_index([("user_a", 1), ("user_b", 1)], unique=True)
     await db.friend_requests.create_index([("from_id", 1), ("to_id", 1)], unique=True)
     await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
@@ -593,6 +605,13 @@ def _game_defaults(doc: dict) -> dict:
     doc.setdefault("player_character_model_id", None)
     doc.setdefault("group_id", None)
     doc.setdefault("subgenre", None)
+    doc.setdefault("deleted", False)
+    doc.setdefault("deleted_at", None)
+    doc["has_project_password"] = bool(doc.get("project_password_hash"))
+    # SECURITY: hash-ul parolei de proiect nu paraseste niciodata serverul - ultima linie
+    # de aparare, indiferent de proiectia folosita la query (vezi si queries de mai jos,
+    # care deja il exclud explicit).
+    doc.pop("project_password_hash", None)
     doc["record_created_at"] = doc.get("created_at")
     doc["created_at"] = doc.get("published_created_at")
     doc["updated_at"] = doc.get("published_updated_at")
@@ -942,6 +961,12 @@ how you can confirm an edit actually took effect, even before Play Mode can run 
 async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
     gid = new_id("game_")
 
+    # SECURITY: parola de securitate a proiectului e obligatorie la creare - validata (lungime
+    # 6-30, confirmare identica) si hash-uita cu Argon2id (salt unic, generat automat de
+    # argon2-cffi). Niciodata stocata sau logata in clar.
+    psec.validate_project_password_shape(body.project_password, body.project_password_confirm)
+    project_password_hash = psec.hash_project_password(body.project_password)
+
     # GROUPS: asociere DOAR prin tokenul privat, validat aici - niciodata prin group_id public.
     group_id = None
     if body.group_token:
@@ -977,6 +1002,12 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "script": body.script,
         "max_players": body.max_players,
         "player_character_model_id": body.player_character_model_id,
+        # SECURITY: vezi project_security.py - niciodata expus prin API (filtrat in _game_defaults).
+        "project_password_hash": project_password_hash,
+        "project_password_set_at": now_utc(),
+        "deleted": False,
+        "deleted_at": None,
+        "deleted_by": None,
     }
     await db.games.insert_one(doc)
     # Scaffold: fiecare joc nou porneste cu setul implicit de fisiere Luau (fizica, anti-cheat,
@@ -999,7 +1030,7 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
 @api.patch("/games/{game_id}")
 async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_current_user)):
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    if not g:
+    if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
 
     is_owner_actor = g["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
@@ -1063,19 +1094,303 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     return {"game": out_list[0]}
 
 
+class DeleteGameBody(BaseModel):
+    project_password: str = Field(min_length=1, max_length=200)
+    confirm: bool = False
+
+
+class SetupProjectPasswordBody(BaseModel):
+    account_password: str
+    project_password: str = Field(min_length=1, max_length=200)
+    project_password_confirm: str = Field(min_length=1, max_length=200)
+
+
+class RecoveryStartBody(BaseModel):
+    account_password: str
+
+
+class RecoveryVerifyEmailBody(BaseModel):
+    token_id: str
+    code: str = Field(min_length=1, max_length=12)
+
+
+class RecoveryConfirmBody(BaseModel):
+    token_id: str
+
+
+class PasswordResetConfirmBody(BaseModel):
+    token_id: str
+    new_project_password: str = Field(min_length=1, max_length=200)
+    new_project_password_confirm: str = Field(min_length=1, max_length=200)
+
+
+class WebAuthnVerifyBody(BaseModel):
+    challenge_id: str
+    credential: str  # JSON string produsa de navigator.credentials pe client
+
+
 @api.delete("/games/{game_id}")
-async def delete_game(game_id: str, current=Depends(get_current_user)):
-    # Stergerea jocului ramane EXCLUSIV a Owner-ului (sau platform admin) - niciun nivel
-    # de Editor, oricat de "full", nu primeste aceasta actiune (ireversibila, distructiva).
+async def delete_game(game_id: str, body: DeleteGameBody, request: Request, current=Depends(get_current_user)):
+    """SECURITY: stergerea unui proiect NU mai e imediata/ireversibila din acest endpoint -
+    e un soft-delete in Cosul de gunoi, posibil DOAR pentru Owner, DOAR cu parola de
+    securitate a proiectului, cu rate limiting si audit log (vezi project_security.py).
+
+    Regula "owner-only" e verificata AICI, pe server, din campul owner_id salvat in baza de
+    date la creare - rolul trimis de client (daca exista undeva in payload) nu e niciodata
+    folosit ca dovada de autorizare."""
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+        await psec.log_security_event(
+            db, action="project_delete", result="denied", user_id=current["user_id"],
+            game_id=game_id, detail="not_owner", ip=ip,
+        )
+        # Mesaj deliberat generic - nu confirmam/infirmam existenta sau detalii ale jocului
+        # unui non-owner, indiferent daca acesta cunoaste sau nu parola proiectului.
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate sterge acest proiect")
+
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Confirmarea actiunii este obligatorie")
+
+    await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="project_delete")
+
+    if not g.get("project_password_hash"):
+        # Proiect vechi, creat inainte de acest sistem - nu inventam o parola si nu blocam
+        # definitiv, dar nici nu permitem stergerea pana nu e configurata una.
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "PASSWORD_SETUP_REQUIRED", "message": "Configureaza mai intai o parola de securitate pentru acest proiect"},
+        )
+
+    if not psec.verify_project_password(body.project_password, g["project_password_hash"]):
+        await psec.record_failed_attempt(db, user_id=current["user_id"], scope_id=game_id, purpose="project_delete")
+        await psec.log_security_event(
+            db, action="project_delete", result="failed", user_id=current["user_id"],
+            game_id=game_id, detail="bad_project_password", ip=ip,
+        )
+        raise HTTPException(status_code=401, detail="Parola de securitate a proiectului este incorecta")
+
+    await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="project_delete")
+    now = now_utc()
+    await db.games.update_one(
+        {"game_id": game_id},
+        {"$set": {
+            "deleted": True, "deleted_at": now, "deleted_by": current["user_id"],
+            "status": "trashed", "is_public": False,
+        }},
+    )
+    await psec.log_security_event(
+        db, action="project_delete", result="success", user_id=current["user_id"], game_id=game_id, ip=ip,
+    )
+    # Datele (fisiere, scene, setari, colaboratori) NU sunt sterse - raman intacte in
+    # game_scripts / game_collaborators / game_testers pentru recuperare (vezi item 2).
+    return {"ok": True, "trashed": True}
+
+
+@api.get("/games/trash")
+async def list_trash(current=Depends(get_current_user)):
+    """Cosul de gunoi securizat - vizibil DOAR Owner-ului (query filtrat pe owner_id al
+    utilizatorului autentificat, niciodata pe un id primit din client)."""
+    cursor = db.games.find(
+        {"owner_id": current["user_id"], "deleted": True},
+        {"_id": 0, "script": 0, "scene": 0, "project_password_hash": 0},
+    ).sort("deleted_at", -1)
+    games = await cursor.to_list(200)
+    out = []
+    for g in games:
+        out.append({
+            "game_id": g["game_id"],
+            "title": g.get("title"),
+            "deleted_at": g.get("deleted_at"),
+            "thumbnail_url": g.get("thumbnail_url"),
+            "recovery_state": "pending",
+        })
+    return {"games": out}
+
+
+@api.post("/games/{game_id}/security/password/setup")
+async def setup_project_password(game_id: str, body: SetupProjectPasswordBody, request: Request, current=Depends(get_current_user)):
+    """Flux pentru proiecte create INAINTE de acest sistem - seteaza parola de securitate
+    lipsa, la urmatoarea actiune sensibila. Cere reautentificare cu parola CONTULUI (nu a
+    proiectului, care inca nu exista) si functioneaza o singura data per proiect: odata
+    setata, schimbarea ei trece doar prin fluxul de reset (vezi mai jos)."""
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate configura parola proiectului")
+    if g.get("project_password_hash"):
+        raise HTTPException(status_code=409, detail="Proiectul are deja o parola de securitate - foloseste resetarea")
+
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.log_security_event(db, action="project_password_setup", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+
+    psec.validate_project_password_shape(body.project_password, body.project_password_confirm)
+    pw_hash = psec.hash_project_password(body.project_password)
+    await db.games.update_one({"game_id": game_id}, {"$set": {"project_password_hash": pw_hash, "project_password_set_at": now_utc()}})
+    await psec.log_security_event(db, action="project_password_setup", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"ok": True}
+@api.post("/games/{game_id}/security/password/reset/start")
+async def reset_password_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate reseta parola proiectului")
+    await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.record_failed_attempt(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+        await psec.log_security_event(db, action="password_reset", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+    if not user.get("email"):
+        raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
+
+    tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset")
+    psec.send_recovery_code_email(user["email"], tok.code, purpose="project_password_reset", game_title=g.get("title"))
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    await psec.log_security_event(db, action="password_reset", result="started", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"token_id": tok.token_id, "email_sent_to": user["email"][:2] + "***", "biometric_available": has_biometric}
+
+
+@api.post("/games/{game_id}/security/password/reset/verify-email")
+async def reset_password_verify_email(game_id: str, body: RecoveryVerifyEmailBody, current=Depends(get_current_user)):
+    await psec.verify_recovery_code(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset", code=body.code)
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    return {"ok": True, "biometric_required": has_biometric}
+
+
+@api.post("/games/{game_id}/security/password/reset/confirm")
+async def reset_password_confirm(game_id: str, body: PasswordResetConfirmBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g:
         raise HTTPException(status_code=404, detail="Game not found")
-    if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+    if g["owner_id"] != current["user_id"]:
         raise HTTPException(status_code=403, detail="Not the owner")
-    await db.games.delete_one({"game_id": game_id})
-    await db.game_instances.delete_many({"game_id": game_id})
-    await db.game_collaborators.delete_many({"game_id": game_id})
-    await db.game_testers.delete_many({"game_id": game_id})
+    tok = await psec.get_valid_token(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset")
+    if tok["stage"] not in ("email_verified", "biometric_verified"):
+        raise HTTPException(status_code=400, detail="Verificarea prin email nu a fost finalizata")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    if has_biometric and tok["stage"] != "biometric_verified":
+        raise HTTPException(status_code=400, detail="Verificarea biometrica este obligatorie pentru acest cont")
+
+    psec.validate_project_password_shape(body.new_project_password, body.new_project_password_confirm)
+    pw_hash = psec.hash_project_password(body.new_project_password)
+    await db.games.update_one({"game_id": game_id}, {"$set": {"project_password_hash": pw_hash, "project_password_set_at": now_utc()}})
+    await psec.consume_token(db, token_id=body.token_id)
+    await psec.invalidate_other_tokens(db, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset", keep_token_id=body.token_id)
+    await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+    await psec.log_security_event(db, action="password_reset", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"ok": True}
+
+
+@api.post("/games/{game_id}/security/recover/start")
+async def recover_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or not g.get("deleted"):
+        raise HTTPException(status_code=404, detail="No deleted project with this id")
+    if g["owner_id"] != current["user_id"]:
+        # Colaboratorii (Editor/Tester), chiar cu link direct catre proiect, primesc exact
+        # acelasi refuz - ownership-ul e verificat pe server, nu pe ce poate vedea clientul.
+        await psec.log_security_event(db, action="project_recover", result="denied", user_id=current["user_id"], game_id=game_id, detail="not_owner", ip=ip)
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate recupera acest proiect")
+
+    await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.record_failed_attempt(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+        await psec.log_security_event(db, action="project_recover", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+    if not user.get("email"):
+        raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
+
+    tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover")
+    psec.send_recovery_code_email(user["email"], tok.code, purpose="project_recover", game_title=g.get("title"))
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    await psec.log_security_event(db, action="project_recover", result="started", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"token_id": tok.token_id, "email_sent_to": user["email"][:2] + "***", "biometric_available": has_biometric}
+
+
+@api.post("/games/{game_id}/security/recover/verify-email")
+async def recover_verify_email(game_id: str, body: RecoveryVerifyEmailBody, current=Depends(get_current_user)):
+    await psec.verify_recovery_code(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_recover", code=body.code)
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    return {"ok": True, "biometric_required": has_biometric}
+
+
+@api.post("/games/{game_id}/security/recover/confirm")
+async def recover_confirm(game_id: str, body: RecoveryConfirmBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or not g.get("deleted"):
+        raise HTTPException(status_code=404, detail="No deleted project with this id")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate recupera acest proiect")
+
+    tok = await psec.get_valid_token(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_recover")
+    if tok["stage"] not in ("email_verified", "biometric_verified"):
+        raise HTTPException(status_code=400, detail="Verificarea prin email nu a fost finalizata")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    if has_biometric and tok["stage"] != "biometric_verified":
+        raise HTTPException(status_code=400, detail="Verificarea biometrica este obligatorie pentru acest cont")
+
+    await db.games.update_one(
+        {"game_id": game_id},
+        {"$set": {"deleted": False, "deleted_at": None, "deleted_by": None, "status": "active"}},
+    )
+    await psec.consume_token(db, token_id=body.token_id)
+    await psec.invalidate_other_tokens(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover", keep_token_id=body.token_id)
+    await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+    await psec.log_security_event(db, action="project_recover", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    # Colaboratorii nu au fost niciodata stersi la soft-delete (game_collaborators/game_testers
+    # raman neatinse) - permisiunile lor anterioare se aplica automat din nou.
+    g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g2)]))
+    return {"ok": True, "game": out_list[0]}
+
+
+@api.post("/auth/webauthn/register/options")
+async def webauthn_register_options(current=Depends(get_current_user)):
+    challenge_id, options_json = await psec.webauthn_registration_options(db, user_id=current["user_id"], username=current["username"])
+    return {"challenge_id": challenge_id, "options": options_json}
+
+
+@api.post("/auth/webauthn/register/verify")
+async def webauthn_register_verify(body: WebAuthnVerifyBody, current=Depends(get_current_user)):
+    await psec.webauthn_verify_registration(db, user_id=current["user_id"], challenge_id=body.challenge_id, credential_json=body.credential)
+    await psec.log_security_event(db, action="webauthn_register", result="success", user_id=current["user_id"])
+    return {"ok": True}
+
+
+@api.post("/auth/webauthn/authenticate/options")
+async def webauthn_auth_options(current=Depends(get_current_user)):
+    challenge_id, options_json = await psec.webauthn_authentication_options(db, user_id=current["user_id"])
+    return {"challenge_id": challenge_id, "options": options_json}
+
+
+@api.post("/games/{game_id}/security/webauthn/verify")
+async def webauthn_verify_for_recovery(game_id: str, body: WebAuthnVerifyBody, current=Depends(get_current_user), token_id: str = ""):
+    """Verifica asertiunea WebAuthn si marcheaza token-ul de recuperare/reset drept
+    'biometric_verified' - apelat dupa recover/verify-email sau reset/verify-email, doar
+    daca raspunsul acelora a intors biometric_required=true."""
+    if not token_id:
+        raise HTTPException(status_code=400, detail="token_id lipseste")
+    tok = await db.recovery_tokens.find_one({"token_id": token_id, "user_id": current["user_id"]}, {"_id": 0})
+    if not tok or tok.get("used") or tok.get("stage") not in ("email_verified",):
+        raise HTTPException(status_code=400, detail="Verifica mai intai emailul")
+    await psec.webauthn_verify_authentication(db, user_id=current["user_id"], challenge_id=body.challenge_id, credential_json=body.credential)
+    await psec.mark_token_stage(db, token_id=token_id, stage="biometric_verified")
+    await psec.log_security_event(db, action="webauthn_authenticate", result="success", user_id=current["user_id"], game_id=tok.get("game_id"))
     return {"ok": True}
 
 
@@ -1104,7 +1419,11 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
 
 @api.get("/games/mine")
 async def my_games(current=Depends(get_current_user)):
-    cursor = db.games.find({"owner_id": current["user_id"]}, {"_id": 0, "script": 0}).sort("created_at", -1)
+    # SECURITY: proiectele sterse (soft-delete) nu mai apar in lista normala - traiesc doar
+    # in Cosul de gunoi (GET /games/trash), vizibil si recuperabil doar prin fluxul securizat.
+    cursor = db.games.find(
+        {"owner_id": current["user_id"], "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
+    ).sort("created_at", -1)
     games = await _attach_live_player_counts(
         await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
     )
@@ -1118,7 +1437,9 @@ async def recently_played(current=Depends(get_current_user)):
     game_ids = [e["game_id"] for e in entries]
     if not game_ids:
         return {"games": []}
-    games = await db.games.find({"game_id": {"$in": game_ids}}, {"_id": 0, "script": 0}).to_list(50)
+    games = await db.games.find(
+        {"game_id": {"$in": game_ids}, "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
+    ).to_list(50)
     idx = {g["game_id"]: g for g in games}
     ordered = [idx[gid] for gid in game_ids if gid in idx]
     ordered = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in ordered]))
@@ -1142,7 +1463,9 @@ async def _can_view_private_game(g: dict, current: dict) -> bool:
 @api.get("/games/{game_id}")
 async def get_game(game_id: str, current=Depends(get_current_user)):
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    if not g:
+    # SECURITY: un proiect sters (soft-delete) nu mai e accesibil prin URL-uri/endpointuri
+    # obisnuite - raspunde exact ca un 404 normal, nu dezvaluie ca ar exista dar e in cos.
+    if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
@@ -1184,7 +1507,7 @@ async def reap_empty_instances(game_id: str) -> None:
 async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), current=Depends(get_current_user)):
     """Gaseste sau creeaza o instanta de server cu loc liber si inregistreaza jucatorul in ea."""
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    if not g:
+    if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
     if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
         raise HTTPException(status_code=403, detail="Age-restricted content")
@@ -1276,7 +1599,7 @@ async def instance_leave(game_id: str, body: HeartbeatBody, current=Depends(get_
 async def list_instances(game_id: str, current=Depends(get_current_user)):
     """Lista serverelor deschise pentru un joc (util pentru debugging/afisare optionala in UI)."""
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-    if not g:
+    if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
 
     # SECURITY: vezi _can_view_private_game - aceeasi regula ca la get_game/play_game, ca
