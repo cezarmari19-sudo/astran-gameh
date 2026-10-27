@@ -60,6 +60,11 @@ export default function StudioScreen() {
           <Text style={styles.sub}>{tab === "games" ? t("my_games") : "MY MODELS"}</Text>
         </View>
         <View style={styles.headerBtns}>
+          {tab === "games" ? (
+            <Pressable testID="studio-trash-btn" onPress={() => router.push("/studio/trash" as any)} style={styles.shopBtn}>
+              <MaterialCommunityIcons name="delete-outline" size={20} color={colors.onSurface2} />
+            </Pressable>
+          ) : null}
           <Pressable testID="studio-shop-btn" onPress={() => router.push("/shop" as any)} style={styles.shopBtn}>
             <MaterialCommunityIcons name="storefront-outline" size={20} color={colors.brand} />
           </Pressable>
