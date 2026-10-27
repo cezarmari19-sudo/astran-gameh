@@ -16,6 +16,8 @@ import { PrimaryButton } from "@/src/components/ui";
 import CodeStudio from "@/src/components/CodeStudio";
 import AssetPicker from "@/src/components/AssetPicker";
 import GameAccessManager from "@/src/components/GameAccessManager";
+import DeleteProjectFlow from "@/src/components/DeleteProjectFlow";
+import { useAuth } from "@/src/context/AuthContext";
 import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
 import {
   ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
@@ -325,6 +327,7 @@ const GROUND_STEP = 10;
 export default function StudioEditor() {
   const router = useRouter();
   const { t } = useI18n();
+  const { user } = useAuth();
   const params = useLocalSearchParams<{ id?: string }>();
   const editingId = params.id && params.id !== "new" ? params.id : null;
 
@@ -346,6 +349,12 @@ export default function StudioEditor() {
   const [groundWidthText, setGroundWidthText] = useState(String(groundWidthOf({})));
   const [groundDepthText, setGroundDepthText] = useState(String(groundDepthOf({})));
   const [showMeta, setShowMeta] = useState(false);
+  // SECURITY: parola de securitate a proiectului - obligatorie la crearea unui joc NOU
+  // (vezi backend/server.py: GameCreateBody.project_password). Nu se foloseste la editare.
+  const [projectPassword, setProjectPassword] = useState("");
+  const [projectPasswordConfirm, setProjectPasswordConfirm] = useState("");
+  const [showProjectPassword, setShowProjectPassword] = useState(false);
+  const [showDeleteFlow, setShowDeleteFlow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [glReady, setGlReady] = useState(false);
@@ -650,6 +659,19 @@ export default function StudioEditor() {
 
   async function save() {
     if (!title || title.length < 2) { setErr("Title too short"); setShowCode(false); setShowMeta(true); return; }
+    if (!editingId) {
+      // SECURITY: parola de securitate e obligatorie DOAR la crearea unui proiect nou -
+      // backend-ul oricum o cere si o re-valideaza (lungime 6-30, confirmare identica),
+      // verificarea de aici e doar ca sa nu trimitem o cerere care va fi oricum refuzata.
+      if (projectPassword.length < 6 || projectPassword.length > 30) {
+        setErr("Parola de securitate a proiectului trebuie sa aiba intre 6 si 30 de caractere");
+        setShowCode(false); setShowMeta(true); return;
+      }
+      if (projectPassword !== projectPasswordConfirm) {
+        setErr("Parolele de securitate introduse nu coincid");
+        setShowCode(false); setShowMeta(true); return;
+      }
+    }
     const maxPlayers = Math.max(MAX_PLAYERS_MIN, Math.min(MAX_PLAYERS_MAX, parseInt(maxPlayersText, 10) || 20));
     setBusy(true); setErr(null);
     try {
@@ -658,6 +680,10 @@ export default function StudioEditor() {
         subgenre: subgenre.trim() || null,
         thumbnail_url: thumbnail, scene, max_players: maxPlayers,
       };
+      if (!editingId) {
+        body.project_password = projectPassword;
+        body.project_password_confirm = projectPasswordConfirm;
+      }
       if (playerCharacterId) { body.player_character_model_id = playerCharacterId; body.player_character_source = "shop_model"; }
       else body.clear_player_character = true;
 
@@ -703,16 +729,13 @@ export default function StudioEditor() {
     finally { setBusy(false); }
   }
 
-  async function del() {
-    if (!editingId) return;
-    setBusy(true);
-    try {
-      await api(`/games/${editingId}`, { method: "DELETE" });
-      if (router.canGoBack()) router.back();
-      else router.replace("/(tabs)/studio");
-    }
-    catch (e: any) { setErr(e.message); }
-    finally { setBusy(false); }
+  // SECURITY: nu mai stergem direct la apasare - deschidem fluxul in 2 pasi (avertisment +
+  // autentificare cu parola de securitate a proiectului). Vezi DeleteProjectFlow.tsx si
+  // backend/server.py (DELETE /games/{id} face acum soft-delete + toate verificarile).
+  function onDeleted() {
+    setShowDeleteFlow(false);
+    if (router.canGoBack()) router.back();
+    else router.replace("/(tabs)/studio");
   }
 
   // Sync three.js scene with our state on every scene / selection change
@@ -1219,7 +1242,7 @@ export default function StudioEditor() {
 
       <View style={styles.footer}>
         {editingId ? (
-          <Pressable testID="editor-delete-game" onPress={del} style={styles.delBtn}>
+          <Pressable testID="editor-delete-game" onPress={() => setShowDeleteFlow(true)} style={styles.delBtn}>
             <MaterialCommunityIcons name="trash-can-outline" size={20} color={colors.error} />
           </Pressable>
         ) : null}
@@ -1251,7 +1274,187 @@ export default function StudioEditor() {
       />
 
       {editingId ? (
-        <GameAccessManager visible={showAccess} gameId={editingId} onClose={() => setShowAccess(false)} />
+        <>
+          <GameAccessManager visible={showAccess} gameId={editingId} onClose={() => setShowAccess(false)} />
+          <DeleteProjectFlow
+            visible={showDeleteFlow}
+            gameId={editingId}
+            ownerLabel={user?.username}
+            onClose={() => setShowDeleteFlow(false)}
+            onDeleted={onDeleted}
+          />
+        </>
+      ) : null}
+
+      <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, justifyContent: "flex-end" }}>
+          <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }} onPress={() => setShowMeta(false)} />
+          <ScrollView style={styles.sheet} contentContainerStyle={{ paddingBottom: 30 }} keyboardShouldPersistTaps="handled">
+            <Text style={styles.sheetTitle}>Game Info</Text>
+            {thumbnail ? (
+              <Pressable testID="editor-change-thumb" onPress={pickThumb} style={styles.thumbBox}>
+                <Image source={{ uri: thumbnail }} style={StyleSheet.absoluteFillObject} contentFit="cover" />
+                <View style={styles.thumbOverlay}><MaterialCommunityIcons name="camera" size={20} color="#fff" /><Text style={styles.thumbText}>Change photo</Text></View>
+              </Pressable>
+            ) : (
+              <Pressable testID="editor-pick-thumb-meta" onPress={pickThumb} style={[styles.thumbBox, { backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" }]}>
+          <Pressable testID="editor-add-spawn" onPress={() => addSpawnPoint("spawn")} style={[styles.toolBtn, hasSpawnPoint && { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="map-marker-radius-outline" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>spawn</Text>
+          </Pressable>
+          <Pressable testID="editor-add-checkpoint" onPress={() => addSpawnPoint("checkpoint")} style={[styles.toolBtn, hasCheckpoint && { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="flag-checkered" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>checkpoint</Text>
+          </Pressable>
+          {OBJ_TYPES.map(k => (
+            <Pressable key={k} testID={`editor-add-${k}`} onPress={() => addObject(k)} style={styles.toolBtn}>
+              <MaterialCommunityIcons name={iconFor(k) as any} size={22} color={colors.brand} />
+              <Text style={styles.toolBtnText}>{k}</Text>
+            </Pressable>
+          ))}
+          <Pressable testID="editor-pick-thumb" onPress={pickThumb} style={[styles.toolBtn, { borderColor: colors.brand }]}>
+            <MaterialCommunityIcons name="image-plus" size={22} color={colors.brand} />
+            <Text style={styles.toolBtnText}>{thumbnail ? "thumb ✓" : "thumbnail"}</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+
+      {selIds.length > 1 ? (
+        <MultiSelectBar
+          count={selIds.length}
+          onSolid={() => setSolidForSelection(true)}
+          onUnsolid={() => setSolidForSelection(false)}
+          onDelete={removeSel}
+          onClear={() => setSelIds([])}
+        />
+      ) : singleSel ? (
+        <Inspector
+          obj={singleSel}
+          onChange={updateSel}
+          onDelete={removeSel}
+          onDuplicate={duplicateSel}
+          onFocus={focusSel}
+          onClose={() => setSelIds([])}
+          onSetInitial={() => setInitialSpawn(singleSel.id)}
+        />
+      ) : baseplateSelected ? (
+        <View style={styles.baseplatePanel}>
+          <View style={styles.baseplateHeader}>
+            <MaterialCommunityIcons name="grid" size={16} color={colors.brand} />
+            <Text style={styles.baseplateTitle}>BASEPLATE</Text>
+            <Pressable testID="baseplate-close" onPress={() => setBaseplateSelected(false)} style={styles.baseplateCloseBtn}>
+              <MaterialCommunityIcons name="close" size={16} color={colors.onSurface3} />
+            </Pressable>
+          </View>
+          <View style={styles.baseplateRow}>
+            <View style={styles.baseplateField}>
+              <Text style={styles.baseplateLabel}>WIDTH (X)</Text>
+              <View style={styles.baseplateStepperRow}>
+                <Pressable testID="baseplate-width-minus" onPress={() => nudgeGround(-GROUND_STEP, 0)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="minus" size={16} color={colors.onSurface} />
+                </Pressable>
+                <TextInput
+                  testID="baseplate-width-input"
+                  value={groundWidthText}
+                  onChangeText={setGroundWidthText}
+                  onEndEditing={commitGroundWidth}
+                  keyboardType="number-pad"
+                  style={styles.baseplateInput}
+                />
+                <Pressable testID="baseplate-width-plus" onPress={() => nudgeGround(GROUND_STEP, 0)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="plus" size={16} color={colors.onSurface} />
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.baseplateField}>
+              <Text style={styles.baseplateLabel}>DEPTH (Z)</Text>
+              <View style={styles.baseplateStepperRow}>
+                <Pressable testID="baseplate-depth-minus" onPress={() => nudgeGround(0, -GROUND_STEP)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="minus" size={16} color={colors.onSurface} />
+                </Pressable>
+                <TextInput
+                  testID="baseplate-depth-input"
+                  value={groundDepthText}
+                  onChangeText={setGroundDepthText}
+                  onEndEditing={commitGroundDepth}
+                  keyboardType="number-pad"
+                  style={styles.baseplateInput}
+                />
+                <Pressable testID="baseplate-depth-plus" onPress={() => nudgeGround(0, GROUND_STEP)} style={styles.baseplateStepBtn}>
+                  <MaterialCommunityIcons name="plus" size={16} color={colors.onSurface} />
+                </Pressable>
+              </View>
+            </View>
+          </View>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+            <Text style={styles.baseplateHint}>{GROUND_MIN}–{GROUND_MAX} units · grid updates live</Text>
+            <Pressable testID="baseplate-reset" onPress={resetGroundSize}>
+              <Text style={styles.baseplateResetText}>Reset to default</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.objList}>
+          <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select, or use Box Select</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingBottom: 8 }}>
+            {scene.objects.map(o => {
+              const spawnLike = o.type === SPAWN_TYPE;
+              const label = spawnLike ? (spawnKindOf(o) === "checkpoint" ? "checkpoint" : "spawn") : o.type;
+              return (
+                <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => { setBaseplateSelected(false); setSelIds([o.id]); }} style={[styles.objChip, { borderColor: spawnLike ? colors.brand : o.color }]}>
+                  <MaterialCommunityIcons name={iconForObj(o) as any} size={14} color={spawnLike ? colors.brand : o.color} />
+                  <Text style={styles.objChipText}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
+      <View style={styles.footer}>
+        {editingId ? (
+          <Pressable testID="editor-delete-game" onPress={() => setShowDeleteFlow(true)} style={styles.delBtn}>
+            <MaterialCommunityIcons name="trash-can-outline" size={20} color={colors.error} />
+          </Pressable>
+        ) : null}
+        {editingId ? (
+          <Pressable testID="editor-play" onPress={() => router.push({ pathname: "/play/[id]", params: { id: editingId } })} style={styles.playBtn}>
+            <MaterialCommunityIcons name="play" size={20} color={colors.onSurface} />
+          </Pressable>
+        ) : null}
+        <View style={{ flex: 1 }}>
+          <PrimaryButton testID="editor-save" label={busy ? "..." : t("save")} icon="check" onPress={save} disabled={busy} />
+        </View>
+      </View>
+
+      <CodeStudio
+        visible={showCode}
+        project={project}
+        onChange={next => { projectDirty.current = true; setSaved(false); setProject(next); }}
+        onClose={() => setShowCode(false)}
+        onSave={save}
+        saving={busy}
+        saved={saved}
+      />
+
+      <AssetPicker
+        visible={showAssets}
+        assetIds={assetIds}
+        onChange={ids => { assetsDirty.current = true; setSaved(false); setAssetIds(ids); }}
+        onClose={() => setShowAssets(false)}
+      />
+
+      {editingId ? (
+        <>
+          <GameAccessManager visible={showAccess} gameId={editingId} onClose={() => setShowAccess(false)} />
+          <DeleteProjectFlow
+            visible={showDeleteFlow}
+            gameId={editingId}
+            ownerLabel={user?.username}
+            onClose={() => setShowDeleteFlow(false)}
+            onDeleted={onDeleted}
+          />
+        </>
       ) : null}
 
       <Modal visible={showMeta} transparent animationType="slide" onRequestClose={() => setShowMeta(false)}>
@@ -1274,6 +1477,43 @@ export default function StudioEditor() {
             <TextInput testID="editor-title" value={title} onChangeText={setTitle} style={styles.input} placeholder="Neon Runner" placeholderTextColor={colors.onSurface3} />
             <Text style={styles.lab}>{t("game_desc")}</Text>
             <TextInput testID="editor-desc" value={description} onChangeText={setDescription} multiline style={[styles.input, { height: 80 }]} placeholder="..." placeholderTextColor={colors.onSurface3} />
+            {!editingId ? (
+              <>
+                <Text style={styles.lab}>Parolă de securitate a proiectului</Text>
+                <Text style={styles.hintSmall}>
+                  6-30 caractere (litere mari/mici, cifre și caractere speciale sunt permise).
+                  Îți va fi cerută pentru a șterge sau recupera acest proiect - nu o poți
+                  recupera fără parola contului, email și, dacă e configurată, biometrie.
+                </Text>
+                <View style={styles.pwFieldRow}>
+                  <TextInput
+                    testID="editor-project-password"
+                    value={projectPassword}
+                    onChangeText={setProjectPassword}
+                    secureTextEntry={!showProjectPassword}
+                    autoCapitalize="none"
+                    style={[styles.input, { flex: 1 }]}
+                    placeholder="Parolă proiect"
+                    placeholderTextColor={colors.onSurface3}
+                    maxLength={30}
+                  />
+                  <Pressable testID="editor-project-password-toggle" onPress={() => setShowProjectPassword(v => !v)} hitSlop={10} style={{ padding: 10 }}>
+                    <MaterialCommunityIcons name={showProjectPassword ? "eye-off-outline" : "eye-outline"} size={20} color={colors.onSurface3} />
+                  </Pressable>
+                </View>
+                <TextInput
+                  testID="editor-project-password-confirm"
+                  value={projectPasswordConfirm}
+                  onChangeText={setProjectPasswordConfirm}
+                  secureTextEntry={!showProjectPassword}
+                  autoCapitalize="none"
+                  style={styles.input}
+                  placeholder="Confirmă parola"
+                  placeholderTextColor={colors.onSurface3}
+                  maxLength={30}
+                />
+              </>
+            ) : null}
             <Text style={styles.lab}>Genre</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
               {["adventure", "shooter", "simulation", "racing", "roleplay", "puzzle", "other"].map(c => (
@@ -1443,6 +1683,7 @@ const styles = StyleSheet.create({
   thumbText: { color: "#fff", fontSize: 11, fontWeight: "700" },
   lab: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14 },
   hintSmall: { color: colors.onSurface3, fontSize: 11, marginTop: 6 },
+  pwFieldRow: { flexDirection: "row", alignItems: "center" },
   input: { marginTop: 6, backgroundColor: colors.surface2, color: colors.onSurface, fontSize: 15, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: colors.border },
   pill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
   pillActive: { backgroundColor: colors.brandTint, borderColor: colors.brand },
