@@ -308,23 +308,46 @@ def send_recovery_code_email(to_email: str, code: str, *, purpose: str, game_tit
           "verifica securitatea contului tau."
     )
     if not email_is_configured():
-        log.warning("SMTP not configured - recovery email NOT sent to %s (purpose=%s)", to_email, purpose)
+        log.warning(
+            "SMTP not configured (missing SMTP_HOST/SMTP_USER/SMTP_PASS) - recovery email "
+            "NOT sent to %s (purpose=%s)", to_email, purpose,
+        )
         if DEV_EXPOSE_RECOVERY_CODES:
             log.warning("[DEV ONLY, ASTRAN_DEV_EXPOSE_RECOVERY_CODES=true] code=%s", code)
         return False
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg.set_content(body)
     try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = SMTP_FROM
-        msg["To"] = to_email
-        msg.set_content(body)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
-            s.starttls()
-            s.login(SMTP_USER, SMTP_PASS)
-            s.send_message(msg)
+        # Portul 465 e TLS implicit (SMTP_SSL); orice alt port (ex. 587, 25) foloseste
+        # STARTTLS. Multi furnizori (SendGrid, Mailgun, SES SMTP, Gmail) dau 465 sau 587 -
+        # fara aceasta ramificatie, configurarea cu 465 esueaza mereu la handshake TLS.
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+                s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+                s.starttls()
+                s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
         return True
+    except smtplib.SMTPAuthenticationError as exc:
+        log.error("Recovery email NOT sent to %s: SMTP authentication rejected (check SMTP_USER/SMTP_PASS and that the sender/account is verified with the provider): %s", to_email, exc)
+        return False
+    except smtplib.SMTPRecipientsRefused as exc:
+        log.error("Recovery email NOT sent to %s: provider refused the recipient address: %s", to_email, exc)
+        return False
+    except smtplib.SMTPSenderRefused as exc:
+        log.error("Recovery email NOT sent to %s: provider refused SMTP_FROM=%s (sender/domain likely not verified): %s", to_email, SMTP_FROM, exc)
+        return False
+    except (smtplib.SMTPConnectError, TimeoutError, OSError) as exc:
+        log.error("Recovery email NOT sent to %s: could not reach SMTP_HOST=%s:%s (network/firewall/DNS or wrong host/port): %s", to_email, SMTP_HOST, SMTP_PORT, exc)
+        return False
     except Exception as exc:  # noqa: BLE001
-        log.error("Failed to send recovery email: %s", exc)
+        log.error("Recovery email NOT sent to %s: unexpected error: %s", to_email, exc)
         return False
 
 
