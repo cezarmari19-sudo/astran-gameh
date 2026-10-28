@@ -1174,3 +1174,1006 @@ async def delete_game(game_id: str, body: DeleteGameBody, request: Request, curr
         raise HTTPException(status_code=401, detail="Parola de securitate a proiectului este incorecta")
 
     await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="project_delete")
+    now = now_utc()
+    await db.games.update_one(
+        {"game_id": game_id},
+        {"$set": {
+            "deleted": True, "deleted_at": now, "deleted_by": current["user_id"],
+            "status": "trashed", "is_public": False,
+        }},
+    )
+    await psec.log_security_event(
+        db, action="project_delete", result="success", user_id=current["user_id"], game_id=game_id, ip=ip,
+    )
+    # Datele (fisiere, scene, setari, colaboratori) NU sunt sterse - raman intacte in
+    # game_scripts / game_collaborators / game_testers pentru recuperare (vezi item 2).
+    return {"ok": True, "trashed": True}
+
+
+@api.get("/games/trash")
+async def list_trash(current=Depends(get_current_user)):
+    """Cosul de gunoi securizat - vizibil DOAR Owner-ului (query filtrat pe owner_id al
+    utilizatorului autentificat, niciodata pe un id primit din client)."""
+    cursor = db.games.find(
+        {"owner_id": current["user_id"], "deleted": True},
+        {"_id": 0, "script": 0, "scene": 0, "project_password_hash": 0},
+    ).sort("deleted_at", -1)
+    games = await cursor.to_list(200)
+    out = []
+    for g in games:
+        out.append({
+            "game_id": g["game_id"],
+            "title": g.get("title"),
+            "deleted_at": g.get("deleted_at"),
+            "thumbnail_url": g.get("thumbnail_url"),
+            "recovery_state": "pending",
+        })
+    return {"games": out}
+
+
+@api.post("/games/{game_id}/security/password/setup")
+async def setup_project_password(game_id: str, body: SetupProjectPasswordBody, request: Request, current=Depends(get_current_user)):
+    """Flux pentru proiecte create INAINTE de acest sistem - seteaza parola de securitate
+    lipsa, la urmatoarea actiune sensibila. Cere reautentificare cu parola CONTULUI (nu a
+    proiectului, care inca nu exista) si functioneaza o singura data per proiect: odata
+    setata, schimbarea ei trece doar prin fluxul de reset (vezi mai jos)."""
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate configura parola proiectului")
+    if g.get("project_password_hash"):
+        raise HTTPException(status_code=409, detail="Proiectul are deja o parola de securitate - foloseste resetarea")
+
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.log_security_event(db, action="project_password_setup", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+
+    psec.validate_project_password_shape(body.project_password, body.project_password_confirm)
+    pw_hash = psec.hash_project_password(body.project_password)
+    await db.games.update_one({"game_id": game_id}, {"$set": {"project_password_hash": pw_hash, "project_password_set_at": now_utc()}})
+    await psec.log_security_event(db, action="project_password_setup", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"ok": True}
+@api.post("/games/{game_id}/security/password/reset/start")
+async def reset_password_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate reseta parola proiectului")
+    await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.record_failed_attempt(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+        await psec.log_security_event(db, action="password_reset", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+    if not user.get("email"):
+        raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
+
+    tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset")
+    email_sent = psec.send_recovery_code_email(user["email"], tok.code, purpose="project_password_reset", game_title=g.get("title"))
+    if not email_sent:
+        # Nu lasam tokenul "created" in picioare daca nimeni nu a primit codul - altfel
+        # ramane un cod valid, nefolosit, pe care nimeni nu-l poate introduce.
+        await psec.consume_token(db, token_id=tok.token_id)
+        await psec.log_security_event(db, action="password_reset", result="failed", user_id=current["user_id"], game_id=game_id, detail="email_delivery_failed", ip=ip)
+        raise HTTPException(status_code=503, detail="Nu am putut trimite emailul cu codul de verificare. Incearca din nou in cateva minute sau contacteaza suportul daca problema persista.")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    await psec.log_security_event(db, action="password_reset", result="started", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"token_id": tok.token_id, "email_sent_to": user["email"][:2] + "***", "biometric_available": has_biometric}
+
+
+@api.post("/games/{game_id}/security/password/reset/verify-email")
+async def reset_password_verify_email(game_id: str, body: RecoveryVerifyEmailBody, current=Depends(get_current_user)):
+    await psec.verify_recovery_code(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset", code=body.code)
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    return {"ok": True, "biometric_required": has_biometric}
+
+
+@api.post("/games/{game_id}/security/password/reset/confirm")
+async def reset_password_confirm(game_id: str, body: PasswordResetConfirmBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Not the owner")
+    tok = await psec.get_valid_token(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset")
+    if tok["stage"] not in ("email_verified", "biometric_verified"):
+        raise HTTPException(status_code=400, detail="Verificarea prin email nu a fost finalizata")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    if has_biometric and tok["stage"] != "biometric_verified":
+        raise HTTPException(status_code=400, detail="Verificarea biometrica este obligatorie pentru acest cont")
+
+    psec.validate_project_password_shape(body.new_project_password, body.new_project_password_confirm)
+    pw_hash = psec.hash_project_password(body.new_project_password)
+    await db.games.update_one({"game_id": game_id}, {"$set": {"project_password_hash": pw_hash, "project_password_set_at": now_utc()}})
+    await psec.consume_token(db, token_id=body.token_id)
+    await psec.invalidate_other_tokens(db, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset", keep_token_id=body.token_id)
+    await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="password_reset")
+    await psec.log_security_event(db, action="password_reset", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"ok": True}
+
+
+@api.post("/games/{game_id}/security/recover/start")
+async def recover_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or not g.get("deleted"):
+        raise HTTPException(status_code=404, detail="No deleted project with this id")
+    if g["owner_id"] != current["user_id"]:
+        # Colaboratorii (Editor/Tester), chiar cu link direct catre proiect, primesc exact
+        # acelasi refuz - ownership-ul e verificat pe server, nu pe ce poate vedea clientul.
+        await psec.log_security_event(db, action="project_recover", result="denied", user_id=current["user_id"], game_id=game_id, detail="not_owner", ip=ip)
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate recupera acest proiect")
+
+    await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+    user = await db.users.find_one({"user_id": current["user_id"]})
+    if not user or not user.get("password_hash") or not verify_pw(body.account_password, user["password_hash"]):
+        await psec.record_failed_attempt(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+        await psec.log_security_event(db, action="project_recover", result="denied", user_id=current["user_id"], game_id=game_id, detail="bad_account_password", ip=ip)
+        raise HTTPException(status_code=401, detail="Parola contului este incorecta")
+    if not user.get("email"):
+        raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
+
+    tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover")
+    email_sent = psec.send_recovery_code_email(user["email"], tok.code, purpose="project_recover", game_title=g.get("title"))
+    if not email_sent:
+        await psec.consume_token(db, token_id=tok.token_id)
+        await psec.log_security_event(db, action="project_recover", result="failed", user_id=current["user_id"], game_id=game_id, detail="email_delivery_failed", ip=ip)
+        raise HTTPException(status_code=503, detail="Nu am putut trimite emailul cu codul de verificare. Incearca din nou in cateva minute sau contacteaza suportul daca problema persista.")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    await psec.log_security_event(db, action="project_recover", result="started", user_id=current["user_id"], game_id=game_id, ip=ip)
+    return {"token_id": tok.token_id, "email_sent_to": user["email"][:2] + "***", "biometric_available": has_biometric}
+
+
+@api.post("/games/{game_id}/security/recover/verify-email")
+async def recover_verify_email(game_id: str, body: RecoveryVerifyEmailBody, current=Depends(get_current_user)):
+    await psec.verify_recovery_code(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_recover", code=body.code)
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    return {"ok": True, "biometric_required": has_biometric}
+
+
+@api.post("/games/{game_id}/security/recover/confirm")
+async def recover_confirm(game_id: str, body: RecoveryConfirmBody, request: Request, current=Depends(get_current_user)):
+    ip = request.client.host if request.client else None
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or not g.get("deleted"):
+        raise HTTPException(status_code=404, detail="No deleted project with this id")
+    if g["owner_id"] != current["user_id"]:
+        raise HTTPException(status_code=403, detail="Doar Owner-ul poate recupera acest proiect")
+
+    tok = await psec.get_valid_token(db, token_id=body.token_id, user_id=current["user_id"], game_id=game_id, purpose="project_recover")
+    if tok["stage"] not in ("email_verified", "biometric_verified"):
+        raise HTTPException(status_code=400, detail="Verificarea prin email nu a fost finalizata")
+    has_biometric = await psec.user_has_webauthn(db, user_id=current["user_id"])
+    if has_biometric and tok["stage"] != "biometric_verified":
+        raise HTTPException(status_code=400, detail="Verificarea biometrica este obligatorie pentru acest cont")
+
+    await db.games.update_one(
+        {"game_id": game_id},
+        {"$set": {"deleted": False, "deleted_at": None, "deleted_by": None, "status": "active"}},
+    )
+    await psec.consume_token(db, token_id=body.token_id)
+    await psec.invalidate_other_tokens(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover", keep_token_id=body.token_id)
+    await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
+    await psec.log_security_event(db, action="project_recover", result="success", user_id=current["user_id"], game_id=game_id, ip=ip)
+    # Colaboratorii nu au fost niciodata stersi la soft-delete (game_collaborators/game_testers
+    # raman neatinse) - permisiunile lor anterioare se aplica automat din nou.
+    g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g2)]))
+    return {"ok": True, "game": out_list[0]}
+
+
+@api.post("/auth/webauthn/register/options")
+async def webauthn_register_options(current=Depends(get_current_user)):
+    challenge_id, options_json = await psec.webauthn_registration_options(db, user_id=current["user_id"], username=current["username"])
+    return {"challenge_id": challenge_id, "options": options_json}
+
+
+@api.post("/auth/webauthn/register/verify")
+async def webauthn_register_verify(body: WebAuthnVerifyBody, current=Depends(get_current_user)):
+    await psec.webauthn_verify_registration(db, user_id=current["user_id"], challenge_id=body.challenge_id, credential_json=body.credential)
+    await psec.log_security_event(db, action="webauthn_register", result="success", user_id=current["user_id"])
+    return {"ok": True}
+
+
+@api.post("/auth/webauthn/authenticate/options")
+async def webauthn_auth_options(current=Depends(get_current_user)):
+    challenge_id, options_json = await psec.webauthn_authentication_options(db, user_id=current["user_id"])
+    return {"challenge_id": challenge_id, "options": options_json}
+
+
+@api.post("/games/{game_id}/security/webauthn/verify")
+async def webauthn_verify_for_recovery(game_id: str, body: WebAuthnVerifyBody, current=Depends(get_current_user), token_id: str = ""):
+    """Verifica asertiunea WebAuthn si marcheaza token-ul de recuperare/reset drept
+    'biometric_verified' - apelat dupa recover/verify-email sau reset/verify-email, doar
+    daca raspunsul acelora a intors biometric_required=true."""
+    if not token_id:
+        raise HTTPException(status_code=400, detail="token_id lipseste")
+    tok = await db.recovery_tokens.find_one({"token_id": token_id, "user_id": current["user_id"]}, {"_id": 0})
+    if not tok or tok.get("used") or tok.get("stage") not in ("email_verified",):
+        raise HTTPException(status_code=400, detail="Verifica mai intai emailul")
+    await psec.webauthn_verify_authentication(db, user_id=current["user_id"], challenge_id=body.challenge_id, credential_json=body.credential)
+    await psec.mark_token_stage(db, token_id=token_id, stage="biometric_verified")
+    await psec.log_security_event(db, action="webauthn_authenticate", result="success", user_id=current["user_id"], game_id=tok.get("game_id"))
+    return {"ok": True}
+
+
+@api.get("/games/discover")
+async def discover(section: str = "for_you", current=Depends(get_current_user)):
+    age = current.get("age_category", "under_18")
+    q: dict = {"is_public": True, "status": "active"}
+    if age == "under_18":
+        q["age_category"] = "under_18"
+    sort_map = {
+        "for_you": [("total_plays", -1), ("likes", -1)],
+        # NOTA: "trending" sorta dupa games.player_count, care nu mai e actualizat (vezi
+        # _attach_live_player_counts) - ar fi fost mereu 0 pentru toate jocurile, deci sortarea
+        # nu facea nimic. total_plays e proxy-ul real disponibil pentru "activitate recenta".
+        "trending": [("total_plays", -1), ("likes", -1)],
+        "new": [("created_at", -1)],
+        "popular": [("likes", -1), ("total_plays", -1)],
+    }
+    sort = sort_map.get(section, sort_map["for_you"])
+    cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
+    games = await _attach_live_player_counts(
+        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(30)])
+    )
+    return {"section": section, "games": games}
+
+
+@api.get("/games/mine")
+async def my_games(current=Depends(get_current_user)):
+    # SECURITY: proiectele sterse (soft-delete) nu mai apar in lista normala - traiesc doar
+    # in Cosul de gunoi (GET /games/trash), vizibil si recuperabil doar prin fluxul securizat.
+    cursor = db.games.find(
+        {"owner_id": current["user_id"], "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
+    ).sort("created_at", -1)
+    games = await _attach_live_player_counts(
+        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
+    )
+    return {"games": games}
+
+
+@api.get("/games/recently-played")
+async def recently_played(current=Depends(get_current_user)):
+    cursor = db.recently_played.find({"user_id": current["user_id"]}, {"_id": 0}).sort("played_at", -1).limit(50)
+    entries = await cursor.to_list(50)
+    game_ids = [e["game_id"] for e in entries]
+    if not game_ids:
+        return {"games": []}
+    games = await db.games.find(
+        {"game_id": {"$in": game_ids}, "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
+    ).to_list(50)
+    idx = {g["game_id"]: g for g in games}
+    ordered = [idx[gid] for gid in game_ids if gid in idx]
+    ordered = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in ordered]))
+    return {"games": ordered}
+
+
+async def _can_view_private_game(g: dict, current: dict) -> bool:
+    """SECURITY: un joc PRIVAT (draft, inca nepublicat) e vizibil DOAR pentru owner,
+    platform admin, sau cineva cu acces explicit (Editor/Tester) - niciodata doar pentru
+    ca cineva "stie" game_id-ul. Foloseste exact aceeasi regula ca play_game (vezi
+    SECURITY items 12/13/15), aplicata acum si la citirea jocului/instantelor lui, nu doar
+    la a-l juca efectiv."""
+    if g["owner_id"] == current["user_id"] or current.get("is_platform_admin"):
+        return True
+    if get_game_access is None:
+        return False
+    access = await get_game_access(db, g, current)
+    return bool(access.can_play)
+
+
+@api.get("/games/{game_id}")
+async def get_game(game_id: str, current=Depends(get_current_user)):
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    # SECURITY: un proiect sters (soft-delete) nu mai e accesibil prin URL-uri/endpointuri
+    # obisnuite - raspunde exact ca un 404 normal, nu dezvaluie ca ar exista dar e in cos.
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
+        raise HTTPException(status_code=403, detail="Age-restricted content")
+
+    # SECURITY: vezi _can_view_private_game - un joc privat/nepublicat nu mai e vizibil
+    # doar pentru ca cineva are/ghiceste game_id-ul (acelasi bug era si la list_instances).
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
+
+    if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
+        g.pop("script", None)
+    out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g)]))
+    return {"game": out_list[0]}
+
+
+# ---------- Server instances ----------
+# Cand un server ajunge la max_players, urmatorul jucator intra intr-o instanta noua, nu in
+# aceeasi sesiune. O instanta "moare" (status=closed) cand ultimul jucator pleaca de 60s+
+# (vezi indexul TTL pe instance_players.last_seen si reap_empty_instances de mai jos).
+
+async def reap_empty_instances(game_id: str) -> None:
+    """Inchide instantele fara niciun jucator activ (curatare oportunista, apelata la join)."""
+    open_instances = await db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).to_list(200)
+    for inst in open_instances:
+        active = await db.instance_players.count_documents({"instance_id": inst["instance_id"]})
+        if active == 0:
+            # Niciun jucator activ (toti au plecat sau au expirat din TTL-ul de 60s) - inchidem
+            # instanta de tot, altfel ramanea "open" cu player_count=0 pentru totdeauna si se
+            # acumula la infinit in game_instances (vezi comentariul de mai sus despre status=closed).
+            await db.game_instances.update_one(
+                {"instance_id": inst["instance_id"]},
+                {"$set": {"status": "closed", "player_count": 0, "closed_at": now_utc()}},
+            )
+        elif active != inst["player_count"]:
+            await db.game_instances.update_one({"instance_id": inst["instance_id"]}, {"$set": {"player_count": active}})
+
+
+@api.post("/games/{game_id}/play")
+async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), current=Depends(get_current_user)):
+    """Gaseste sau creeaza o instanta de server cu loc liber si inregistreaza jucatorul in ea."""
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+    if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
+        raise HTTPException(status_code=403, detail="Age-restricted content")
+
+    # SECURITY (items 12/13/15): un joc PRIVAT (draft, inca nepublicat) se poate juca
+    # doar de owner, de un Editor, sau de un Tester caruia i s-a dat acces explicit -
+    # niciodata doar pentru ca cineva "stie" game_id-ul. Jocurile publice raman neschimbate.
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
+
+    g = _game_defaults(g)
+    max_players = g["max_players"]
+
+    await reap_empty_instances(game_id)
+
+    instance = None
+    if body.instance_id:
+        instance = await db.game_instances.find_one({"instance_id": body.instance_id, "game_id": game_id, "status": "open"}, {"_id": 0})
+        if instance and instance["player_count"] >= max_players:
+            instance = None  # instanta ceruta e plina - cautam/cream alta mai jos
+
+    if not instance:
+        instance = await db.game_instances.find_one_and_update(
+            {"game_id": game_id, "status": "open", "player_count": {"$lt": max_players}},
+            {"$inc": {"player_count": 1}},
+            sort=[("player_count", -1)],  # umplem instantele existente inainte sa deschidem una noua
+            return_document=True,
+            projection={"_id": 0},
+        )
+
+    if not instance:
+        instance = {
+            "instance_id": new_id("inst_"),
+            "game_id": game_id,
+            "status": "open",
+            "player_count": 1,
+            "created_at": now_utc(),
+        }
+        await db.game_instances.insert_one(instance)
+    else:
+        # find_one_and_update deja a incrementat player_count in DB; il oglindim si aici pentru raspuns
+        instance["player_count"] = instance.get("player_count", 0)
+
+    await db.instance_players.update_one(
+        {"instance_id": instance["instance_id"], "user_id": current["user_id"]},
+        {"$set": {"instance_id": instance["instance_id"], "user_id": current["user_id"], "last_seen": now_utc()}},
+        upsert=True,
+    )
+
+    await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1}})
+    await db.recently_played.update_one(
+        {"user_id": current["user_id"], "game_id": game_id},
+        {"$set": {"played_at": now_utc()}},
+        upsert=True,
+    )
+
+    return {
+        "ok": True,
+        "session": {"instance_id": instance["instance_id"], "game_id": game_id},
+        "max_players": max_players,
+        "player_character_model_id": g.get("player_character_model_id"),
+    }
+
+
+@api.post("/games/{game_id}/instance/heartbeat")
+async def instance_heartbeat(game_id: str, body: HeartbeatBody, current=Depends(get_current_user)):
+    """Trimis periodic de client cat timp e in Play Mode - tine jucatorul 'activ' in instanta."""
+    res = await db.instance_players.update_one(
+        {"instance_id": body.instance_id, "user_id": current["user_id"]},
+        {"$set": {"last_seen": now_utc()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not in this instance")
+    return {"ok": True}
+
+
+@api.post("/games/{game_id}/instance/leave")
+async def instance_leave(game_id: str, body: HeartbeatBody, current=Depends(get_current_user)):
+    """Apelat la Leave, ca instanta sa se elibereze imediat (nu doar dupa expirarea TTL)."""
+    await db.instance_players.delete_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
+    await db.game_instances.update_one(
+        {"instance_id": body.instance_id, "player_count": {"$gt": 0}},
+        {"$inc": {"player_count": -1}},
+    )
+    return {"ok": True}
+
+
+@api.get("/games/{game_id}/instances")
+async def list_instances(game_id: str, current=Depends(get_current_user)):
+    """Lista serverelor deschise pentru un joc (util pentru debugging/afisare optionala in UI)."""
+    g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
+    if not g or g.get("deleted"):
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # SECURITY: vezi _can_view_private_game - aceeasi regula ca la get_game/play_game, ca
+    # sa nu se poata afla cate instante/locuri libere are un joc privat doar stiindu-i id-ul.
+    if not g.get("is_public") and not await _can_view_private_game(g, current):
+        raise HTTPException(status_code=403, detail="This game is private")
+
+    await reap_empty_instances(game_id)
+    cursor = db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).sort("created_at", 1)
+    return {"instances": await cursor.to_list(200)}
+
+
+def _pair(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
+@api.get("/friends")
+async def list_friends(current=Depends(get_current_user)):
+    uid = current["user_id"]
+    cursor = db.friendships.find({"$or": [{"user_a": uid}, {"user_b": uid}]}, {"_id": 0})
+    edges = await cursor.to_list(500)
+    friend_ids = [e["user_b"] if e["user_a"] == uid else e["user_a"] for e in edges]
+    users = await db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0}).to_list(500)
+    return {"friends": [_user_public(u) for u in users]}
+
+
+@api.get("/friends/requests")
+async def list_requests(current=Depends(get_current_user)):
+    incoming = await db.friend_requests.find({"to_id": current["user_id"], "status": "pending"}, {"_id": 0}).to_list(200)
+    outgoing = await db.friend_requests.find({"from_id": current["user_id"], "status": "pending"}, {"_id": 0}).to_list(200)
+    in_users = await db.users.find({"user_id": {"$in": [r["from_id"] for r in incoming]}}, {"_id": 0, "password_hash": 0}).to_list(200)
+    out_users = await db.users.find({"user_id": {"$in": [r["to_id"] for r in outgoing]}}, {"_id": 0, "password_hash": 0}).to_list(200)
+    return {
+        "incoming": [_user_public(u) for u in in_users],
+        "outgoing": [_user_public(u) for u in out_users],
+    }
+
+
+@api.post("/friends/request")
+async def send_request(body: FriendRequestBody, current=Depends(get_current_user)):
+    if body.target_user_id == current["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot friend yourself")
+    target = await db.users.find_one({"user_id": body.target_user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    a, b = _pair(current["user_id"], body.target_user_id)
+    if await db.friendships.find_one({"user_a": a, "user_b": b}):
+        raise HTTPException(status_code=409, detail="Already friends")
+    if await db.blocks.find_one({"$or": [
+        {"blocker_id": current["user_id"], "blocked_id": body.target_user_id},
+        {"blocker_id": body.target_user_id, "blocked_id": current["user_id"]},
+    ]}):
+        raise HTTPException(status_code=403, detail="Blocked")
+    # Daca celalalt ne-a trimis deja o cerere (pending, in sens invers), cele doua cereri
+    # simultane devin direct prietenie, in loc sa ramana doua cereri pendinte in paralel.
+    reverse = await db.friend_requests.find_one({
+        "from_id": body.target_user_id, "to_id": current["user_id"], "status": "pending",
+    })
+    if reverse:
+        await db.friendships.update_one(
+            {"user_a": a, "user_b": b},
+            {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}},
+            upsert=True,
+        )
+        await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
+        return {"ok": True, "auto_accepted": True}
+    try:
+        await db.friend_requests.insert_one({
+            "from_id": current["user_id"], "to_id": body.target_user_id,
+            "status": "pending", "created_at": now_utc(),
+        })
+    except Exception:
+        raise HTTPException(status_code=409, detail="Request already exists")
+    return {"ok": True}
+
+
+@api.post("/friends/accept")
+async def accept_request(body: FriendRequestBody, current=Depends(get_current_user)):
+    req = await db.friend_requests.find_one({
+        "from_id": body.target_user_id, "to_id": current["user_id"], "status": "pending",
+    }, {"_id": 0})
+    if not req:
+        raise HTTPException(status_code=404, detail="No pending request")
+    a, b = _pair(current["user_id"], body.target_user_id)
+    await db.friendships.update_one({"user_a": a, "user_b": b}, {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}}, upsert=True)
+    # Stergem cererea (nu doar o marcam "accepted"): un rand ramas in friend_requests ar
+    # bloca permanent o re-trimitere viitoare, din cauza indexului unic pe (from_id, to_id) -
+    # de exemplu daca cei doi se deprietenesc mai tarziu si unul vrea sa trimita din nou o cerere.
+    await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/friends/reject")
+async def reject_request(body: FriendRequestBody, current=Depends(get_current_user)):
+    await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
+    return {"ok": True}
+
+
+@api.post("/friends/remove")
+async def remove_friend(body: FriendRequestBody, current=Depends(get_current_user)):
+    a, b = _pair(current["user_id"], body.target_user_id)
+    await db.friendships.delete_one({"user_a": a, "user_b": b})
+    # Curatam si eventuale cereri ramase (de ex. dintr-o acceptare veche, salvata inainte de
+    # acest fix) - altfel indexul unic de pe friend_requests ar bloca permanent o viitoare
+    # re-trimitere de cerere intre acesti doi useri.
+    await db.friend_requests.delete_many({"$or": [
+        {"from_id": current["user_id"], "to_id": body.target_user_id},
+        {"from_id": body.target_user_id, "to_id": current["user_id"]},
+    ]})
+    return {"ok": True}
+
+
+@api.post("/friends/block")
+async def block_user(body: FriendRequestBody, current=Depends(get_current_user)):
+    if body.target_user_id == current["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot block yourself")
+    a, b = _pair(current["user_id"], body.target_user_id)
+    await db.friendships.delete_one({"user_a": a, "user_b": b})
+    await db.friend_requests.delete_many({"$or": [
+        {"from_id": current["user_id"], "to_id": body.target_user_id},
+        {"from_id": body.target_user_id, "to_id": current["user_id"]},
+    ]})
+    await db.blocks.update_one(
+        {"blocker_id": current["user_id"], "blocked_id": body.target_user_id},
+        {"$setOnInsert": {"blocker_id": current["user_id"], "blocked_id": body.target_user_id, "since": now_utc()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.get("/wallet/balance")
+async def wallet_balance(current=Depends(get_current_user)):
+    return {"balance": current.get("astrans_balance", 0), "currency": "ASTRANS"}
+
+
+@api.get("/wallet/packages")
+async def wallet_packages():
+    cfg = await db.platform_config.find_one({"key": "astran_packages"}, {"_id": 0})
+    return cfg or {"packages": [], "currency": "RON"}
+
+
+@api.get("/wallet/fees")
+async def wallet_fees():
+    cfg = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
+    return cfg or {"tiers": []}
+
+
+def _calc_fee(amount: int, tiers: list[dict]) -> tuple[int, int]:
+    for tier in tiers:
+        maxa = tier.get("max_amount")
+        if maxa is None or amount <= maxa:
+            pct = tier["fee_percent"]
+            fee = int(amount * pct / 100)
+            return fee, amount - fee
+    return 0, amount
+
+
+@api.post("/wallet/transfer/preview")
+async def transfer_preview(body: TransferBody, current=Depends(get_current_user)):
+    cfg = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
+    fee, net = _calc_fee(body.amount, (cfg or {}).get("tiers", []))
+    return {"gross": body.amount, "fee": fee, "net": net}
+
+
+@api.post("/wallet/transfer")
+async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)):
+    if body.recipient_user_id == current["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot transfer to self")
+    recipient = await db.users.find_one({"user_id": body.recipient_user_id})
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    if body.idempotency_key:
+        existing = await db.astran_ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+        if existing:
+            return {"ok": True, "transaction": existing, "idempotent": True}
+
+    cfg = await db.platform_config.find_one({"key": "transfer_fees"}, {"_id": 0})
+    fee, net = _calc_fee(body.amount, (cfg or {}).get("tiers", []))
+
+    debit = await db.users.update_one(
+        {"user_id": current["user_id"], "astrans_balance": {"$gte": body.amount}},
+        {"$inc": {"astrans_balance": -body.amount}},
+    )
+    if debit.modified_count == 0:
+        raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
+
+    tx = {
+        "tx_id": new_id("tx_"),
+        "user_id": current["user_id"],
+        "counterparty_id": recipient["user_id"],
+        "type": "transfer_out",
+        "amount": body.amount,
+        "fee": fee,
+        "net": net,
+        "status": "completed",
+        "timestamp": now_utc(),
+        "idempotency_key": body.idempotency_key,
+        "reference": f"transfer_to:{recipient['username']}",
+    }
+    try:
+        await db.astran_ledger.insert_one(tx)
+    except Exception:
+        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": body.amount}})
+        if body.idempotency_key:
+            existing = await db.astran_ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+            if existing:
+                return {"ok": True, "transaction": existing, "idempotent": True}
+        raise HTTPException(status_code=409, detail="Transfer already in progress, try again")
+
+    await db.users.update_one({"user_id": recipient["user_id"]}, {"$inc": {"astrans_balance": net}})
+    await db.astran_ledger.insert_one({
+        "tx_id": new_id("tx_"),
+        "user_id": recipient["user_id"],
+        "counterparty_id": current["user_id"],
+        "type": "transfer_in",
+        "amount": net,
+        "fee": 0,
+        "net": net,
+        "status": "completed",
+        "timestamp": now_utc(),
+        "reference": f"transfer_from:{current['username']}",
+    })
+    return {"ok": True, "transaction": {k: v for k, v in tx.items() if k != "_id"}}
+
+
+@api.get("/wallet/transactions")
+async def wallet_tx(current=Depends(get_current_user)):
+    cursor = db.astran_ledger.find({"user_id": current["user_id"]}, {"_id": 0}).sort("timestamp", -1).limit(100)
+    return {"transactions": await cursor.to_list(100)}
+
+
+class VerifyResult:
+    """Rezultatul verificarii unei plati: ok=True DOAR daca plata e reala si confirmata
+    de furnizor (Google/Apple/Stripe), nu doar "token-ul are forma corecta". external_id
+    e identificatorul UNIC al acelei plati (purchase token la Google, transaction_id la
+    Apple, payment_intent la Stripe) - folosit in buy_astrans mai jos ca sa nu creditam
+    Astrans de doua ori pentru aceeasi plata (retry de retea, token retrimis etc)."""
+
+    def __init__(self, ok: bool, external_id: Optional[str] = None, detail: Optional[str] = None):
+        self.ok = ok
+        self.external_id = external_id
+        self.detail = detail
+
+
+class PaymentProvider:
+    name: str = "base"
+
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        raise NotImplementedError
+
+
+class MockProvider(PaymentProvider):
+    name = "mock"
+
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        return VerifyResult(True, external_id=f"mock:{new_id()}")
+
+
+class StripeProvider(PaymentProvider):
+    name = "stripe"
+
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        api_key = os.environ.get("STRIPE_SECRET_KEY")
+        if not api_key or not token:
+            return VerifyResult(False, detail="Missing Stripe payment intent")
+        async with httpx.AsyncClient(timeout=10.0) as h:
+            try:
+                r = await h.get(f"https://api.stripe.com/v1/payment_intents/{token}", auth=(api_key, ""))
+            except Exception as e:  # noqa: BLE001
+                log.error("Stripe verify error: %s", e)
+                return VerifyResult(False, detail="Stripe verification failed")
+        if r.status_code != 200:
+            return VerifyResult(False, detail="Stripe payment intent not found")
+        data = r.json()
+        ok = data.get("status") == "succeeded" and int(data.get("amount", 0)) >= int(package["price"] * 100)
+        return VerifyResult(ok, external_id=token if ok else None, detail=None if ok else "Payment not completed")
+
+
+# ---------- Google Play: verificare REALA prin Android Publisher API ----------
+# Fluxul standard Google OAuth2 "Service Account" (JWT Bearer): semnam noi insine un JWT
+# cu cheia privata din Service Account-ul descarcat din Google Cloud Console, il schimbam
+# la Google pe un access_token, si cu el intrebam Android Publisher API daca tokenul de
+# achizitie primit de la client e intr-adevar o plata REALA si confirmata. Nu folosim
+# biblioteca google-auth (dependinta noua) - semnarea RS256 se face cu 'cryptography',
+# deja in requirements.txt.
+_google_token_cache: dict = {"token": None, "expires_at": 0.0}
+
+
+def _rsa_sign_rs256(private_key_pem: str, data: bytes) -> bytes:
+    key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    return key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+
+
+async def _google_access_token() -> Optional[str]:
+    """Token OAuth2 pentru Android Publisher API. Cache in memorie ~55 minute (tokenul
+    Google e valabil 60 minute) - nu cerem un token nou la fiecare achizitie verificata."""
+    now = now_utc().timestamp()
+    if _google_token_cache["token"] and _google_token_cache["expires_at"] > now:
+        return _google_token_cache["token"]
+
+    raw = os.environ.get("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        log.error("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured")
+        return None
+    try:
+        sa = json.loads(raw)
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        claims = {
+            "iss": sa["client_email"],
+            "scope": "https://www.googleapis.com/auth/androidpublisher",
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": int(now),
+            "exp": int(now) + 3600,
+        }
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+        signing_input = header + b"." + payload
+        signature = base64.urlsafe_b64encode(_rsa_sign_rs256(sa["private_key"], signing_input)).rstrip(b"=")
+        assertion = (signing_input + b"." + signature).decode()
+    except Exception as e:  # noqa: BLE001
+        log.error("Invalid GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: %s", e)
+        return None
+
+    async with httpx.AsyncClient(timeout=10.0) as h:
+        try:
+            r = await h.post("https://oauth2.googleapis.com/token", data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": assertion,
+            })
+        except Exception as e:  # noqa: BLE001
+            log.error("Google OAuth token error: %s", e)
+            return None
+    if r.status_code != 200:
+        log.error("Google OAuth token rejected: %s", r.text[:300])
+        return None
+    data = r.json()
+    token = data.get("access_token")
+    _google_token_cache["token"] = token
+    _google_token_cache["expires_at"] = now + max(60, int(data.get("expires_in", 3300)) - 120)
+    return token
+
+
+class GooglePlayProvider(PaymentProvider):
+    name = "google_play"
+
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        if not token:
+            return VerifyResult(False, detail="Missing purchase token")
+        pkg_name = os.environ.get("GOOGLE_PLAY_PACKAGE_NAME")
+        if not pkg_name:
+            log.error("GOOGLE_PLAY_PACKAGE_NAME is not configured")
+            return VerifyResult(False, detail="Google Play verification not configured")
+        access_token = await _google_access_token()
+        if not access_token:
+            return VerifyResult(False, detail="Google Play verification unavailable")
+
+        product_id = package["package_id"]  # SKU-ul din Play Console = package_id din astran_packages
+        url = (
+            f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+            f"{pkg_name}/purchases/products/{product_id}/tokens/{token}"
+        )
+        async with httpx.AsyncClient(timeout=10.0) as h:
+            try:
+                r = await h.get(url, headers={"Authorization": f"Bearer {access_token}"})
+            except Exception as e:  # noqa: BLE001
+                log.error("Google Play verify error: %s", e)
+                return VerifyResult(False, detail="Google Play verification failed")
+        if r.status_code != 200:
+            return VerifyResult(False, detail=f"Google Play rejected purchase (status {r.status_code})")
+        data = r.json()
+        # purchaseState: 0 = achitata, 1 = anulata, 2 = in asteptare (ex: plata in numerar)
+        if data.get("purchaseState") != 0:
+            return VerifyResult(False, detail="Purchase not completed")
+        return VerifyResult(True, external_id=token)
+
+
+# ---------- Apple: verificare REALA prin App Store receipt validation ----------
+class AppleProvider(PaymentProvider):
+    name = "apple"
+
+    async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
+        if not token:
+            return VerifyResult(False, detail="Missing receipt")
+        shared_secret = os.environ.get("APPLE_SHARED_SECRET")
+        if not shared_secret:
+            log.error("APPLE_SHARED_SECRET is not configured")
+            return VerifyResult(False, detail="Apple verification not configured")
+
+        body = {"receipt-data": token, "password": shared_secret, "exclude-old-transactions": True}
+        data = await self._call(body, "https://buy.itunes.apple.com/verifyReceipt")
+        if data is None:
+            return VerifyResult(False, detail="Apple verification failed")
+        # 21007: chitanta de test (sandbox) trimisa din greseala la serverul de productie -
+        # reincercam automat pe serverul de sandbox, exact cum recomanda documentatia Apple.
+        if data.get("status") == 21007:
+            data = await self._call(body, "https://sandbox.itunes.apple.com/verifyReceipt")
+            if data is None:
+                return VerifyResult(False, detail="Apple verification failed")
+
+        if data.get("status") != 0:
+            return VerifyResult(False, detail=f"Apple rejected receipt (status {data.get('status')})")
+
+        bundle_id = os.environ.get("APPLE_BUNDLE_ID")
+        receipt = data.get("receipt", {})
+        if bundle_id and receipt.get("bundle_id") != bundle_id:
+            return VerifyResult(False, detail="Receipt belongs to a different app")
+
+        product_id = package["package_id"]  # product id-ul din App Store Connect = package_id
+        in_app = data.get("latest_receipt_info") or receipt.get("in_app") or []
+        match = next((it for it in in_app if it.get("product_id") == product_id), None)
+        if not match:
+            return VerifyResult(False, detail="Receipt does not contain this product")
+        return VerifyResult(True, external_id=match.get("transaction_id"))
+
+    async def _call(self, body: dict, url: str) -> Optional[dict]:
+        async with httpx.AsyncClient(timeout=10.0) as h:
+            try:
+                r = await h.post(url, json=body)
+            except Exception as e:  # noqa: BLE001
+                log.error("Apple verify error: %s", e)
+                return None
+        if r.status_code != 200:
+            return None
+        return r.json()
+
+
+PROVIDERS: dict[str, PaymentProvider] = {
+    "mock": MockProvider(),
+    "stripe": StripeProvider(),
+    "google_play": GooglePlayProvider(),
+    "apple": AppleProvider(),
+}
+
+
+@api.post("/wallet/buy")
+async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
+    cfg = await db.platform_config.find_one({"key": "astran_packages"}, {"_id": 0})
+    package = next((p for p in cfg["packages"] if p["package_id"] == body.package_id), None)
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+    provider = PROVIDERS.get(body.provider)
+    if not provider:
+        raise HTTPException(status_code=400, detail="Unknown payment provider")
+    # Mock-ul crediteaza Astrans fara nicio plata reala - util pentru dezvoltare, dar
+    # PERICULOS daca ar ramane deschis in productie (oricine cu un cont ar putea apela
+    # acest API direct, nu doar din aplicatie, si s-ar credita la nesfarsit gratis).
+    # Activ DOAR daca serverul are explicit ALLOW_MOCK_PAYMENTS=1 (niciodata pe Render productie).
+    if provider.name == "mock" and os.environ.get("ALLOW_MOCK_PAYMENTS") != "1":
+        raise HTTPException(status_code=403, detail="Mock payments are disabled")
+
+    result = await provider.verify(body.provider_token or "", package, current)
+    if not result.ok:
+        raise HTTPException(status_code=402, detail=result.detail or "Payment verification failed")
+
+    if result.external_id:
+        existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
+        if existing:
+            return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
+
+    await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": package["astrans"]}})
+    tx = {
+        "tx_id": new_id("tx_"),
+        "user_id": current["user_id"],
+        "counterparty_id": "system",
+        "type": "purchase",
+        "amount": package["astrans"],
+        "fee": 0,
+        "net": package["astrans"],
+        "status": "completed",
+        "timestamp": now_utc(),
+        "reference": f"buy:{package['package_id']}:{provider.name}",
+        "provider": provider.name,
+        "provider_ref": result.external_id,
+        "price": package["price"],
+        "currency": cfg.get("currency", "RON"),
+    }
+    try:
+        await db.astran_ledger.insert_one(tx)
+    except Exception:  # noqa: BLE001
+        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": -package["astrans"]}})
+        existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
+        return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
+    return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
+
+
+@api.post("/reports")
+async def create_report(body: ReportBody, current=Depends(get_current_user)):
+    rid = new_id("rep_")
+    doc = {
+        "report_id": rid,
+        "reporter_id": current["user_id"],
+        "target_type": body.target_type,
+        "target_id": body.target_id,
+        "reason": body.reason,
+        "details": body.details,
+        "status": "open",
+        "created_at": now_utc(),
+    }
+    await db.reports.insert_one(doc)
+    return {"report_id": rid}
+
+
+@api.get("/config/languages")
+async def languages():
+    return {
+        "default": "ro",
+        "languages": [
+            {"code": "ro", "label": "Română", "native": "Română"},
+            {"code": "en", "label": "English", "native": "English"},
+            {"code": "es", "label": "Spanish", "native": "Español"},
+            {"code": "ru", "label": "Russian", "native": "Русский"},
+            {"code": "de", "label": "German", "native": "Deutsch"},
+            {"code": "fr", "label": "French", "native": "Français"},
+            {"code": "it", "label": "Italian", "native": "Italiano"},
+            {"code": "pt", "label": "Portuguese", "native": "Português"},
+            {"code": "ar", "label": "Arabic", "native": "العربية"},
+            {"code": "zh", "label": "Chinese", "native": "中文"},
+            {"code": "ja", "label": "Japanese", "native": "日本語"},
+            {"code": "hi", "label": "Hindi", "native": "हिन्दी"},
+        ],
+    }
+
+
+# Sandbox Luau: /api/sandbox/run si /api/sandbox/games/{game_id}/run
+if make_sandbox_router is not None:
+    api.include_router(make_sandbox_router(get_current_user, db))
+
+# Multiplayer live (WebSocket): /ws/games/{game_id}/instances/{instance_id} - vezi realtime.py.
+# Montat direct pe `app`, NU pe `api` (fara prefixul /api) - WebSocket-urile sunt oricum o
+# ruta separata de REST, nu are rost sa poarte acelasi prefix ca restul API-ului HTTP.
+if make_realtime_router is not None:
+    app.include_router(make_realtime_router(resolve_user_from_token, db))
+
+# Shop de obiecte de joc (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
+if make_shop_router is not None:
+    api.include_router(make_shop_router(get_current_user, db))
+
+# Clothes Shop (haine/accesorii pentru Avatar Editor): /api/clothes/items, /api/clothes/slots...
+if make_clothes_router is not None:
+    api.include_router(make_clothes_router(get_current_user, db))
+
+# Avatar Editor: /api/avatar/me, /api/avatar/slots
+if make_avatar_router is not None:
+    api.include_router(make_avatar_router(get_current_user, db))
+
+# Setari de player: /api/settings/me (GET/PUT) - vezi astran_sandbox/user_settings_routes.py
+if make_user_settings_router is not None:
+    api.include_router(make_user_settings_router(get_current_user, db))
+
+# GROUPS: /api/groups (create, page, membri, roluri, mute/ban, token privat, chat de grup)
+if make_group_router is not None:
+    api.include_router(make_group_router(get_current_user, db, _user_public))
+
+# GAME COLLABORATION / TESTERS: /api/games/{id}/collaborators, /api/games/{id}/testers,
+# /api/games/{id}/my-access
+if make_game_permissions_router is not None:
+    api.include_router(make_game_permissions_router(get_current_user, db, _user_public))
+
+app.include_router(api)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
