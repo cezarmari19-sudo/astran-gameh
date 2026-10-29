@@ -40,11 +40,17 @@ Testat aici doar logica de rutare a mesajelor (cu un pub/sub fals, in memorie) -
 la un Redis REAL, prin retea, nu s-a putut testa in acest mediu (fara acces la retea).
 
 LIMITARE REALA #2 - fara autoritate de server (nu e inca pregatit pentru PvP cu mize):
-pozitiile trimise de un client sunt retransmise ca atare, FARA validare - oricine conectat
-poate trimite orice coordonate, inclusiv teleportare sau "a lovit pe altcineva" fara sa fie
-adevarat. E suficient pentru joc cooperativ/social (te vezi cu altii, va jucati impreuna),
-dar NU e suficient pentru PvP competitiv real - acolo serverul trebuie sa decida cine a
-lovit pe cine, nu clientul care pretinde ca a lovit. Asta ramane un pas separat.
+pozitiile trimise de un client sunt retransmise CATRE CEILALTI dupa un filtru minimal
+(_clean_state / _passes_speed_check mai jos): se resping campuri necunoscute, NaN/Infinity,
+coordonate in afara lumii (|x|,|y|,|z| > MAX_COORD) si salturi de pozitie mai rapide decat
+orice miscare legitima (> MAX_SPEED_MPS intre doua pachete) - un client modificat nu mai
+poate trimite gunoaie care sa strice matematica altora sau o teleportare grosolana vizibila
+de ceilalti. Asta NU e inca autoritate de server completa: nu exista o simulare de fizica
+pe server cu care sa se compare pozitia primita, deci o miscare "la limita" (sub pragul de
+viteza) tot vine neverificata ca atare, si nu exista nicio notiune de "a lovit pe altcineva"
+validata de server. E suficient pentru joc cooperativ/social si pentru a bloca abuzul grosolan,
+dar NU e suficient pentru PvP competitiv real cu mize - acolo serverul trebuie sa decida cine
+a lovit pe cine, nu clientul care pretinde ca a lovit. Asta ramane un pas separat.
 
 LIMITARE REALA #3 - fara interpolare/predictie pe client inca: frontend-ul (useRealtime.ts)
 primeste pozitiile brute si le aplica direct - la 60-80ms interval + jitter de retea, alti
@@ -63,6 +69,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+
+from astran_sandbox.realtime_validation import clean_state, passes_speed_check
 
 try:
     import redis.asyncio as redis_asyncio  # pachetul 'redis' (redis-py), nu Redis insusi
@@ -165,9 +173,6 @@ MAX_STATE_MSG_CHARS = 2000
 # (buclă fara throttle) nu poate innea restul camerei cu trafic.
 STATE_RATE_LIMIT_PER_SEC = 30
 
-STATE_FIELDS = ("x", "y", "z", "ry", "anim")
-
-
 @dataclass
 class _RoomMember:
     ws: WebSocket
@@ -175,6 +180,7 @@ class _RoomMember:
     username: str
     last_state: dict = field(default_factory=dict)
     msg_times: list = field(default_factory=list)  # timestamps recente (monotonic), pt rate-limit
+    last_state_at: Optional[float] = None  # time.monotonic() la ultimul "state" ACCEPTAT (pt anti-teleport)
 
 
 @dataclass
@@ -229,17 +235,6 @@ class RealtimeHub:
 hub = RealtimeHub()
 
 
-def _clean_state(msg: dict) -> dict:
-    """Pastreaza doar campurile cunoscute, de tipuri simple - restul (orice ar trimite un
-    client modificat/rau-intentionat) se ignora, nu se retransmite mai departe ca atare."""
-    out: dict[str, Any] = {}
-    for k in STATE_FIELDS:
-        v = msg.get(k)
-        if isinstance(v, (int, float)) and k != "anim":
-            out[k] = v
-        elif k == "anim" and isinstance(v, str) and len(v) <= 32:
-            out[k] = v
-    return out
 
 
 def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Optional[dict]]], db) -> APIRouter:
@@ -328,10 +323,13 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
                 if not isinstance(msg, dict) or msg.get("t") != "state":
                     continue
 
-                state = _clean_state(msg)
+                state = clean_state(msg)
                 if not state:
                     continue
-                member.last_state = state
+                if not passes_speed_check(member.last_state, member.last_state_at, state, now):
+                    continue  # teleport/speedhack grosolan - jucatorul ramane la ultima pozitie buna pt ceilalti
+                member.last_state = {**member.last_state, **state}
+                member.last_state_at = now
                 await broadcast({"t": "state", "user_id": user_id, **state}, except_user_id=user_id)
         except WebSocketDisconnect:
             pass
