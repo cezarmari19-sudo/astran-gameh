@@ -324,6 +324,41 @@ static bool loadChunk(lua_State* T, const std::string& src, const std::string& c
     return true;
 }
 
+// Capabilities: ce API-uri din prelude.luau are voie sa le vada scriptul.
+// Lista vine EXCLUSIV din linia de comanda (deci decisa de server, in runner.py,
+// niciodata din continutul scriptului sau dintr-un fisier pe care l-ar putea scrie
+// creatorul). Se pune ca tabel Lua *inainte* de luaL_sandbox(L), deci devine
+// read-only prin acelasi mecanism care ingheata deja stdlib-ul si print/warn -
+// scriptul nu are nicio cale (nici macar prin debug.*) sa adauge sau sa schimbe
+// o capacitate care nu i-a fost acordata la pornire.
+static std::set<std::string> parseCaps(const std::string& csv)
+{
+    std::set<std::string> out;
+    size_t start = 0;
+    while (start <= csv.size())
+    {
+        size_t comma = csv.find(',', start);
+        std::string tok = csv.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!tok.empty())
+            out.insert(tok);
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+static void pushCapsTable(lua_State* L, const std::set<std::string>& caps)
+{
+    lua_createtable(L, 0, (int)caps.size());
+    for (const std::string& c : caps)
+    {
+        lua_pushboolean(L, true);
+        lua_setfield(L, -2, c.c_str());
+    }
+    lua_setglobal(L, "_CAPS");
+}
+
 int main(int argc, char** argv)
 {
     long timeoutMs = 2000;
@@ -331,6 +366,7 @@ int main(int argc, char** argv)
     std::string path = "-";
     std::string preludePath;
     std::string entry = "main";
+    std::string capsArg; // implicit "": niciun element in plus fata de "core" (vezi mai jos)
 
     for (int i = 1; i < argc; i++)
     {
@@ -343,13 +379,15 @@ int main(int argc, char** argv)
             preludePath = argv[++i];
         else if (a == "--entry" && i + 1 < argc)
             entry = argv[++i];
+        else if (a == "--caps" && i + 1 < argc)
+            capsArg = argv[++i];
         else
             path = a;
     }
 
     if (timeoutMs <= 0 || memMB == 0 || preludePath.empty())
     {
-        std::fprintf(stderr, "usage: luau-sandbox --prelude file [--timeout ms] [--mem MB] [--entry name] [file|-]\n");
+        std::fprintf(stderr, "usage: luau-sandbox --prelude file [--timeout ms] [--mem MB] [--entry name] [--caps a,b,c] [file|-]\n");
         return 1;
     }
 
@@ -409,7 +447,16 @@ int main(int argc, char** argv)
     lua_pushcfunction(L, luaWarn, "warn");
     lua_setglobal(L, "warn");
 
-    luaL_sandbox(L); // bibliotecile devin read-only, ca in Roblox
+    // "core" (Instance/Vector3/Material/task/workspace/game - motorul de baza, fizica
+    // si crearea de obiecte) e acordat intotdeauna: elimina acest API ar insemna sa
+    // schimbam comportamentul jocurilor existente / gameplay-ul, lucru interzis explicit
+    // de cerinta. Orice alta capacitate (ex: "assets") vine STRICT din --caps, decisa
+    // de server inainte sa porneasca procesul.
+    std::set<std::string> caps = parseCaps(capsArg);
+    caps.insert("core");
+    pushCapsTable(L, caps);
+
+    luaL_sandbox(L); // bibliotecile (si _CAPS) devin read-only, ca in Roblox
 
     lua_State* T = lua_newthread(L);
     luaL_sandboxthread(T); // scriptul primeste propriile globale, izolate
