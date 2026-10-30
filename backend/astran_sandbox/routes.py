@@ -24,7 +24,7 @@ Proiectul unui joc se tine in colectia `game_scripts`:
   SIGURANTA (anti-abuz), nu o limita de design - vezi cerinta "fara limita artificiala".
 
 ============================================================================
-CE SE EXECUTA CU ADEVARAT: DOAR .lua / .luau, SI DOAR CELE target="server"
+CE SE EXECUTA CU ADEVARAT: DOAR .lua / .luau
 ============================================================================
 Sandbox-ul (runner.py -> binarul C++ luau-sandbox, vezi host.cpp) intelege NUMAI Luau,
 si numele lui de modul (folosite de require() si de fisierul "main" care ruleaza primul)
@@ -41,14 +41,6 @@ fara o recompilare pe server (build.sh). De-aia:
       (inca) un motor care sa execute Python/JS/Kotlin/C++/C# aici, si nu pretindem
       ca ar exista. Arhitectura permite adaugarea altor "motoare" per extensie mai
       tarziu, fara sa schimbe modelul de fisiere de mai sus.
-    - Un fisier .lua/.luau poate fi marcat target="server" (implicit) sau target="client"
-      (vezi ProjectFileBody mai jos si chip-urile Server/Client din CodeStudio.tsx).
-      DOAR cele "server" intra in luau_bundle() si ruleaza aici. Cele "client" sunt
-      extrase separat de luau_bundle_client() si NU ruleaza niciodata pe server -
-      sunt doar livrate telefonului (campul "client_files" din raspunsul /run si
-      /games/{id}/run), ca sa le ruleze acolo un runtime pe client (de construit
-      separat pe frontend - vezi discutia, nu exista inca niciun fisier functional
-      pentru asta in acest proiect).
 
 Jocurile vechi (game_scripts cu {name, source} fara extensie, sau game["script"] ca
 string simplu) se migreaza automat LA CITIRE in noul model (vezi _migrate_legacy_files),
@@ -272,26 +264,12 @@ def luau_bundle(files: list[dict]) -> list[dict]:
 
     Fisierele .lua/.luau marcate explicit target="client" NU ajung niciodata aici: nu
     se compileaza, nu se executa, nu influenteaza in niciun fel rularea de pe server -
-    sunt pastrate doar ca organizare/cod de proiect, destinate unui runtime pe telefon."""
+    sunt pastrate doar ca organizare/cod de proiect pentru un viitor runtime pe telefon
+    (nu exista inca), exact ca restul fisierelor cu alta extensie."""
     return [
         {"name": luau_name_for(f["path"]), "source": f["source"]}
         for f in files
         if is_luau_path(f["path"]) and _clean_target(f.get("target")) == "server"
-    ]
-
-
-def luau_bundle_client(files: list[dict]) -> list[dict]:
-    """Ca luau_bundle, dar pentru fisierele .lua/.luau marcate target="client": nu sunt
-    executate NICIODATA pe server (vezi luau_bundle) - sunt doar livrate telefonului,
-    ca runtime-ul de client (de construit separat pe frontend) sa le ruleze acolo.
-
-    Pastram si `path`-ul original (nu doar numele de modul) - clientul va avea nevoie
-    sa stie care fisier e "main" (intrarea), exact aceeasi conventie ca pe server
-    (ENTRY_NAME = "main" in runner.py)."""
-    return [
-        {"path": f["path"], "name": luau_name_for(f["path"]), "source": f["source"]}
-        for f in files
-        if is_luau_path(f["path"]) and _clean_target(f.get("target")) == "client"
     ]
 
 
@@ -329,10 +307,10 @@ class ProjectFileBody(BaseModel):
     path: str = Field(min_length=1, max_length=MAX_PATH_CHARS)
     source: str = Field(default="", max_length=MAX_FILE_CHARS)
     # "server" (implicit): fisierul .lua/.luau se compileaza/executa in sandbox-ul de pe
-    # server (vezi luau_bundle) - comportamentul dinainte de acest camp. "client": fisierul
-    # e EXCLUS explicit din executia de pe server (vezi luau_bundle_client) si trimis catre
-    # telefon odata cu "ops" (campul client_files din /run si /games/{id}/run), pentru un
-    # runtime pe client care ruleaza local pe telefon (de construit separat pe frontend).
+    # server (vezi luau_bundle) - singurul runtime care exista azi, deci si comportamentul
+    # dinainte de acest camp. "client": fisierul e salvat si vizibil in editor, dar EXCLUS
+    # explicit din executia de pe server; nu exista inca un runtime pe telefon care sa-l
+    # ruleze (vezi nota din CodeStudio.tsx) - nu pretindem ca ar exista.
     target: str = Field(default="server", max_length=16)
 
 
@@ -345,96 +323,126 @@ MAX_GAME_ASSETS = 100
 
 
 class RunBody(BaseModel):
+    # files: intregul proiect curent din editor (nu doar .lua) - filtram noi partea
+    # executabila; source: compatibilitate veche (un singur script = "main").
+    files: Optional[List[ProjectFileBody]] = None
     source: Optional[str] = Field(default=None, max_length=MAX_SOURCE_CHARS)
-    files: Optional[List[ProjectFileBody]] = Field(default=None)
-    asset_ids: Optional[List[str]] = Field(default=None, max_length=MAX_GAME_ASSETS)
+    asset_ids: Optional[List[str]] = None  # id-uri de modele din Shop, pentru testare cu Assets.load in editor
 
 
 class SaveAssetsBody(BaseModel):
     asset_ids: List[str] = Field(default_factory=list, max_length=MAX_GAME_ASSETS)
 
 
-# ---------- rate limiting (per utilizator, in memorie) ----------
-
-recent_runs: dict[str, deque] = defaultdict(deque)
-_last_sweep = 0.0
-
-
-def check_rate_limit(user_id: str) -> None:
-    global _last_sweep
-    now = time.monotonic()
-    dq = recent_runs[user_id]
-    while dq and now - dq[0] > RATE_LIMIT_WINDOW_SECONDS:
-        dq.popleft()
-    if len(dq) >= RUNS_PER_MINUTE:
-        raise HTTPException(status_code=429, detail="Too many script runs - slow down a bit")
-    dq.append(now)
-
-    if now - _last_sweep > RATE_LIMIT_SWEEP_INTERVAL_SECONDS:
-        _last_sweep = now
-        stale = [uid for uid, q in recent_runs.items() if not q or now - q[-1] > RATE_LIMIT_WINDOW_SECONDS]
-        for uid in stale:
-            del recent_runs[uid]
-
-
-def sandbox_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, SandboxUnavailable):
-        return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, ValueError):
-        return HTTPException(status_code=400, detail=str(exc))
-    log.exception("Sandbox run failed unexpectedly")
-    return HTTPException(status_code=500, detail="Internal sandbox error")
-
-
 def make_sandbox_router(get_current_user, db) -> APIRouter:
     router = APIRouter(prefix="/sandbox", tags=["sandbox"])
+    recent_runs: dict[str, deque] = defaultdict(deque)
+    index_ready = False
+    last_sweep = time.monotonic()
+
+    def check_rate_limit(user_id: str) -> None:
+        nonlocal last_sweep
+        now = time.monotonic()
+        hits = recent_runs[user_id]
+        while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
+            hits.popleft()
+        if len(hits) >= RUNS_PER_MINUTE:
+            raise HTTPException(status_code=429, detail="Too many script runs, try again in a minute")
+        hits.append(now)
+
+        # Curatare periodica: fara ea, recent_runs ar creste la nesfarsit cu cate o
+        # intrare pentru FIECARE user care a rulat vreodata un script, chiar mult dupa
+        # ce fereastra lui de 60s a expirat - un memory leak lent, dar real, pe un
+        # server care ruleaza luni/ani. Scanam dictionarul doar rar (nu la fiecare
+        # request), ca sa nu coste un scan complet de fiecare data.
+        if now - last_sweep > RATE_LIMIT_SWEEP_INTERVAL_SECONDS:
+            last_sweep = now
+            stale = [uid for uid, h in recent_runs.items() if not h or now - h[-1] > RATE_LIMIT_WINDOW_SECONDS]
+            for uid in stale:
+                del recent_runs[uid]
+
+    def sandbox_error(exc: Exception) -> HTTPException:
+        if isinstance(exc, HTTPException):
+            return exc
+        if isinstance(exc, SandboxUnavailable):
+            return HTTPException(status_code=503, detail=str(exc))
+        if isinstance(exc, ValueError):
+            return HTTPException(status_code=400, detail=str(exc))
+        log.exception("sandbox failure")
+        return HTTPException(status_code=500, detail="Sandbox failure")
 
     async def ensure_index() -> None:
-        await db.game_scripts.create_index("game_id", unique=True)
+        nonlocal index_ready
+        if index_ready:
+            return
+        try:
+            await db.game_scripts.create_index("game_id", unique=True)
+            await db.game_assets.create_index("game_id", unique=True)
+        except Exception:  # noqa: BLE001
+            log.warning("could not create game_scripts/game_assets index", exc_info=True)
+        index_ready = True
 
     async def resolve_assets(user_id: str, asset_ids: list[str]) -> list[dict]:
-        """Modelele din Shop cumparate de user, pe care scriptul le poate incarca prin
-        Assets.load("id") - doar cele chiar cumparate de el, indiferent ce id-uri trimite
-        clientul in asset_ids (vezi shop_routes.py pentru proprietate)."""
+        """Din id-uri de modele din Shop, intoarce doar cele pe care userul chiar le detine
+        (autor, cumparate, sau gratis+publice) — restul se ignora silentios, ca un id vechi
+        (sters sau devenit privat intre timp) sa nu strice rularea jocului."""
         if not asset_ids:
             return []
-        owned = await db.shop_purchases.find(
-            {"user_id": user_id, "asset_id": {"$in": asset_ids}}, {"_id": 0, "asset_id": 1}
-        ).to_list(length=MAX_GAME_ASSETS)
-        owned_ids = {o["asset_id"] for o in owned}
-        docs = await db.shop_assets.find({"asset_id": {"$in": list(owned_ids)}}, {"_id": 0}).to_list(length=MAX_GAME_ASSETS)
-        return [d for d in docs if d.get("asset_id") in owned_ids]
+        ids = list(dict.fromkeys(asset_ids))[:MAX_GAME_ASSETS]  # dedupe, pastrand ordinea
+        items = await db.shop_items.find({"item_id": {"$in": ids}, "kind": "model"}, {"_id": 0}).to_list(MAX_GAME_ASSETS)
+        by_id = {it["item_id"]: it for it in items}
+
+        purchased_ids: set[str] = set()
+        to_check = [i for i in ids if i in by_id and by_id[i]["owner_id"] != user_id and by_id[i]["price"] > 0]
+        if to_check:
+            purchases = await db.shop_purchases.find(
+                {"user_id": user_id, "item_id": {"$in": to_check}}, {"_id": 0}
+            ).to_list(len(to_check))
+            purchased_ids = {p["item_id"] for p in purchases}
+
+        resolved = []
+        for aid in ids:
+            it = by_id.get(aid)
+            if it is None:
+                continue
+            owned = it["owner_id"] == user_id or (it["price"] == 0 and it["is_public"]) or aid in purchased_ids
+            if not owned:
+                continue
+            resolved.append({"id": aid, "name": it.get("name", ""), "object": it.get("object", {})})
+        return resolved
 
     async def get_game(game_id: str) -> dict:
         g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-        if g is None:
+        if not g:
             raise HTTPException(status_code=404, detail="Game not found")
         return g
 
     async def get_access(g: dict, current: dict):
+        """Punct unic de acces, folosit de toate endpoint-urile de mai jos. Daca modulul
+        de permisiuni n-a putut fi incarcat, se pastreaza exact comportamentul dinainte
+        de Faza 2 (doar owner-ul editeaza; jocul ramane jucabil daca e public)."""
         if get_game_access is not None:
-            return await get_game_access(db, g, current["user_id"])
-        access = _FallbackAccess()
-        if g.get("owner_id") == current["user_id"]:
-            access.role = "owner"
-            access.can_view_code = access.can_create_files = access.can_edit_files = True
-            access.can_delete_files = access.can_delete_folders = access.can_change_settings = True
-            access.can_publish = access.can_play = True
-        elif not g.get("is_draft", True):
-            access.can_play = True
-        return access
+            return await get_game_access(db, g, current)
+        if g["owner_id"] == current["user_id"] or current.get("is_platform_admin"):
+            return _FallbackAccess(
+                role="owner", can_view_code=True, can_create_files=True, can_edit_files=True,
+                can_delete_files=True, can_delete_folders=True, can_change_settings=True,
+                can_publish=True, can_play=True,
+            )
+        return _FallbackAccess(role="none", can_play=bool(g.get("is_public")))
 
     async def load_project(game_id: str, g: dict) -> tuple[list[dict], list[str]]:
+        """Intoarce (files, folders) in formatul nou {path, source} / [path...],
+        migrand automat orice format vechi gasit in baza de date (vezi docstring)."""
         doc = await db.game_scripts.find_one({"game_id": game_id}, {"_id": 0})
-        if doc is not None:
-            files_raw = doc.get("files")
-            files = _migrate_legacy_files(files_raw) if isinstance(files_raw, list) else []
+        if doc is not None and isinstance(doc.get("files"), list):
+            files = _migrate_legacy_files(doc["files"])
             folders_raw = doc.get("folders")
             folders = [f for f in folders_raw if isinstance(f, str)] if isinstance(folders_raw, list) else []
             return files, folders
         legacy = g.get("script") or ""
         if isinstance(legacy, str) and legacy.strip():
-            return [{"path": "main.lua", "source": legacy, "target": "server"}], []
+            return [{"path": "main.lua", "source": legacy}], []
         return [], []
 
     @router.post("/run")
@@ -442,10 +450,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         """Testeaza scripturile din editor (proprietarul vede output-ul si erorile).
 
         Primeste intregul proiect curent (body.files) si ruleaza doar subsetul .lua/.luau
-        marcat target="server" - restul fisierelor (README, alte limbaje, SI fisierele
-        target="client") sunt ignorate aici, nu produc erori; cele "client" sunt insa
-        intoarse separat in campul "client_files", ca editorul sa le poata testa cu
-        runtime-ul de client cand acela va exista.
+        - restul fisierelor (README, alte limbaje) sunt ignorate, nu produc erori.
         Nu foloseste scena unui joc anume (editorul nu ruleaza inca in contextul
         unui joc salvat), deci workspace nu contine obiecte din Studio aici.
         """
@@ -454,46 +459,52 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             if body.files is not None:
                 project_files = [{"path": f.path, "source": f.source, "target": _clean_target(f.target)} for f in body.files]
                 files = luau_bundle(project_files)
-                client_files = luau_bundle_client(project_files)
             elif body.source is not None:
                 files = files_from_source(body.source)
-                client_files = []  # fara proiect (doar un string de cod) - nu exista notiunea de target aici
             else:
                 files = []
-                client_files = []
             if not any(f["source"].strip() for f in files):
                 validate_files(files)
-                return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False, "client_files": client_files}
+                return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False}
             assets = await resolve_assets(current["user_id"], body.asset_ids or [])
-            result = await run_files(files, assets=assets)
-            result["client_files"] = client_files
-            return result
+            return await run_files(files, assets=assets)
         except Exception as exc:  # noqa: BLE001
             raise sandbox_error(exc)
 
     @router.get("/games/{game_id}/files")
     async def get_files(game_id: str, current=Depends(get_current_user)):
+        """Proiectul (sau partea din el la care are acces) pentru un joc: fisiere (cu
+        path si continut) si folderele goale explicite. Owner-ul vede tot; un Editor
+        restrans vede DOAR domeniul lui (allowed_paths/denied_paths); un Tester nu
+        ajunge aici deloc (can_view_code=False)."""
         g = await get_game(game_id)
         access = await get_access(g, current)
         if not access.can_view_code:
             raise HTTPException(status_code=403, detail="No access to this project's code")
         files, folders = await load_project(game_id, g)
-        if not access.is_owner and filter_project_to_scope is not None:
+        if filter_project_to_scope is not None:
             files, folders = filter_project_to_scope(files, folders, access)
         return {"files": files, "folders": folders}
 
     @router.put("/games/{game_id}/files")
     async def save_files(game_id: str, body: SaveProjectBody, current=Depends(get_current_user)):
-        """Salveaza intregul proiect (owner) sau doar domeniul permis (Editor restrans).
+        """Salveaza proiectul.
 
-        Validare in 2 straturi:
+        Owner (sau platform admin): comportament NESCHIMBAT - inlocuieste toata
+        structura (fisiere + foldere), ca inainte de Faza 2.
+
+        Editor cu acces (eventual restrans pe foldere): se schimba DOAR domeniul lui.
+        Restul proiectului ramane EXACT neschimbat, chiar daca el nu l-a trimis deloc
+        in payload - altfel un Editor fara DELETE pe /server/ ar putea sterge /server/
+        doar omitandu-l din ce trimite. Fiecare schimbare (fisier nou/modificat/sters,
+        folder sters) e verificata impotriva permisiunilor lui GRANULARE - orice
+        incalcare respinge TOT request-ul (atomic), niciodata o salvare partiala.
+
+        Doua validari distincte, cu scopuri diferite, raman neschimbate:
         1. validate_project: structura arborelui in sine (path-uri valide, fara duplicate,
            fara conflicte fisier/folder, in limitele generale ale proiectului).
-        2. validate_files (runner.py, NESCHIMBATA): doar subsetul .lua/.luau marcat
-           target="server" (luau_bundle), cu EXACT regulile pe care sandbox-ul le impune -
-           fisierele target="client" nu sunt supuse validarii de compilare Luau aici
-           (nu ajung niciodata la sandbox-ul de pe server), doar validarii generale de
-           proiect din validate_project (path, lungime, duplicate).
+        2. validate_files (runner.py, NESCHIMBATA): doar subsetul .lua/.luau, cu EXACT
+           regulile pe care sandbox-ul le impune.
         """
         g = await get_game(game_id)
         access = await get_access(g, current)
@@ -600,21 +611,17 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
 
     @router.post("/games/{game_id}/run")
     async def run_game_script(game_id: str, current=Depends(get_current_user)):
-        """Ruleaza partea Luau target="server" a proiectului unui joc si intoarce
-        operatiile (create/set/destroy/world/material) pe care le va reda ecranul de
-        Play. Obiectele din scena Studio a jocului sunt puse la dispozitia scriptului
-        ca piese deja existente in workspace (vezi runner.scene_file), ca proprietarul
-        sa poata scrie, de exemplu, workspace.Cube1.Material = m1.
-
-        Fisierele target="client" sunt extrase separat (luau_bundle_client) si intoarse
-        in campul "client_files" - NU sunt executate aici, raman doar atasate pentru
-        un runtime pe telefon (de construit separat pe frontend).
+        """Ruleaza partea Luau a proiectului unui joc si intoarce operatiile (create/set/
+        destroy/world/material) pe care le va reda ecranul de Play. Obiectele din scena
+        Studio a jocului sunt puse la dispozitia scriptului ca piese deja existente in
+        workspace (vezi runner.scene_file), ca proprietarul sa poata scrie, de exemplu,
+        workspace.Cube1.Material = m1.
 
         Poate fi apelat de oricine are voie sa INTRE in joc (owner, Editor, Tester, sau
         oricine daca jocul e public) — comportamentul jocului trebuie sa fie acelasi
         pentru toti jucatorii, ca in Play Mode obisnuit. Verificarea reala de acces la
         JOIN se face in server.py (/games/{id}/play); aici e un al doilea strat de
-        siguranta (nu te bazezi doar pe un singur punct de control).
+        siguranta (item 15 - nu te bazezi doar pe un singur punct de control).
         """
         check_rate_limit(current["user_id"])
         g = await get_game(game_id)
@@ -624,9 +631,8 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         try:
             project_files, _folders = await load_project(game_id, g)
             files = luau_bundle(project_files)
-            client_files = luau_bundle_client(project_files)
             if not files:
-                return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False, "client_files": client_files}
+                return {"ok": True, "output": [], "errors": [], "ops": [], "duration": 0.0, "truncated": False}
 
             asset_doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
             asset_ids = asset_doc["asset_ids"] if asset_doc and isinstance(asset_doc.get("asset_ids"), list) else []
@@ -635,9 +641,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             assets = await resolve_assets(g["owner_id"], asset_ids)
 
             scene = g.get("scene")
-            result = await run_cached_files(files, assets=assets, scene=scene)
-            result["client_files"] = client_files
-            return result
+            return await run_cached_files(files, assets=assets, scene=scene)
         except Exception as exc:  # noqa: BLE001
             raise sandbox_error(exc)
 
