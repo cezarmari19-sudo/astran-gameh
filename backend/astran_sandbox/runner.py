@@ -219,6 +219,14 @@ def find_binary() -> Optional[str]:
     return None
 
 
+def _require_bwrap() -> bool:
+    """Daca True (implicit), rularea refuza sa porneasca scriptul cand bwrap lipseste
+    sau nu functioneaza in acest mediu, in loc sa continue "mai putin izolat" in
+    tacere. Se dezactiveaza explicit cu ASTRAN_SANDBOX_REQUIRE_BWRAP=0 - vezi mesajul
+    din run_files() pentru cand are sens sa faci asta."""
+    return os.environ.get("ASTRAN_SANDBOX_REQUIRE_BWRAP", "1") != "0"
+
+
 def _make_preexec(timeout_ms: int):
     """Limite de sistem aplicate procesului copil (doar Linux/macOS)."""
 
@@ -235,6 +243,11 @@ def _make_preexec(timeout_ms: int):
             (resource.RLIMIT_FSIZE, (0, 0)),
             (resource.RLIMIT_NOFILE, (64, 64)),
             (resource.RLIMIT_AS, (gib, gib)),
+            # Aparare in adancime: luau-sandbox e un singur proces, fara thread-uri si
+            # fara nevoie sa porneasca vreun alt proces. Daca un bug de memorie in
+            # interpretor ar reusi vreodata sa ajunga la fork()/exec(), asta il
+            # blocheaza la nivel de kernel, nu doar la nivelul limbajului Luau.
+            (resource.RLIMIT_NPROC, (0, 0)),
         ]
         for which, value in limits:
             try:
@@ -268,9 +281,14 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
 # serverului (unde sunt .env, codul sursa, etc).
 #
 # Daca `bwrap` (bubblewrap) nu e instalat SAU namespace-urile neprivilegiate sunt
-# blocate de kernel/politica containerului, scriptele tot ruleaza normal - izolate
-# exact ca pana acum (rlimit + env gol) - doar fara acest strat suplimentar. Vezi
-# astran_sandbox/Dockerfile pentru cum se instaleaza bubblewrap la build.
+# blocate de kernel/politica containerului: IMPLICIT, run_files() REFUZA sa porneasca
+# scriptul (SandboxUnavailable), nu continua "mai putin izolat" in tacere - vezi
+# _require_bwrap(). Asta e o schimbare deliberata fata de comportamentul vechi: verifica
+# intai, pe mediul tau real de productie, ca bwrap functioneaza (ruleaza manual comanda
+# de mai jos din build_env) INAINTE sa pui asta in productie, altfel sandbox-ul nu va
+# mai raspunde la niciun script. Daca mediul tau nu poate folosi bwrap si accepti
+# constient sa ramai doar cu rlimit + env gol, seteaza ASTRAN_SANDBOX_REQUIRE_BWRAP=0.
+# Vezi astran_sandbox/Dockerfile pentru cum se instaleaza bubblewrap la build.
 
 _bwrap_checked = False
 _bwrap_path: Optional[str] = None
@@ -299,7 +317,7 @@ async def _check_bwrap() -> Optional[str]:
 
     try:
         probe = await asyncio.create_subprocess_exec(
-            bwrap, "--unshare-all", "--die-with-parent",
+            bwrap, "--unshare-all", "--die-with-parent", "--disable-userns",
             "--ro-bind", "/bin", "/bin",
             "--", "/bin/true",
             stdout=asyncio.subprocess.DEVNULL,
@@ -339,6 +357,7 @@ def _bwrap_wrap(bwrap: str, binary: str, prelude: Path, cmd: list[str]) -> list[
         "--chdir", "/",
         "--unshare-all",
         "--die-with-parent",
+        "--disable-userns",  # blocheaza namespace-uri imbricate create DIN interiorul jail-ului
         "--new-session",
         "--clearenv",
         "--uid", "65534",
@@ -528,15 +547,34 @@ async def run_files(
     if binary is None or not PRELUDE.is_file():
         raise SandboxUnavailable("luau-sandbox is not built on this server (run astran_sandbox/build.sh)")
 
+    # Capabilities: decise AICI, server-side, din date deja validate (assets != None
+    # inseamna ca shop_routes.py a confirmat ca jocul chiar a cumparat acele modele) -
+    # niciodata din continutul scriptului. "core" e mereu acordat de host.cpp insusi;
+    # orice capacitate noua se adauga aici, pe nume, nu printr-o lista neagra.
+    caps: list[str] = []
+    if assets:
+        caps.append("assets")
     base_cmd = [
         binary,
         "--timeout", str(timeout_ms),
         "--mem", str(mem_mb),
         "--prelude", str(PRELUDE),
         "--entry", ENTRY_NAME,
+        "--caps", ",".join(caps),
         "-",
     ]
     bwrap = await _check_bwrap()
+    if bwrap is None and _require_bwrap():
+        # Deny-by-default: fara jail-ul de OS suplimentar, NU rulam scriptul in loc sa-l
+        # rulam "mai putin izolat" in tacere. Vezi _require_bwrap() mai jos pentru cum se
+        # dezactiveaza explicit (doar daca ai verificat manual ca mediul tau nu suporta
+        # namespace-uri neprivilegiate si accepti sa ramai doar cu rlimit + env gol).
+        raise SandboxUnavailable(
+            "bubblewrap (bwrap) is required but is not available/working in this "
+            "environment - refusing to run scripts without it. Set "
+            "ASTRAN_SANDBOX_REQUIRE_BWRAP=0 only if you have verified this deployment "
+            "cannot use bwrap and accept running without that extra OS-level jail."
+        )
     cmd = _bwrap_wrap(bwrap, binary, PRELUDE, base_cmd) if bwrap else base_cmd
 
     async with _get_semaphore():
