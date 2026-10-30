@@ -1091,6 +1091,14 @@ function require(name)
 end
 
 -- ===== globale vizibile scriptului =====
+-- _CAPS vine de la host (host.cpp), pus ca tabel read-only INAINTE de luaL_sandbox:
+-- scriptul jocului nu poate sa-l citeasca gresit, sa-l modifice sau sa-l inlocuiasca -
+-- e inghetat prin acelasi mecanism care protejeaza deja stdlib-ul si print/warn.
+-- Capacitatea "core" e mereu prezenta (vezi host.cpp); restul APIurilor trebuie sa
+-- fie cerute explicit aici, pe nume, niciodata printr-o lista neagra de cuvinte din
+-- codul scriptului.
+local CAPS = _CAPS or {}
+
 Instance = InstanceLib
 Vector3 = V3
 Color3 = C3
@@ -1098,7 +1106,10 @@ Material = MaterialLib
 task = taskLib
 workspace = workspaceObj
 game = gameObj
-Assets = AssetsLib
+
+if CAPS.assets then
+    Assets = AssetsLib
+end
 
 -- ===== rulare =====
 local function main()
