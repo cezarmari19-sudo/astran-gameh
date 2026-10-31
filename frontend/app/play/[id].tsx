@@ -16,6 +16,8 @@ import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial, normalizeParts } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 import { connectRealtime, RealtimeHandle } from "@/src/play/useRealtime";
+import ScriptSandboxWebView, { ScriptSandboxHandle } from "@/src/components/ScriptSandboxWebView";
+import { PRELUDE_SOURCE } from "@/src/sandbox/preludeSource";
 
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
@@ -203,6 +205,11 @@ export default function PlayScreen() {
   const realtimeRef = useRef<RealtimeHandle | null>(null);
   const remoteMeshesRef = useRef<Map<string, THREE.Group>>(new Map());
   const scriptOpsRef = useRef<ScriptOp[]>([]);
+  // Sandbox pentru scripturile target="client" (vezi src/sandbox/). Spre deosebire de
+  // scriptOpsRef (umplut din /sandbox/games/{id}/run, care RULEAZA pe server), aici
+  // scriptul chiar ruleaza pe acest dispozitiv - vezi efectul de mai jos unde cele doua
+  // seturi de operatii (server + client) se CONCATENEAZA, nu se inlocuiesc una pe alta.
+  const sandboxRef = useRef<ScriptSandboxHandle>(null);
   const avatarBodyRef = useRef<AvatarBody>(defaultBody());
   const characterPartsRef = useRef<Part[] | null>(null);
   const spawnPointRef = useRef<{ x: number; y: number; z: number; ry: number }>({ x: 0, y: 0, z: 0, ry: 0 });
@@ -637,6 +644,34 @@ export default function PlayScreen() {
           console.log("[play] script errors", run.errors);
         }
       } catch (e) { console.log("[play] script run failed", e); }
+
+      // Scripturile target="client": serverul NU le-a rulat deloc (vezi
+      // luau_client_bundle/run_game_script in routes.py) - doar ne da textul lor, iar
+      // noi le rulam AICI, pe acest dispozitiv, in sandbox-ul din WebView. Rezultatul
+      // (ops) se ADAUGA la cel de la server, nu il inlocuieste - cele doua seturi de
+      // scripturi coexista, exact cum creatorul jocului a ales pentru fiecare fisier
+      // in parte (vezi target din File Explorer-ul din Studio).
+      try {
+        const bundle = await api(`/sandbox/games/${id}/client-bundle`);
+        if (cancelled) return;
+        const files = Array.isArray(bundle?.files) ? bundle.files : [];
+        if (files.length > 0 && sandboxRef.current) {
+          const result = await sandboxRef.current.run({
+            files,
+            preludeSource: PRELUDE_SOURCE,
+            assets: Array.isArray(bundle?.assets) ? bundle.assets : [],
+            scene: bundle?.scene ?? null,
+            capabilities: Array.isArray(bundle?.assets) && bundle.assets.length > 0 ? ["assets"] : [],
+          });
+          if (cancelled) return;
+          if (result.ops.length > 0) {
+            scriptOpsRef.current = [...scriptOpsRef.current, ...(result.ops as ScriptOp[])];
+          }
+          if (result.errors.length > 0) {
+            console.log("[play] client script errors", result.errors);
+          }
+        }
+      } catch (e) { console.log("[play] client script run failed", e); }
     })();
     return () => { cancelled = true; };
   }, [id]);
@@ -712,7 +747,6 @@ export default function PlayScreen() {
     }
     return result;
   }
-
   function groundHeightAt(x: number, z: number): number {
     let maxTop = 0;
     for (const box of solidBoxesRef.current) {
@@ -1129,6 +1163,12 @@ const onContextCreate = async (gl: any) => {
       ) : (
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
+
+      {/* Sandbox pentru scripturile target="client" - fara UI propriu (0x0), doar
+          executa logica. key={id}: la schimbarea jocului, React distruge complet
+          instanta veche si monteaza una noua - fara nicio stare ramasa de la jocul
+          anterior (vezi nota din ScriptSandboxWebView.tsx despre de ce e necesar). */}
+      <ScriptSandboxWebView key={id} ref={sandboxRef} />
 
       {ready && Platform.OS !== "web" ? (
         <View
