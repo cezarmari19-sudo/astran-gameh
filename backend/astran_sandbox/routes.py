@@ -273,6 +273,20 @@ def luau_bundle(files: list[dict]) -> list[dict]:
     ]
 
 
+def luau_client_bundle(files: list[dict]) -> list[dict]:
+    """Ca luau_bundle, dar pentru fisierele target="client" - acestea NU se ruleaza pe
+    server (vezi docstring-ul de mai sus); clientul le cere separat (vezi endpoint-ul
+    /games/{id}/client-bundle) si le ruleaza local, in sandbox-ul din WebView (vezi
+    frontend/src/sandbox/). Formatul {name, source} e identic cu cel pentru server, ca
+    ScriptSandboxWebView sa foloseasca aceeasi validare (validateFiles in runtime.ts,
+    oglinda lui validate_files() din runner.py)."""
+    return [
+        {"name": luau_name_for(f["path"]), "source": f["source"]}
+        for f in files
+        if is_luau_path(f["path"]) and _clean_target(f.get("target")) == "client"
+    ]
+
+
 def _migrate_legacy_files(raw: list[dict]) -> list[dict]:
     """Jocuri salvate inainte de File Explorer-ul real: {name, source}, nume fara
     extensie si fara foldere. Devin {path, source} cu extensia .lua adaugata, la
@@ -644,5 +658,36 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             return await run_cached_files(files, assets=assets, scene=scene)
         except Exception as exc:  # noqa: BLE001
             raise sandbox_error(exc)
+
+    @router.get("/games/{game_id}/client-bundle")
+    async def get_client_bundle(game_id: str, current=Depends(get_current_user)):
+        """Fisierele target="client" ale jocului, plus datele de care au nevoie
+        (assets, scena), pentru ca APARATUL JUCATORULUI sa le ruleze local (vezi
+        frontend/src/sandbox/ScriptSandboxWebView.tsx). Spre deosebire de
+        /games/{id}/run (care EXECUTA scriptul pe server), acest endpoint NU ruleaza
+        nimic - doar intoarce datele; executia (si deci orice eventual bug/comportament
+        gresit al scriptului jocului) ramane complet pe dispozitivul jucatorului, nu
+        atinge niciodata serverul sau alti jucatori.
+
+        Acelasi control de acces ca /games/{id}/run: oricine are voie sa INTRE in joc
+        (owner, Editor, Tester, sau oricine daca jocul e public)."""
+        check_rate_limit(current["user_id"])
+        g = await get_game(game_id)
+        access = await get_access(g, current)
+        if not access.can_play:
+            raise HTTPException(status_code=403, detail="No access to play this game")
+
+        project_files, _folders = await load_project(game_id, g)
+        files = luau_client_bundle(project_files)
+        if not files:
+            return {"files": [], "assets": [], "scene": None}
+
+        asset_doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
+        asset_ids = asset_doc["asset_ids"] if asset_doc and isinstance(asset_doc.get("asset_ids"), list) else []
+        # Acelasi principiu ca la /run: Assets.load ruleaza in numele proprietarului
+        # jocului, nu al jucatorului curent - proprietarul e cel care a atasat modelele.
+        assets = await resolve_assets(g["owner_id"], asset_ids)
+
+        return {"files": files, "assets": assets, "scene": g.get("scene")}
 
     return router
