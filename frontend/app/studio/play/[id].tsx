@@ -15,6 +15,8 @@ import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld }
 import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
+import ScriptSandboxWebView, { ScriptSandboxHandle } from "@/src/components/ScriptSandboxWebView";
+import { PRELUDE_SOURCE } from "@/src/sandbox/preludeSource";
 
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
@@ -194,6 +196,8 @@ export default function PlayScreen() {
 
   const instanceRef = useRef<{ instance_id: string; game_id: string } | null>(null);
   const scriptOpsRef = useRef<ScriptOp[]>([]);
+  // Sandbox pentru scripturile target="client" - vezi nota identica din app/play/[id].tsx.
+  const sandboxRef = useRef<ScriptSandboxHandle>(null);
   const avatarBodyRef = useRef<AvatarBody>(defaultBody());
   const characterPartsRef = useRef<Part[] | null>(null);
   const spawnPointRef = useRef<{ x: number; y: number; z: number; ry: number }>({ x: 0, y: 0, z: 0, ry: 0 });
@@ -549,6 +553,30 @@ export default function PlayScreen() {
           console.log("[play] script errors", run.errors);
         }
       } catch (e) { console.log("[play] script run failed", e); }
+
+      // Scripturile target="client" - vezi nota identica din app/play/[id].tsx: serverul
+      // nu le-a rulat, le rulam aici si adaugam rezultatul la ops-urile de la server.
+      try {
+        const bundle = await api(`/sandbox/games/${id}/client-bundle`);
+        if (cancelled) return;
+        const files = Array.isArray(bundle?.files) ? bundle.files : [];
+        if (files.length > 0 && sandboxRef.current) {
+          const result = await sandboxRef.current.run({
+            files,
+            preludeSource: PRELUDE_SOURCE,
+            assets: Array.isArray(bundle?.assets) ? bundle.assets : [],
+            scene: bundle?.scene ?? null,
+            capabilities: Array.isArray(bundle?.assets) && bundle.assets.length > 0 ? ["assets"] : [],
+          });
+          if (cancelled) return;
+          if (result.ops.length > 0) {
+            scriptOpsRef.current = [...scriptOpsRef.current, ...(result.ops as ScriptOp[])];
+          }
+          if (result.errors.length > 0) {
+            console.log("[play] client script errors", result.errors);
+          }
+        }
+      } catch (e) { console.log("[play] client script run failed", e); }
     })();
     return () => { cancelled = true; };
   }, [id]);
@@ -935,6 +963,9 @@ export default function PlayScreen() {
       ) : (
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
       )}
+
+      {/* Sandbox pentru scripturile target="client" - vezi nota identica din app/play/[id].tsx. */}
+      <ScriptSandboxWebView key={id} ref={sandboxRef} />
 
       {ready && Platform.OS !== "web" ? (
         <View
