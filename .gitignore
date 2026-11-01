@@ -1,0 +1,9 @@
+# Secrete - NU se comit niciodata
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+node_modules/
+*.keystore
+*.jks
