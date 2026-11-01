@@ -730,7 +730,6 @@ export default function PlayScreen() {
     group.add(body);
     return group;
   }
-
   function resolveCollisions(next: THREE.Vector3, prev: THREE.Vector3): THREE.Vector3 {
     const r = PLAYER_RADIUS;
     const result = scratchResolvedPos.current.copy(next);
@@ -1168,7 +1167,7 @@ const onContextCreate = async (gl: any) => {
           executa logica. key={id}: la schimbarea jocului, React distruge complet
           instanta veche si monteaza una noua - fara nicio stare ramasa de la jocul
           anterior (vezi nota din ScriptSandboxWebView.tsx despre de ce e necesar). */}
-      <ScriptSandboxWebView key={id} ref={sandboxRef} />
+      <ScriptSandboxWebView key={id} gameId={String(id)} ref={sandboxRef} />
 
       {ready && Platform.OS !== "web" ? (
         <View
