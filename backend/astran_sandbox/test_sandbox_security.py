@@ -5,7 +5,7 @@ Rulare (dupa `bash astran_sandbox/build.sh`, din folderul `backend`):
 
     pytest astran_sandbox/test_sandbox_security.py -v
 
-Daca `bwrap` nu functioneaza in mediul tau (multe containere CI blocheaza namespace-uri
+Daca `bwrap` nu functioneaza (vezi `python -m astran_sandbox.diagnose`; multe containere CI blocheaza namespace-uri
 neprivilegiate), seteaza inainte:
 
     ASTRAN_SANDBOX_REQUIRE_BWRAP=0 pytest astran_sandbox/test_sandbox_security.py -v
