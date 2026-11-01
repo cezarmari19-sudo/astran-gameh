@@ -381,6 +381,15 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+# Plasa tehnica anti-overflow, NU limita de gameplay (gravitatie, viteze, scala etc. le decide
+# creatorul). Identica cu SAFE_NUM din frontend/src/sandbox/runtime.ts.
+SAFE_NUM = 1e9
+
+
+def _safe(v: float) -> float:
+    return _clamp(v, -SAFE_NUM, SAFE_NUM)
+
+
 def _bool(v: Any) -> Optional[bool]:
     return v if isinstance(v, bool) else None
 
@@ -405,16 +414,16 @@ def sanitize_ops(raw: Any) -> list[dict]:
         if kind == "world":
             gravity = _number(op.get("gravity"))
             if gravity is not None:
-                item["gravity"] = _clamp(gravity, 0.0, 200.0)
+                item["gravity"] = _safe(gravity)
             air = _number(op.get("air"))
             if air is not None:
-                item["air"] = _clamp(air, 0.0, 5.0)
+                item["air"] = _safe(air)
             jump_speed = _number(op.get("jump_speed"))
             if jump_speed is not None:
-                item["jump_speed"] = _clamp(jump_speed, 0.0, 50.0)
+                item["jump_speed"] = _safe(jump_speed)
             move_speed = _number(op.get("move_speed"))
             if move_speed is not None:
-                item["move_speed"] = _clamp(move_speed, 0.0, 50.0)
+                item["move_speed"] = _safe(move_speed)
             clean.append(item)
             continue
 
@@ -426,13 +435,13 @@ def sanitize_ops(raw: Any) -> list[dict]:
                 item["name"] = name[:64]
             density = _number(op.get("density"))
             if density is not None:
-                item["density"] = _clamp(density, 0.001, 30.0)
+                item["density"] = _safe(density)
             friction = _number(op.get("friction"))
             if friction is not None:
-                item["friction"] = _clamp(friction, 0.0, 5.0)
+                item["friction"] = _safe(friction)
             bounce = _number(op.get("bounce"))
             if bounce is not None:
-                item["bounce"] = _clamp(bounce, 0.0, 1.2)
+                item["bounce"] = _safe(bounce)
             liquid = _bool(op.get("liquid"))
             if liquid is not None:
                 item["liquid"] = liquid
@@ -445,10 +454,10 @@ def sanitize_ops(raw: Any) -> list[dict]:
         for axis in ("x", "y", "z"):
             n = _number(op.get(axis))
             if n is not None:
-                item[axis] = _clamp(n, -10000.0, 10000.0)
+                item[axis] = _safe(n)
         scale = _number(op.get("scale"))
         if scale is not None:
-            item["scale"] = _clamp(scale, 0.05, 100.0)
+            item["scale"] = _safe(scale)
         shape = op.get("type")
         if isinstance(shape, str) and shape in SHAPE_TYPES:
             item["type"] = shape
@@ -468,7 +477,7 @@ def sanitize_ops(raw: Any) -> list[dict]:
         for axis in ("vx", "vy", "vz"):
             n = _number(op.get(axis))
             if n is not None:
-                item[axis] = _clamp(n, -200.0, 200.0)
+                item[axis] = _safe(n)
         clean.append(item)
     clean.sort(key=lambda o: o["t"])  # sortare stabila: ordinea pastrata la timp egal
     return clean
