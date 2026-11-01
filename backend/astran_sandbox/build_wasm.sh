@@ -5,7 +5,8 @@
 # Cerinte: Emscripten (emcc, emcmake) activat in shell (source emsdk_env.sh), git, cmake, python3.
 # Foloseste retea o singura data (git clone Luau). Ruleaza pe PC/Linux/WSL, nu in AndroidIDE.
 # Folosire, din folderul backend:   bash astran_sandbox/build_wasm.sh
-# Optional: LUAU_TAG=<tag> bash astran_sandbox/build_wasm.sh
+# OBLIGATORIU: LUAU_TAG=<tag> bash astran_sandbox/build_wasm.sh   (versiune Luau fixata, ex. 0.6xx;
+# vezi tag-urile cu: git ls-remote --tags https://github.com/luau-lang/luau | tail)
 set -euo pipefail
 
 command -v emcc >/dev/null || { echo "emcc nu e in PATH (activeaza Emscripten: source emsdk_env.sh)" >&2; exit 1; }
@@ -19,12 +20,14 @@ FRONTEND_OUT="${HERE}/../../frontend/src/sandbox"
 mkdir -p "${WORK}" "${FRONTEND_OUT}"
 
 if [ ! -d "${SRC}" ]; then
-  if [ -n "${LUAU_TAG:-}" ]; then
-    git clone --depth 1 --branch "${LUAU_TAG}" https://github.com/luau-lang/luau "${SRC}"
-  else
-    git clone --depth 1 https://github.com/luau-lang/luau "${SRC}"
+  if [ -z "${LUAU_TAG:-}" ]; then
+    echo "Seteaza LUAU_TAG la o versiune fixa de Luau (build reproductibil, fara cod nefixat din 'main')." >&2
+    echo "Tag-uri: git ls-remote --tags https://github.com/luau-lang/luau | tail" >&2
+    exit 1
   fi
+  git clone --depth 1 --branch "${LUAU_TAG}" https://github.com/luau-lang/luau "${SRC}"
 fi
+echo "Luau: $(git -C "${SRC}" describe --tags --always) @ $(git -C "${SRC}" rev-parse HEAD)"
 
 # -fexceptions: Luau (VM si compiler) foloseste exceptii C++ pentru erori; Emscripten le dezactiveaza implicit.
 emcmake cmake -S "${SRC}" -B "${OUT}" \
