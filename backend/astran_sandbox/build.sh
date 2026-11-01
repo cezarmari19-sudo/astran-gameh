@@ -46,9 +46,15 @@ if [ ! -f "${OUT}/libLuau.VM.a" ] || [ ! -f "${OUT}/libLuau.Compiler.a" ]; then
   exit 1
 fi
 
+# Link STATIC implicit (LUAU_STATIC=0 ca sa dezactivezi). Jail-ul bubblewrap (runner.py) expune
+# scriptului doar binarul si preludiul: un binar dinamic nu isi gaseste libstdc++/libc acolo si
+# nu poate porni. Static = jail minim, fara nicio biblioteca de sistem vizibila in el.
+STATIC_FLAG="-static"
+if [ "${LUAU_STATIC:-1}" = "0" ]; then STATIC_FLAG=""; fi
+
 g++ -std=c++17 -O2 "${HERE}/host.cpp" \
   -I"${SRC}/VM/include" -I"${SRC}/Compiler/include" \
-  -Wl,--start-group "${LIBS[@]}" -Wl,--end-group -lm \
+  -Wl,--start-group "${LIBS[@]}" -Wl,--end-group -lm ${STATIC_FLAG} \
   -o "${BIN}/luau-sandbox"
 
 echo "Gata: ${BIN}/luau-sandbox"
