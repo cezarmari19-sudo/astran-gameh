@@ -11,7 +11,7 @@
 // porneste pe o pagina care a mai rulat deja cod de la jocul A. Izolarea intre doua
 // RULARI ale ACELUIASI joc e garantata de componenta insasi (worker nou de fiecare
 // data - vezi runtime.ts); izolarea intre doua JOCURI DIFERITE depinde de acest key.
-import React, { forwardRef, useCallback, useImperativeHandle, useRef } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { WebView, WebViewMessageEvent } from "react-native-webview";
 import {
   buildHostHtml,
@@ -34,34 +34,81 @@ const EMPTY_RESULT = (errors: string[]): SandboxResult => ({
   truncated: false,
 });
 
-const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Record<string, never>>(
-  function ScriptSandboxWebView(_props, ref) {
+// Limite de securitate aplicate DE COMPONENTA (nu depind de pagina-gazda din runtime.ts).
+// MAX_MESSAGE_CHARS: un worker compromis nu poate inunda thread-ul JS al aplicatiei.
+// WATCHDOG_GRACE_MS: dupa timeoutMs + marja, daca nu a venit niciun raspuns, WebView-ul
+// e distrus si recreat (singura oprire sigura pentru un worker blocat).
+const MAX_MESSAGE_CHARS = 2_000_000;
+const MAX_OUTPUT_CHARS = 1_500_000;
+const WATCHDOG_GRACE_MS = 3000;
+const DEFAULT_TIMEOUT_MS = 2000;
+
+type Props = {
+  // Identitatea jocului. Folosit INTERN in key-ul WebView-ului, deci izolarea intre
+  // doua jocuri diferite nu mai depinde doar de key-ul pus de cel care foloseste componenta.
+  gameId: string;
+};
+
+const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Props>(
+  function ScriptSandboxWebView({ gameId }, ref) {
     const webRef = useRef<WebView>(null);
     // O singura rulare "in zbor" per instanta - suficient pentru cazul de folosire de
     // azi (rulezi jocul, astepti rezultatul, abia apoi rulezi din nou). Daca mai tarziu
     // e nevoie sa rulezi mai multe scripturi client in paralel (ex: mai multe "obiecte"
     // independente), asta ar trebui extins la o coada de cereri cu id-uri, nu refacut
     // de la zero - structura de mesaje (runtime.ts) deja suporta adaugarea unui id per
-        // cerere, doar componenta de aici nu-l foloseste inca.
-    const pending = useRef<{ resolve: (r: SandboxResult) => void } | null>(null);
+    // cerere, doar componenta de aici nu-l foloseste inca.
+    const pending = useRef<{
+      id: number;
+      resolve: (r: SandboxResult) => void;
+      timer: ReturnType<typeof setTimeout>;
+    } | null>(null);
+    const nextId = useRef(1);
+    // epoch++ => WebView remontat => worker-ul vechi e distrus (oprire/recuperare sigura).
+    const [epoch, setEpoch] = useState(0);
+    useEffect(() => () => {
+      if (pending.current) {
+        clearTimeout(pending.current.timer);
+        pending.current.resolve(EMPTY_RESULT(["Sandbox unmounted"]));
+        pending.current = null;
+      }
+    }, []);
     const htmlRef = useRef<string | null>(null);
     if (htmlRef.current === null) {
       htmlRef.current = buildHostHtml();
     }
 
     const onMessage = useCallback((e: WebViewMessageEvent) => {
+      const raw = e.nativeEvent.data;
+      if (typeof raw !== "string" || raw.length > MAX_MESSAGE_CHARS) return;
       let msg: any;
       try {
-        msg = JSON.parse(e.nativeEvent.data);
+        msg = JSON.parse(raw);
       } catch {
         return;
       }
-      if (!msg || msg.type !== "result") return;
+      if (!msg || typeof msg !== "object" || msg.type !== "result") return;
 
       const current = pending.current;
+      if (!current) return; // raspuns intarziat la o cerere deja rezolvata - ignorat
+      // Daca pagina-gazda returneaza id-ul cererii, trebuie sa corespunda; un raspuns
+      // vechi nu are voie sa fie atribuit cererii curente.
+      if (msg.id !== undefined && msg.id !== current.id) return;
+
       pending.current = null;
-      if (!current) return; // raspuns intarziat la o cerere deja rezolvata (watchdog) - ignorat
-      current.resolve(parseSandboxOutput(typeof msg.output === "string" ? msg.output : "", msg.fatal));
+      clearTimeout(current.timer);
+      const output = typeof msg.output === "string" ? msg.output : "";
+      if (output.length > MAX_OUTPUT_CHARS) {
+        current.resolve(EMPTY_RESULT(["Sandbox output too large"]));
+        return;
+      }
+      current.resolve(parseSandboxOutput(output, msg.fatal === true));
+    }, []);
+
+    // Navigarea/incarcarea oricarui URL in afara paginii-gazda e respinsa.
+    const onShouldStart = useCallback((req: { url: string }) => {
+      const u = req?.url ?? "";
+      return u === "about:blank" || u.startsWith("about:srcdoc");
     }, []);
 
     useImperativeHandle(
@@ -73,7 +120,9 @@ const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Record<string, neve
               // O cerere noua inlocuieste una veche inca neterminata: pagina oricum
               // porneste un worker nou pentru cererea noua, deci cea veche nu ar mai
               // primi niciodata raspunsul ei - o incheiem explicit, nu o lasam agatata.
+              clearTimeout(pending.current.timer);
               pending.current.resolve(EMPTY_RESULT(["Superseded by a newer run"]));
+              pending.current = null;
             }
 
             let message: ReturnType<typeof buildRunMessage>;
@@ -84,8 +133,17 @@ const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Record<string, neve
               return;
             }
 
-            pending.current = { resolve };
-            webRef.current?.postMessage(JSON.stringify(message));
+            const id = nextId.current++;
+            const timeoutMs = (opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) + WATCHDOG_GRACE_MS;
+            const timer = setTimeout(() => {
+              const cur = pending.current;
+              if (!cur || cur.id !== id) return;
+              pending.current = null;
+              cur.resolve(EMPTY_RESULT(["Sandbox watchdog: script did not finish, sandbox restarted"]));
+              setEpoch((n) => n + 1); // distruge si recreeaza WebView-ul => worker blocat oprit
+            }, timeoutMs);
+            pending.current = { id, resolve, timer };
+            webRef.current?.postMessage(JSON.stringify({ ...message, id }));
           });
         },
       }),
@@ -94,16 +152,32 @@ const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Record<string, neve
 
     return (
       <WebView
+        key={`${gameId}:${epoch}`}
         ref={webRef}
         source={{ html: htmlRef.current }}
-        originWhitelist={["*"]}
+        originWhitelist={["about:blank"]}
+        onShouldStartLoadWithRequest={onShouldStart}
         onMessage={onMessage}
         javaScriptEnabled
-        // Fara stocare persistenta (cookies/localStorage/etc.) in acest WebView - fiecare
-        // montare e "de unica folosinta"; oricum CSP-ul paginii (runtime.ts) blocheaza
-        // reteaua, dar asta inchide si eventuala stocare locala ramasa intre montari.
+        // --- Hardening: tot ce nu e necesar pentru a rula logica jocului e oprit ---
         incognito
-        // Fara UI vizibil - componenta doar executa logica, nu afiseaza nimic.
+        domStorageEnabled={false}
+        cacheEnabled={false}
+        thirdPartyCookiesEnabled={false}
+        sharedCookiesEnabled={false}
+        allowFileAccess={false}
+        allowFileAccessFromFileURLs={false}
+        allowUniversalAccessFromFileURLs={false}
+        allowsLinkPreview={false}
+        mixedContentMode="never"
+        geolocationEnabled={false}
+        setSupportMultipleWindows={false}
+        javaScriptCanOpenWindowsAutomatically={false}
+        mediaPlaybackRequiresUserAction
+        allowsInlineMediaPlayback={false}
+        allowsAirPlayForMediaPlayback={false}
+        allowsFullscreenVideo={false}
+        webviewDebuggingEnabled={false}
         style={{ width: 0, height: 0 }}
         pointerEvents="none"
       />
