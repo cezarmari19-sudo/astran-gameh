@@ -965,7 +965,7 @@ export default function PlayScreen() {
       )}
 
       {/* Sandbox pentru scripturile target="client" - vezi nota identica din app/play/[id].tsx. */}
-      <ScriptSandboxWebView key={id} ref={sandboxRef} />
+      <ScriptSandboxWebView key={id} gameId={String(id)} ref={sandboxRef} />
 
       {ready && Platform.OS !== "web" ? (
         <View
