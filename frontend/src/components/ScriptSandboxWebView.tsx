@@ -41,7 +41,6 @@ const EMPTY_RESULT = (errors: string[]): SandboxResult => ({
 const MAX_MESSAGE_CHARS = 2_000_000;
 const MAX_OUTPUT_CHARS = 1_500_000;
 const WATCHDOG_GRACE_MS = 3000;
-const DEFAULT_TIMEOUT_MS = 2000;
 
 type Props = {
   // Identitatea jocului. Folosit INTERN in key-ul WebView-ului, deci izolarea intre
@@ -93,7 +92,8 @@ const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Props>(
       if (!current) return; // raspuns intarziat la o cerere deja rezolvata - ignorat
       // Daca pagina-gazda returneaza id-ul cererii, trebuie sa corespunda; un raspuns
       // vechi nu are voie sa fie atribuit cererii curente.
-      if (msg.id !== undefined && msg.id !== current.id) return;
+      // Pagina-gazda trimite mereu id-ul; un raspuns fara id sau cu alt id e ignorat.
+      if (msg.id !== current.id) return;
 
       pending.current = null;
       clearTimeout(current.timer);
@@ -134,7 +134,10 @@ const ScriptSandboxWebView = forwardRef<ScriptSandboxHandle, Props>(
             }
 
             const id = nextId.current++;
-            const timeoutMs = (opts.timeoutMs ?? DEFAULT_TIMEOUT_MS) + WATCHDOG_GRACE_MS;
+            // Folosim timeout-ul deja VALIDAT/clamp-uit de buildRunMessage (50..5000 ms), nu
+            // opts.timeoutMs brut: NaN/negativ declansa watchdog-ul instant, iar o valoare
+            // uriasa il dezactiva de fapt (singura oprire daca thread-ul JS al paginii e blocat).
+            const timeoutMs = message.timeoutMs + WATCHDOG_GRACE_MS;
             const timer = setTimeout(() => {
               const cur = pending.current;
               if (!cur || cur.id !== id) return;
