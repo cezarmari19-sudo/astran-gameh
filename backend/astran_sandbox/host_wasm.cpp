@@ -1,0 +1,511 @@
+// Astran Luau sandbox host - varianta WebAssembly (client).
+// DERIVAT din host.cpp: logica de sandbox (limite, caps, luaL_sandbox, interrupt, allocator)
+// ramane IDENTICA cu serverul; difera doar intrarea/iesirea (buffer in loc de stdin/stdout).
+// Daca modifici host.cpp, aplica aceeasi modificare si aici.
+// Astran Luau sandbox host (multi-fisier).
+//
+//   luau-sandbox --prelude prelude.luau [--timeout ms] [--mem MB] [--entry main] [file | -]
+//
+// Intrare (stdin sau fisier), unul din formate:
+//   1) un bundle de fisiere:   @@FILE <nume> <nr_octeti>\n<continut>\n ...
+//   2) cod Luau simplu (tratat ca un singur fisier numit "main")
+//
+// Fisierul "entry" (implicit "main") ruleaza primul; celelalte pot fi incarcate
+// din script cu require("nume"). Toate ruleaza izolat: fara io/os.execute,
+// cu limita de timp si de memorie.
+//
+// Scrie pe stdout cate un obiect JSON pe linie:
+//   {"type":"print","msg":"..."}    {"type":"warn","msg":"..."}
+//   {"type":"error","msg":"..."}    {"type":"ops","data":{...}}
+//
+// Exit code: 0 ok, 1 argumente/fisiere gresite, 2 eroare de compilare/intrare,
+//            3 eroare interna la rulare.
+
+#include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "lua.h"
+#include "luacode.h"
+#include "lualib.h"
+
+using Clock = std::chrono::steady_clock;
+
+static Clock::time_point g_deadline;
+static size_t g_printBytes = 0;
+static std::string g_out; // tot ce ar fi mers pe stdout
+static const size_t kMaxOutBytes = 4 * 1024 * 1024;
+
+static const size_t kMaxPrintBytes = 256 * 1024;    // total text din print/warn
+static const size_t kMaxOpsBytes = 2 * 1024 * 1024; // rezultatul final
+static const size_t kMaxSourceBytes = 400 * 1024;   // toate fisierele la un loc
+static const size_t kMaxFiles = 32;
+static const size_t kMaxNameLen = 64;
+
+struct SourceFile
+{
+    std::string name;
+    std::string source;
+};
+
+// ---------- output JSON ----------
+
+static std::string jsonEscape(const std::string& s)
+{
+    std::string o;
+    for (unsigned char c : s)
+    {
+        switch (c)
+        {
+        case '"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        default:
+            if (c < 0x20)
+            {
+                char b[8];
+                std::snprintf(b, sizeof b, "\\u%04x", c);
+                o += b;
+            }
+            else
+            {
+                o += (char)c;
+            }
+        }
+    }
+    return o;
+}
+
+static void emit(const char* type, const std::string& msg)
+{
+    if (g_out.size() > kMaxOutBytes)
+        return;
+    g_out += "{\"type\":\"";
+    g_out += type;
+    g_out += "\",\"msg\":\"";
+    g_out += jsonEscape(msg);
+    g_out += "\"}\n";
+}
+
+// ---------- functii expuse scriptului ----------
+
+static int logImpl(lua_State* L, const char* type)
+{
+    int n = lua_gettop(L);
+    std::string out;
+    for (int i = 1; i <= n; i++)
+    {
+        size_t len = 0;
+        const char* s = luaL_tolstring(L, i, &len);
+        if (i > 1)
+            out += '\t';
+        out.append(s, len);
+        lua_pop(L, 1);
+    }
+
+    g_printBytes += out.size();
+    if (g_printBytes > kMaxPrintBytes)
+        luaL_error(L, "output limit exceeded");
+
+    emit(type, out);
+    return 0;
+}
+
+static int luaPrint(lua_State* L) { return logImpl(L, "print"); }
+static int luaWarn(lua_State* L) { return logImpl(L, "warn"); }
+
+// emit(kind, payload) e dat doar preludiului (nu e global), ca scriptul
+// utilizatorului sa nu poata falsifica rezultatul.
+static int luaEmit(lua_State* L)
+{
+    const char* kind = luaL_checkstring(L, 1);
+    size_t len = 0;
+    const char* payload = luaL_checklstring(L, 2, &len);
+
+    if (std::strcmp(kind, "ops") == 0)
+    {
+        if (len > kMaxOpsBytes)
+            luaL_error(L, "result too large");
+        if (g_out.size() + len > kMaxOutBytes)
+            luaL_error(L, "result too large");
+        g_out += "{\"type\":\"ops\",\"data\":";
+        g_out.append(payload, len);
+        g_out += "}\n";
+    }
+    else if (std::strcmp(kind, "error") == 0)
+    {
+        emit("error", std::string(payload, len));
+    }
+    return 0;
+}
+
+// ---------- limita de timp ----------
+
+static void onInterrupt(lua_State* L, int gc)
+{
+    if (gc >= 0)
+        return;
+    if (Clock::now() > g_deadline)
+        luaL_error(L, "script timed out");
+}
+
+// ---------- limita de memorie ----------
+
+struct MemState
+{
+    size_t used = 0;
+    size_t limit = 0;
+};
+
+static void* allocator(void* ud, void* ptr, size_t osize, size_t nsize)
+{
+    MemState* m = static_cast<MemState*>(ud);
+    size_t old = ptr ? osize : 0; // cand ptr e null, osize e doar un tag
+
+    if (nsize == 0)
+    {
+        if (ptr)
+        {
+            m->used -= old;
+            std::free(ptr);
+        }
+        return nullptr;
+    }
+
+    if (m->used - old + nsize > m->limit)
+        return nullptr; // Luau va raporta "not enough memory"
+
+    void* p = std::realloc(ptr, nsize);
+    if (p)
+        m->used = m->used - old + nsize;
+    return p;
+}
+
+// ---------- intrare: bundle de fisiere ----------
+
+static bool validName(const std::string& n)
+{
+    if (n.empty() || n.size() > kMaxNameLen)
+        return false;
+    if (n.front() == '/' || n.back() == '/')
+        return false;
+    for (size_t i = 0; i < n.size(); i++)
+    {
+        unsigned char c = (unsigned char)n[i];
+        bool ok = std::isalnum(c) != 0 || c == '_' || c == '-' || c == '/';
+        if (!ok)
+            return false;
+        if (c == '/' && i + 1 < n.size() && n[i + 1] == '/')
+            return false;
+    }
+    return true;
+}
+
+static bool parseBundle(const std::string& in, std::vector<SourceFile>& files, std::string& err)
+{
+    size_t pos = 0;
+    while (pos < in.size())
+    {
+        if (in[pos] == '\n')
+        {
+            pos++;
+            continue;
+        }
+
+        if (in.compare(pos, 7, "@@FILE ") != 0)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        size_t eol = in.find('\n', pos);
+        if (eol == std::string::npos)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        std::string header = in.substr(pos + 7, eol - (pos + 7));
+        size_t sp = header.rfind(' ');
+        if (sp == std::string::npos)
+        {
+            err = "invalid script bundle";
+            return false;
+        }
+
+        std::string name = header.substr(0, sp);
+        unsigned long n = std::strtoul(header.c_str() + sp + 1, nullptr, 10);
+
+        pos = eol + 1;
+        if (n > in.size() - pos)
+        {
+            err = "truncated script bundle";
+            return false;
+        }
+
+        files.push_back({name, in.substr(pos, n)});
+        pos += n;
+    }
+    return true;
+}
+
+static bool parseInput(const std::string& in, std::vector<SourceFile>& files, std::string& err)
+{
+    if (in.compare(0, 7, "@@FILE ") == 0)
+    {
+        if (!parseBundle(in, files, err))
+            return false;
+    }
+    else
+    {
+        files.push_back({"main", in});
+    }
+
+    if (files.empty())
+    {
+        err = "no scripts";
+        return false;
+    }
+    if (files.size() > kMaxFiles)
+    {
+        err = "too many scripts";
+        return false;
+    }
+
+    std::set<std::string> seen;
+    size_t total = 0;
+    for (const SourceFile& f : files)
+    {
+        if (!validName(f.name))
+        {
+            err = "invalid script name: " + f.name;
+            return false;
+        }
+        if (!seen.insert(f.name).second)
+        {
+            err = "duplicate script name: " + f.name;
+            return false;
+        }
+        total += f.source.size();
+    }
+    if (total > kMaxSourceBytes)
+    {
+        err = "scripts too large";
+        return false;
+    }
+    return true;
+}
+
+// ---------- utilitare ----------
+
+static bool readFile(const std::string& path, std::string& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+}
+
+// Compileaza si incarca un chunk pe stiva lui T. La eroare pune mesajul in err
+// si nu lasa nimic pe stiva.
+static bool loadChunk(lua_State* T, const std::string& src, const std::string& chunkName, std::string& err)
+{
+    size_t bcSize = 0;
+    char* bytecode = luau_compile(src.data(), src.size(), nullptr, &bcSize);
+    int rc = luau_load(T, chunkName.c_str(), bytecode, bcSize, 0);
+    std::free(bytecode);
+
+    if (rc != 0)
+    {
+        const char* m = lua_tostring(T, -1);
+        err = m ? m : "compile error";
+        lua_pop(T, 1);
+        return false;
+    }
+    return true;
+}
+
+// Capabilities: ce API-uri din prelude.luau are voie sa le vada scriptul.
+// Lista vine EXCLUSIV din linia de comanda (deci decisa de server, in runner.py,
+// niciodata din continutul scriptului sau dintr-un fisier pe care l-ar putea scrie
+// creatorul). Se pune ca tabel Lua *inainte* de luaL_sandbox(L), deci devine
+// read-only prin acelasi mecanism care ingheata deja stdlib-ul si print/warn -
+// scriptul nu are nicio cale (nici macar prin debug.*) sa adauge sau sa schimbe
+// o capacitate care nu i-a fost acordata la pornire.
+static std::set<std::string> parseCaps(const std::string& csv)
+{
+    std::set<std::string> out;
+    size_t start = 0;
+    while (start <= csv.size())
+    {
+        size_t comma = csv.find(',', start);
+        std::string tok = csv.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!tok.empty())
+            out.insert(tok);
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+static void pushCapsTable(lua_State* L, const std::set<std::string>& caps)
+{
+    lua_createtable(L, 0, (int)caps.size());
+    for (const std::string& c : caps)
+    {
+        lua_pushboolean(L, true);
+        lua_setfield(L, -2, c.c_str());
+    }
+    lua_setglobal(L, "_CAPS");
+}
+
+// Rularea propriu-zisa (corpul fostului main(), neschimbat).
+static int runInner(const std::string& input, const std::string& prelude, const std::string& capsArg,
+                    const std::string& entry, long timeoutMs, size_t memMB)
+{
+    std::vector<SourceFile> files;
+    std::string err;
+    if (!parseInput(input, files, err))
+    {
+        emit("error", err);
+        return 2;
+    }
+
+    size_t entryIndex = files.size();
+    for (size_t i = 0; i < files.size(); i++)
+    {
+        if (files[i].name == entry)
+            entryIndex = i;
+    }
+    if (entryIndex == files.size())
+    {
+        emit("error", "missing entry script '" + entry + "'");
+        return 2;
+    }
+
+    MemState mem;
+    mem.limit = memMB * 1024 * 1024;
+
+    lua_State* L = lua_newstate(allocator, &mem);
+    if (!L)
+    {
+        emit("error", "cannot create VM");
+        return 3;
+    }
+
+    luaL_openlibs(L); // Luau nu are io/require; os are doar clock/time/date
+
+    // Functii vizibile scriptului. Se inregistreaza INAINTE de luaL_sandbox.
+    lua_pushcfunction(L, luaPrint, "print");
+    lua_setglobal(L, "print");
+    lua_pushcfunction(L, luaWarn, "warn");
+    lua_setglobal(L, "warn");
+
+    // "core" (Instance/Vector3/Material/task/workspace/game - motorul de baza, fizica
+    // si crearea de obiecte) e acordat intotdeauna: elimina acest API ar insemna sa
+    // schimbam comportamentul jocurilor existente / gameplay-ul, lucru interzis explicit
+    // de cerinta. Orice alta capacitate (ex: "assets") vine STRICT din --caps, decisa
+    // de server inainte sa porneasca procesul.
+    std::set<std::string> caps = parseCaps(capsArg);
+    caps.insert("core");
+    pushCapsTable(L, caps);
+
+    luaL_sandbox(L); // bibliotecile (si _CAPS) devin read-only, ca in Roblox
+
+    lua_State* T = lua_newthread(L);
+    luaL_sandboxthread(T); // scriptul primeste propriile globale, izolate
+
+    lua_callbacks(L)->interrupt = onInterrupt;
+
+    // stiva lui T: [preludeFn]
+    if (!loadChunk(T, prelude, "=prelude", err))
+    {
+        emit("error", "prelude: " + err);
+        lua_close(L);
+        return 3;
+    }
+
+    bool failed = false;
+
+    // stiva lui T: [preludeFn, entryFn]
+    if (!loadChunk(T, files[entryIndex].source, "=" + files[entryIndex].name, err))
+    {
+        emit("error", err);
+        failed = true;
+    }
+
+    // stiva lui T: [preludeFn, entryFn, emit, modules]
+    lua_pushcfunction(T, luaEmit, "emit");
+    lua_createtable(T, 0, (int)files.size());
+
+    // toate celelalte fisiere devin module pentru require("nume")
+    for (size_t i = 0; i < files.size(); i++)
+    {
+        if (i == entryIndex)
+            continue;
+        if (!loadChunk(T, files[i].source, "=" + files[i].name, err))
+        {
+            emit("error", err);
+            failed = true;
+            continue;
+        }
+        lua_setfield(T, -2, files[i].name.c_str());
+    }
+
+    if (failed)
+    {
+        lua_close(L);
+        return 2;
+    }
+
+    g_deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+
+    int rc = 0;
+    if (lua_pcall(T, 3, 0, 0) != 0)
+    {
+        const char* m = lua_tostring(T, -1);
+        emit("error", m ? m : "runtime error");
+        rc = 3;
+    }
+
+    lua_close(L);
+    return rc;
+}
+
+// Punct de intrare apelat din JS (worker). Intoarce un sir alocat cu malloc (JS il elibereaza
+// cu _free): aceleasi linii JSON ca stdout-ul host.cpp. Orice esec devine o linie "error".
+extern "C" char* astran_run(const char* bundle, int bundleLen, const char* prelude, int preludeLen,
+                            const char* caps, const char* entry, int timeoutMs, int memMB)
+{
+    g_out.clear();
+    g_printBytes = 0;
+
+    if (!bundle || !prelude || !caps || !entry || bundleLen < 0 || preludeLen <= 0 || timeoutMs <= 0 || memMB <= 0)
+    {
+        emit("error", "invalid sandbox arguments");
+    }
+    else
+    {
+        runInner(std::string(bundle, (size_t)bundleLen), std::string(prelude, (size_t)preludeLen),
+                 std::string(caps), std::string(entry), (long)timeoutMs, (size_t)memMB);
+    }
+
+    char* out = (char*)std::malloc(g_out.size() + 1);
+    if (!out)
+        return nullptr;
+    std::memcpy(out, g_out.data(), g_out.size());
+    out[g_out.size()] = 0;
+    return out;
+}
