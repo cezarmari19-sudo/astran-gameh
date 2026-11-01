@@ -1,7 +1,18 @@
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
 
-const BASE = process.env.EXPO_PUBLIC_BACKEND_URL || "";
+// URL-ul backend-ului vine din EXPO_PUBLIC_BACKEND_URL: in development din frontend/.env,
+// iar in build-urile EAS (preview/production, inclusiv CI) din blocul "env" al profilului din
+// eas.json - .env e in .gitignore, deci NU ajunge in CI. E un URL public, nu un secret.
+// Fara un URL absolut valid, fetch("/api/...") esueaza pe nativ cu "Invalid URL".
+const BASE = (process.env.EXPO_PUBLIC_BACKEND_URL || "").trim().replace(/\/+$/, "");
+const BASE_VALID = /^https?:\/\/[^/\s]+/i.test(BASE);
+if (!BASE_VALID) {
+  console.error(
+    "[astran] EXPO_PUBLIC_BACKEND_URL lipseste sau nu e un URL absolut (http/https). " +
+      "Seteaza-l in frontend/.env (development) sau in eas.json -> build.<profil>.env (build)."
+  );
+}
 const TOKEN_KEY = "astran_session_token";
 
 async function getToken(): Promise<string | null> {
@@ -27,13 +38,27 @@ export async function api<T = any>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
+  if (!BASE_VALID) {
+    const err = new Error("Configurare lipsa: adresa serverului (EXPO_PUBLIC_BACKEND_URL) nu e setata in aceasta versiune a aplicatiei.");
+    (err as any).status = 0;
+    throw err;
+  }
   const token = await getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(init.headers as Record<string, string> | undefined),
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${BASE}/api${path}`, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api${path}`, { ...init, headers });
+  } catch (e: any) {
+    // Retea cazuta / server oprit / DNS: mesaj clar in loc de "Network request failed" brut.
+    const err = new Error("Serverul nu este disponibil. Verifica conexiunea la internet si incearca din nou.");
+    (err as any).status = 0;
+    (err as any).cause = e;
+    throw err;
+  }
   const text = await res.text();
   let data: any = null;
   try {
@@ -52,7 +77,7 @@ export async function api<T = any>(
 
 // Construieste link-ul catre WebSocket-ul de multiplayer live (vezi backend/realtime.py).
 // Montat direct pe `app` (NU sub /api, vezi server.py) - de-aia `path` aici e absolut
-// ("/ws/games/..."), nu trece prin acelasi prefix ca restul lui `api()` de mai sus.
+// ("/ws/games/...") , nu trece prin acelasi prefix ca restul lui `api()` de mai sus.
 // Token-ul merge ca query param: un WebSocket din React Native nu poate seta header-ul
 // Authorization la handshake, asa ca serverul il decodeaza manual (vezi resolve_user_from_token).
 export async function wsUrl(path: string): Promise<string> {
