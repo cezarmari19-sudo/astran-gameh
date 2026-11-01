@@ -12,7 +12,8 @@
 //      oprire garantata pentru o bucla care nu ajunge la intreruperile VM-ului.
 //   4. In worker, dupa initializarea WASM, API-urile de retea/stocare sunt blocate.
 //   5. Limite de timp si memorie impuse de host (clamp aici, interrupt+allocator in WASM).
-//   6. Rezultatul este VALIDAT si CURATAT aici (sanitizeOps), identic cu runner.py.
+//   6. Rezultatul este VALIDAT si CURATAT aici (sanitizeOps): tipuri, id-uri, culori, numere
+//      finite. Fara limite de gameplay (gravitatie, viteze, scala etc. le decide creatorul).
 //
 // Contractul fisierelor/bundle-ului/rezultatului reproduce backend/astran_sandbox/runner.py,
 // ca acelasi script sa se comporte identic pe client si pe server.
@@ -77,6 +78,11 @@ const NAME_RE = /^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)*$/;
 const ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 const MATERIAL_ID_RE = /^m[0-9]{1,4}$/;
 const SHAPE_TYPES = new Set(["cube", "sphere", "cylinder", "cone", "pyramid"]);
+// Singura plasa de siguranta ramasa pe valorile numerice din ops: NU e o limita de gameplay,
+// ci protectie tehnica (numere ca 1e308 devin Infinity/NaN in motorul fizic si ingheata
+// clientul). Se aplica identic oricarei valori; valorile normale de joc sunt departe sub ea.
+const SAFE_NUM = 1e9;
+
 const OP_KINDS = new Set(["create", "set", "destroy", "world", "material"]);
 
 // ---------------- utilitare ----------------
@@ -92,6 +98,9 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 function bool(v: unknown): boolean | null {
   return typeof v === "boolean" ? v : null;
+}
+function safe(v: number): number {
+  return clamp(v, -SAFE_NUM, SAFE_NUM);
 }
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -261,13 +270,13 @@ export function sanitizeOps(raw: unknown): SandboxOp[] {
 
     if (kind === "world") {
       const gravity = num(op.gravity);
-      if (gravity !== null) item.gravity = clamp(gravity, 0, 200);
+      if (gravity !== null) item.gravity = safe(gravity);
       const air = num(op.air);
-      if (air !== null) item.air = clamp(air, 0, 5);
+      if (air !== null) item.air = safe(air);
       const jump = num(op.jump_speed);
-      if (jump !== null) item.jump_speed = clamp(jump, 0, 50);
+      if (jump !== null) item.jump_speed = safe(jump);
       const move = num(op.move_speed);
-      if (move !== null) item.move_speed = clamp(move, 0, 50);
+      if (move !== null) item.move_speed = safe(move);
       clean.push(item);
       continue;
     }
@@ -276,11 +285,11 @@ export function sanitizeOps(raw: unknown): SandboxOp[] {
       if (!MATERIAL_ID_RE.test(opId)) continue;
       if (typeof op.name === "string") item.name = op.name.slice(0, 64);
       const density = num(op.density);
-      if (density !== null) item.density = clamp(density, 0.001, 30);
+      if (density !== null) item.density = safe(density);
       const friction = num(op.friction);
-      if (friction !== null) item.friction = clamp(friction, 0, 5);
+      if (friction !== null) item.friction = safe(friction);
       const bounce = num(op.bounce);
-      if (bounce !== null) item.bounce = clamp(bounce, 0, 1.2);
+      if (bounce !== null) item.bounce = safe(bounce);
       const liquid = bool(op.liquid);
       if (liquid !== null) item.liquid = liquid;
       if (typeof op.color === "string" && HEX_COLOR.test(op.color)) item.color = op.color.toLowerCase();
@@ -290,10 +299,10 @@ export function sanitizeOps(raw: unknown): SandboxOp[] {
 
     for (const axis of ["x", "y", "z"]) {
       const n = num(op[axis]);
-      if (n !== null) item[axis] = clamp(n, -10000, 10000);
+      if (n !== null) item[axis] = safe(n);
     }
     const scale = num(op.scale);
-    if (scale !== null) item.scale = clamp(scale, 0.05, 100);
+    if (scale !== null) item.scale = safe(scale);
     if (typeof op.type === "string" && SHAPE_TYPES.has(op.type)) item.type = op.type;
     if (typeof op.color === "string" && HEX_COLOR.test(op.color)) item.color = op.color.toLowerCase();
     if (typeof op.name === "string") item.name = op.name.slice(0, 64);
@@ -305,7 +314,7 @@ export function sanitizeOps(raw: unknown): SandboxOp[] {
     }
     for (const axis of ["vx", "vy", "vz"]) {
       const n = num(op[axis]);
-      if (n !== null) item[axis] = clamp(n, -200, 200);
+      if (n !== null) item[axis] = safe(n);
     }
     clean.push(item);
   }
