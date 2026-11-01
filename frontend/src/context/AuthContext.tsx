@@ -57,7 +57,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await authApi.me();
       setUser(res.user);
-    } catch {
+    } catch (e: any) {
+      // Sesiunea se considera invalida DOAR cand serverul o respinge (401/403). La eroare de
+      // retea / server indisponibil (status 0) sau 5xx pastram tokenul, ca utilizatorul sa nu
+      // fie deconectat doar pentru ca backend-ul e temporar nedisponibil.
+      if (e?.status === 401 || e?.status === 403) {
+        await setToken(null);
+      }
       setUser(null);
     }
   }, []);
