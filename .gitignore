@@ -7,3 +7,4 @@ frontend/.env
 node_modules/
 *.keystore
 *.jks
+backend/astran_sandbox/.build_wasm/

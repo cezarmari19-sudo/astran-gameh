@@ -55,7 +55,7 @@ GLUE="${WORK}/luau_glue.js"
 # ENVIRONMENT=worker: codul ruleaza DOAR intr-un Worker. SINGLE_FILE: .wasm e inclus in JS
 # (nu se face nicio cerere de retea - CSP-ul paginii interzice orice connect-src).
 # MAXIMUM_MEMORY: plafon dur la nivel de VM WASM, peste limita --mem a host-ului.
-emcc -std=c++17 -O2 -fexceptions "${HERE}/host_wasm.cpp" \
+em++ -std=c++17 -O2 -fexceptions "${HERE}/host_wasm.cpp" \
   -I"${SRC}/VM/include" -I"${SRC}/Compiler/include" \
   "${LIBS[@]}" \
   -o "${GLUE}" \
