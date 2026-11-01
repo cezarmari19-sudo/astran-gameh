@@ -1,5 +1,7 @@
-.env
 astran_sandbox/.build
 astran_sandbox/bin
 __pycache__
 *.pyc
+.env
+.env.*
+!.env.example
