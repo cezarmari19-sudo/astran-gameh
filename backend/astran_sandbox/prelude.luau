@@ -23,7 +23,9 @@ local MAX_MATERIALS = 32   -- Material.new total
 local MAX_TIME = 60        -- secunde virtuale
 local MAX_STEPS = 20000    -- reluari de thread-uri
 local MAX_THREADS = 200    -- thread-uri in asteptare
-local MAX_COORD = 10000
+-- Plasa tehnica anti-overflow (NU limita de gameplay): 1e308 devine Infinity/NaN in motorul
+-- fizic. Valorile normale de joc (pozitii, viteze, gravitatie, scala) sunt libere.
+local MAX_COORD = 1e9
 local MIN_WAIT = 1 / 60
 
 -- ===== functii de baza captate local (scriptul nu le poate schimba) =====
@@ -214,10 +216,11 @@ end
 -- ===== lumea fizica: gravitatie, densitatea aerului si miscarea personajului =====
 -- Valorile implicite trebuie sa fie aceleasi ca in aplicatie (physicsWorld.ts si
 -- play/[id].tsx / studio/play/[id].tsx - vezi GRAVITY/JUMP_SPEED/MOVE_SPEED de acolo).
---   Gravity    : m/s^2, 0..200   (implicit 18)
---   AirDensity : g/cm^3, 0..5    (implicit 0.02; apa = 1)
---   JumpSpeed  : studs/s, 0..50  (implicit 7.5)
---   MoveSpeed  : studs/s, 0..50  (implicit 3.2)
+--   Gravity    : m/s^2           (implicit 18)
+--   AirDensity : g/cm^3          (implicit 0.02; apa = 1)
+--   JumpSpeed  : studs/s         (implicit 7.5)
+--   MoveSpeed  : studs/s         (implicit 3.2)
+-- Fara limite de gameplay: creatorul alege valorile (doar plasa tehnica MAX_COORD, anti-overflow).
 local worldGravity = 18
 local worldAir = 0.02
 local worldJumpSpeed = 7.5
@@ -285,11 +288,11 @@ MaterialMT.__newindex = function(self, key, value)
     if key == "Name" then
         m.Name = tostring(value)
     elseif key == "Density" then
-        m.Density = clampRange(value, 0.001, 30, "Density")
+        m.Density = clampRange(value, -MAX_COORD, MAX_COORD, "Density")
     elseif key == "Friction" then
-        m.Friction = clampRange(value, 0, 5, "Friction")
+        m.Friction = clampRange(value, -MAX_COORD, MAX_COORD, "Friction")
     elseif key == "Bounciness" or key == "Elasticity" then
-        m.Bounciness = clampRange(value, 0, 1.2, "Bounciness")
+        m.Bounciness = clampRange(value, -MAX_COORD, MAX_COORD, "Bounciness")
     elseif key == "Liquid" then
         if type(value) ~= "boolean" then
             error("Liquid must be true or false", 2)
@@ -636,16 +639,16 @@ workspaceObj = setmetatable({}, {
     end,
     __newindex = function(self, key, value)
         if key == "Gravity" then
-            worldGravity = clampRange(value, 0, 200, "Gravity")
+            worldGravity = clampRange(value, -MAX_COORD, MAX_COORD, "Gravity")
             record({ op = "world", id = "world", gravity = worldGravity })
         elseif key == "AirDensity" then
-            worldAir = clampRange(value, 0, 5, "AirDensity")
+            worldAir = clampRange(value, -MAX_COORD, MAX_COORD, "AirDensity")
             record({ op = "world", id = "world", air = worldAir })
         elseif key == "JumpSpeed" then
-            worldJumpSpeed = clampRange(value, 0, 50, "JumpSpeed")
+            worldJumpSpeed = clampRange(value, -MAX_COORD, MAX_COORD, "JumpSpeed")
             record({ op = "world", id = "world", jump_speed = worldJumpSpeed })
         elseif key == "MoveSpeed" then
-            worldMoveSpeed = clampRange(value, 0, 50, "MoveSpeed")
+            worldMoveSpeed = clampRange(value, -MAX_COORD, MAX_COORD, "MoveSpeed")
             record({ op = "world", id = "world", move_speed = worldMoveSpeed })
         else
             error("workspace is read-only", 2)
