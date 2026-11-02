@@ -64,6 +64,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from astran_sandbox.realtime_validation import clean_state_technical
+
 try:
     import redis.asyncio as redis_asyncio  # pachetul 'redis' (redis-py), nu Redis insusi
 except Exception:  # noqa: BLE001 - optional: fara el, hub-ul merge identic, un singur proces
@@ -230,16 +232,9 @@ hub = RealtimeHub()
 
 
 def _clean_state(msg: dict) -> dict:
-    """Pastreaza doar campurile cunoscute, de tipuri simple - restul (orice ar trimite un
-    client modificat/rau-intentionat) se ignora, nu se retransmite mai departe ca atare."""
-    out: dict[str, Any] = {}
-    for k in STATE_FIELDS:
-        v = msg.get(k)
-        if isinstance(v, (int, float)) and k != "anim":
-            out[k] = v
-        elif k == "anim" and isinstance(v, str) and len(v) <= 32:
-            out[k] = v
-    return out
+    """Pastreaza doar campurile cunoscute, de tipuri simple si FINITE (NaN/Infinity ar produce
+    JSON invalid la ceilalti clienti). Fara limite de gameplay - vezi realtime_validation.py."""
+    return clean_state_technical(msg)
 
 
 def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Optional[dict]]], db) -> APIRouter:
@@ -273,22 +268,20 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
             return
 
         await websocket.accept()
+        # Membrul se inregistreaza SINCRON (fara await intre hub.room() si inserare): altfel
+        # drop_if_empty al altei conexiuni putea sterge camera din hub intre timp, iar noii
+        # jucatori ar fi creat o a doua camera pentru aceeasi instanta (jucatori separati).
         room = hub.room(instance_id)
-        if hub.redis is not None:
-            await hub.redis.ensure_subscribed(instance_id)
-
-        # daca acelasi user se reconecteaza (ex: a pierdut conexiunea si a revenit) fara ca
-        # vechiul socket sa se fi inchis inca "curat", il inlocuim - un user nu poate ocupa
-        # doua sloturi in aceeasi camera.
+        member = _RoomMember(ws=websocket, user_id=user_id, username=username)
         previous = room.members.get(user_id)
+        room.members[user_id] = member
         if previous is not None:
             try:
-                await previous.ws.close(code=4409)  # 4409: inlocuit de o conexiune noua a aceluiasi user
+                await previous.ws.close(code=4409)  # inlocuit de o conexiune noua a aceluiasi user
             except Exception:  # noqa: BLE001
                 pass
-
-        member = _RoomMember(ws=websocket, user_id=user_id, username=username)
-        room.members[user_id] = member
+        if hub.redis is not None:
+            await hub.redis.ensure_subscribed(instance_id)
 
         async def broadcast(payload: dict, except_user_id: Optional[str] = None) -> None:
             text = json.dumps(payload)
