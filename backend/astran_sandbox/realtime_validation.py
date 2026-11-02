@@ -92,3 +92,29 @@ def passes_speed_check(
     dz = new_state["z"] - prev_state["z"]
     dist = math.sqrt(dx * dx + dy * dy + dz * dz)
     return (dist / dt) <= MAX_SPEED_MPS
+
+
+# ---------------------------------------------------------------------------
+# Sanitizer TEHNIC folosit efectiv de realtime.py. NU impune limite de gameplay (viteza,
+# inaltime, teleportare - le decide creatorul prin fisierele Physics/Anti-Cheat din Studio).
+# Respinge doar valori care strica matematica/JSON la ceilalti clienti: NaN, +-Infinity,
+# bool-uri deghizate in numere si magnitudini care depasesc plasa anti-overflow (identica
+# cu SAFE_NUM din runner.py / runtime.ts). clean_state/passes_speed_check de mai sus raman
+# NEFOLOSITE intentionat: contin limite hardcodate (MAX_COORD, MAX_SPEED_MPS).
+# ---------------------------------------------------------------------------
+SAFE_NUM = 1e9
+
+
+def clean_state_technical(msg: dict) -> dict:
+    out: dict[str, Any] = {}
+    for k in STATE_FIELDS:
+        v = msg.get(k)
+        if k == "anim":
+            if isinstance(v, str) and len(v) <= 32:
+                out[k] = v
+            continue
+        n = finite_number(v)
+        if n is None or abs(n) > SAFE_NUM:
+            continue
+        out[k] = n
+    return out
