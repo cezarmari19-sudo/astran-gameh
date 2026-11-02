@@ -351,4 +351,5 @@ async def maybe_connect_redis() -> None:
     try:
         await hub.connect_redis(url)
     except Exception:  # noqa: BLE001
-        log.exception("Conectarea la Redis (REDIS_URL=%s) a esuat - continui FARA sincronizare cross-process", url)
+        # URL-ul Redis contine parola: NU se scrie in loguri
+        log.exception("Conectarea la Redis a esuat - continui FARA sincronizare cross-process")
