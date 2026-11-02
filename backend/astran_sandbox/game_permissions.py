@@ -209,7 +209,7 @@ def make_game_permissions_router(get_current_user, db, user_public) -> APIRouter
 
     async def get_owned_game(game_id: str, current: dict) -> dict:
         g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-        if not g:
+        if not g or g.get("deleted"):  # SECURITY: proiectele din Cosul de gunoi nu se mai administreaza
             raise HTTPException(status_code=404, detail="Game not found")
         if g["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
             raise HTTPException(status_code=403, detail="Only the Game Owner can manage access")
@@ -235,7 +235,7 @@ def make_game_permissions_router(get_current_user, db, user_public) -> APIRouter
         """Ce poate afisa frontend-ul (Code Editor, Delete, Publish...) - dar raspunsul e
         mereu re-verificat in backend la fiecare actiune reala, nu doar aici (item 15)."""
         g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
-        if not g:
+        if not g or g.get("deleted"):  # SECURITY: proiectele din Cosul de gunoi nu se mai administreaza
             raise HTTPException(status_code=404, detail="Game not found")
         access = await get_game_access(db, g, current)
         return {
