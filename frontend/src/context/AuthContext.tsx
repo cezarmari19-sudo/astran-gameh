@@ -55,7 +55,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     if (!token) { setUser(null); return; }
     try {
-      const res = await authApi.me();
+      // Backend-ul gratuit (Render) poate dura zeci de secunde la "cold start": reincercam
+      // erorile tranzitorii (retea / 5xx) inainte sa aratam utilizatorul ca deconectat.
+      let res: any;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          res = await authApi.me();
+          break;
+        } catch (err: any) {
+          const transient = err?.status === 0 || (typeof err?.status === "number" && err.status >= 500);
+          if (!transient || attempt >= 3) throw err;
+          await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        }
+      }
       setUser(res.user);
     } catch (e: any) {
       // Sesiunea se considera invalida DOAR cand serverul o respinge (401/403). La eroare de
