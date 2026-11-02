@@ -13,6 +13,7 @@ if (!BASE_VALID) {
       "Seteaza-l in frontend/.env (development) sau in eas.json -> build.<profil>.env (build)."
   );
 }
+const REQUEST_TIMEOUT_MS = 30000;
 const TOKEN_KEY = "astran_session_token";
 
 async function getToken(): Promise<string | null> {
@@ -50,8 +51,11 @@ export async function api<T = any>(
   };
   if (token) headers.Authorization = `Bearer ${token}`;
   let res: Response;
+  // Fara timeout, un server care nu raspunde lasa ecranul in "loading" la nesfarsit.
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
   try {
-    res = await fetch(`${BASE}/api${path}`, { ...init, headers });
+    res = await fetch(`${BASE}/api${path}`, { ...init, headers, ...(controller ? { signal: controller.signal } : {}) });
   } catch (e: any) {
     // Retea cazuta / server oprit / DNS: mesaj clar in loc de "Network request failed" brut.
     const err = new Error("Serverul nu este disponibil. Verifica conexiunea la internet si incearca din nou.");
@@ -59,7 +63,16 @@ export async function api<T = any>(
     (err as any).cause = e;
     throw err;
   }
-  const text = await res.text();
+  let text: string;
+  try {
+    text = await res.text();
+  } catch (e: any) {
+    const err = new Error("Serverul nu este disponibil. Verifica conexiunea la internet si incearca din nou.");
+    (err as any).status = 0;
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   let data: any = null;
   try {
     data = text ? JSON.parse(text) : null;
@@ -68,7 +81,14 @@ export async function api<T = any>(
   }
   if (!res.ok) {
     const message = data?.detail || data?.message || `Request failed: ${res.status}`;
-    const err = new Error(typeof message === "string" ? message : JSON.stringify(message));
+    // FastAPI 422: detail e o lista de {loc, msg} - o afisam lizibil, nu ca JSON brut.
+    const text2 = typeof message === "string"
+      ? message
+      : Array.isArray(message)
+        ? message.map((m: any) => (m && typeof m.msg === "string" ? m.msg : JSON.stringify(m))).join("; ")
+        : message?.message && typeof message.message === "string" ? message.message : JSON.stringify(message);
+    const err = new Error(text2);
+    if (message && typeof message === "object" && !Array.isArray(message) && (message as any).code) (err as any).code = (message as any).code;
     (err as any).status = res.status;
     throw err;
   }
