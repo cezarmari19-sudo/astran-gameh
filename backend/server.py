@@ -5,6 +5,7 @@ Cross-platform 3D UGC gaming platform.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 import json
 import base64
@@ -22,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, Field, EmailStr
 from dotenv import load_dotenv
 
@@ -30,7 +32,15 @@ load_dotenv(ROOT_DIR / ".env")
 
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ.get("DB_NAME", "astran_game")
-JWT_SECRET = os.environ.get("JWT_SECRET", "astran-dev-secret-change-in-prod")
+_DEFAULT_DEV_SECRET = "astran-dev-secret-change-in-prod"
+JWT_SECRET = os.environ.get("JWT_SECRET", _DEFAULT_DEV_SECRET)
+# SECURITY: un secret lipsa/implicit permite oricui sa falsifice token-uri pentru orice cont.
+# In productie (ASTRAN_ENV=production sau Render) serverul REFUZA sa porneasca fara un secret real.
+_IS_PRODUCTION = os.environ.get("ASTRAN_ENV", "").lower() == "production" or bool(os.environ.get("RENDER"))
+if JWT_SECRET == _DEFAULT_DEV_SECRET or len(JWT_SECRET) < 24:
+    if _IS_PRODUCTION:
+        raise RuntimeError("JWT_SECRET missing/weak: set a random value of at least 24 characters")
+    logging.getLogger("astran").warning("Using an insecure development JWT_SECRET - never do this in production")
 JWT_ALG = "HS256"
 JWT_TTL_DAYS = 7
 
@@ -264,8 +274,8 @@ class FriendRequestBody(BaseModel):
 
 class TransferBody(BaseModel):
     recipient_user_id: str
-    amount: int = Field(gt=0)
-    idempotency_key: Optional[str] = None
+    amount: int = Field(gt=0, le=10**12)
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class BuyBody(BaseModel):
@@ -289,12 +299,19 @@ class HeartbeatBody(BaseModel):
     instance_id: str
 
 
+def _token_hash(token: str) -> str:
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 async def resolve_user_from_token(token: str) -> Optional[dict]:
     """Logica reala de autentificare (sesiune sau JWT), extrasa din get_current_user ca sa
     poata fi refolosita si de WebSocket-ul din realtime.py - acolo nu exista header
     "Authorization" (clientul WebSocket din React Native nu poate seta header-e custom la
     handshake), deci token-ul vine ca query param si trebuie decodat manual, fara sa
     duplicam regulile de validare intr-un loc separat."""
+    if await db.revoked_tokens.find_one({"token_hash": _token_hash(token)}, {"_id": 1}):
+        return None
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if sess:
         exp = sess.get("expires_at")
@@ -338,6 +355,8 @@ async def startup():
     await db.users.create_index("username", unique=True)
     await db.user_sessions.create_index("session_token", unique=True)
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await db.revoked_tokens.create_index("token_hash", unique=True)
+    await db.revoked_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.games.create_index("game_id", unique=True)
     await db.games.create_index([("owner_id", 1), ("created_at", -1)])
     await db.games.create_index([("age_category", 1), ("is_public", 1), ("total_plays", -1)])
@@ -386,22 +405,32 @@ async def startup():
             "updated_at": now_utc(),
         })
 
+    # SECURITY: contul demo (platform owner/admin) NU mai are o parola cunoscuta in cod.
+    # Se creeaza DOAR daca ASTRAN_SEED_DEMO_USER=1 si ASTRAN_DEMO_PASSWORD e setata. In rest,
+    # daca exista deja din versiuni vechi, i se dezactiveaza autentificarea cu parola.
     demo_owner_id = "user_astran_demo"
-    if not await db.users.find_one({"user_id": demo_owner_id}, {"_id": 0}):
-        await db.users.insert_one({
-            "user_id": demo_owner_id,
-            "email": "demo@astran.game",
-            "username": "AstranStudio",
-            "display_name": "Astran Studio",
-            "password_hash": hash_pw("Astran#Demo2026"),
-            "avatar_url": None,
-            "age_category": "adult_18",
-            "astrans_balance": 10000,
-            "language": "ro",
-            "is_platform_owner": True,
-            "is_platform_admin": True,
-            "created_at": now_utc(),
-        })
+    demo_pw = os.environ.get("ASTRAN_DEMO_PASSWORD")
+    if os.environ.get("ASTRAN_SEED_DEMO_USER") == "1" and demo_pw:
+        if not await db.users.find_one({"user_id": demo_owner_id}, {"_id": 0}):
+            await db.users.insert_one({
+                "user_id": demo_owner_id,
+                "email": "demo@astran.game",
+                "username": "AstranStudio",
+                "display_name": "Astran Studio",
+                "password_hash": hash_pw(demo_pw),
+                "avatar_url": None,
+                "age_category": "adult_18",
+                "astrans_balance": 10000,
+                "language": "ro",
+                "is_platform_owner": True,
+                "is_platform_admin": True,
+                "created_at": now_utc(),
+            })
+    else:
+        await db.users.update_one({"user_id": demo_owner_id}, {"$set": {"password_hash": None}})
+    # Ledger: campurile sparse-unique nu trebuie sa existe cu valoarea null (null SE indexeaza).
+    await db.astran_ledger.update_many({"idempotency_key": {"$type": "null"}}, {"$unset": {"idempotency_key": ""}})
+    await db.astran_ledger.update_many({"provider_ref": {"$type": "null"}}, {"$unset": {"provider_ref": ""}})
     await db.games.delete_many({"owner_id": demo_owner_id})
     log.info("Astran API ready. DB=%s", DB_NAME)
 
@@ -448,13 +477,15 @@ async def root():
 
 @api.post("/auth/register")
 async def register(body: RegisterBody):
-    existing = await db.users.find_one({"$or": [{"email": body.email}, {"username": body.username}]}, {"_id": 0})
+    email = body.email.strip().lower()
+    ci = lambda v: {"$regex": f"^{re.escape(v)}$", "$options": "i"}  # noqa: E731
+    existing = await db.users.find_one({"$or": [{"email": ci(email)}, {"username": ci(body.username)}]}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=409, detail="Email or username already exists")
     user_id = new_id("user_")
     doc = {
         "user_id": user_id,
-        "email": body.email,
+        "email": email,
         "username": body.username,
         "display_name": body.display_name or body.username,
         "password_hash": hash_pw(body.password),
@@ -466,7 +497,10 @@ async def register(body: RegisterBody):
         "is_platform_admin": False,
         "created_at": now_utc(),
     }
-    await db.users.insert_one(doc)
+    try:
+        await db.users.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Email or username already exists")
     await db.astran_ledger.insert_one({
         "tx_id": new_id("tx_"),
         "user_id": user_id,
@@ -485,7 +519,10 @@ async def register(body: RegisterBody):
 
 @api.post("/auth/login")
 async def login(body: LoginBody):
+    # conturile noi au email-ul in litere mici; cele vechi pot avea litere mari - incercam ambele
     user = await db.users.find_one({"email": body.email})
+    if not user and body.email != body.email.lower():
+        user = await db.users.find_one({"email": body.email.lower()})
     if not user or not user.get("password_hash") or not verify_pw(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = make_jwt(user["user_id"])
@@ -568,12 +605,25 @@ async def logout(authorization: Optional[str] = Header(None)):
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
         await db.user_sessions.delete_one({"session_token": token})
+        # JWT-urile nu au stare pe server: le revocam explicit (pana la expirarea lor naturala).
+        await db.revoked_tokens.insert_one({
+            "token_hash": _token_hash(token),
+            "expires_at": now_utc() + timedelta(days=JWT_TTL_DAYS + 1),
+        })
     return {"ok": True}
 
 
 @api.patch("/users/me")
 async def update_me(body: UpdateProfileBody, current=Depends(get_current_user)):
     updates = {k: v for k, v in body.dict().items() if v is not None}
+    if "display_name" in updates:
+        updates["display_name"] = updates["display_name"].strip()
+        if not (1 <= len(updates["display_name"]) <= 40):
+            raise HTTPException(status_code=400, detail="display_name must be 1-40 characters")
+    if "language" in updates and not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?", updates["language"]):
+        raise HTTPException(status_code=400, detail="Invalid language code")
+    if "avatar_url" in updates and len(updates["avatar_url"]) > 500_000:
+        raise HTTPException(status_code=400, detail="avatar_url too large")
     if updates:
         updates["updated_at"] = now_utc()
         await db.users.update_one({"user_id": current["user_id"]}, {"$set": updates})
@@ -583,13 +633,17 @@ async def update_me(body: UpdateProfileBody, current=Depends(get_current_user)):
 
 @api.get("/users/search")
 async def search_users(q: str = "", current=Depends(get_current_user)):
-    if not q or len(q) < 2:
+    q = (q or "").strip()[:32]
+    if len(q) < 2:
         return {"users": []}
+    # SECURITY: q e escapat (altfel e regex controlat de atacator = ReDoS) iar raspunsul contine
+    # DOAR profilul public (fara email / sold / limba / rol - vezi _user_public_minimal).
+    rx = {"$regex": re.escape(q), "$options": "i"}
     cursor = db.users.find(
-        {"$or": [{"username": {"$regex": q, "$options": "i"}}, {"display_name": {"$regex": q, "$options": "i"}}]},
+        {"$or": [{"username": rx}, {"display_name": rx}]},
         {"_id": 0, "password_hash": 0},
     ).limit(20)
-    users = [_user_public(u) for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
+    users = [_user_public_minimal(u) for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
     return {"users": users}
 
 
@@ -1541,9 +1595,14 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
 
     instance = None
     if body.instance_id:
-        instance = await db.game_instances.find_one({"instance_id": body.instance_id, "game_id": game_id, "status": "open"}, {"_id": 0})
-        if instance and instance["player_count"] >= max_players:
-            instance = None  # instanta ceruta e plina - cautam/cream alta mai jos
+        already = await db.instance_players.find_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
+        if already:
+            instance = await db.game_instances.find_one({"instance_id": body.instance_id, "game_id": game_id, "status": "open"}, {"_id": 0})
+        else:
+            # atomic: loc liber verificat SI ocupat in aceeasi operatie (inainte nu se incrementa deloc)
+            instance = await db.game_instances.find_one_and_update(
+                {"instance_id": body.instance_id, "game_id": game_id, "status": "open", "player_count": {"$lt": max_players}},
+                {"$inc": {"player_count": 1}}, return_document=True, projection={"_id": 0})
 
     if not instance:
         instance = await db.game_instances.find_one_and_update(
@@ -1639,7 +1698,7 @@ async def list_friends(current=Depends(get_current_user)):
     edges = await cursor.to_list(500)
     friend_ids = [e["user_b"] if e["user_a"] == uid else e["user_a"] for e in edges]
     users = await db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0}).to_list(500)
-    return {"friends": [_user_public(u) for u in users]}
+    return {"friends": [_friend_public(u) for u in users]}
 
 
 @api.get("/friends/requests")
@@ -1649,8 +1708,8 @@ async def list_requests(current=Depends(get_current_user)):
     in_users = await db.users.find({"user_id": {"$in": [r["from_id"] for r in incoming]}}, {"_id": 0, "password_hash": 0}).to_list(200)
     out_users = await db.users.find({"user_id": {"$in": [r["to_id"] for r in outgoing]}}, {"_id": 0, "password_hash": 0}).to_list(200)
     return {
-        "incoming": [_user_public(u) for u in in_users],
-        "outgoing": [_user_public(u) for u in out_users],
+        "incoming": [_friend_public(u) for u in in_users],
+        "outgoing": [_friend_public(u) for u in out_users],
     }
 
 
@@ -1789,7 +1848,9 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Recipient not found")
 
     if body.idempotency_key:
-        existing = await db.astran_ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+        # scopat pe user: o cheie a altcuiva nu trebuie sa intoarca tranzactia acelui user
+        existing = await db.astran_ledger.find_one(
+            {"idempotency_key": body.idempotency_key, "user_id": current["user_id"]}, {"_id": 0})
         if existing:
             return {"ok": True, "transaction": existing, "idempotent": True}
 
@@ -1813,15 +1874,18 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
         "net": net,
         "status": "completed",
         "timestamp": now_utc(),
-        "idempotency_key": body.idempotency_key,
         "reference": f"transfer_to:{recipient['username']}",
     }
+    # indexul sparse+unique INDEXEAZA valorile null: cheia se pune doar daca exista
+    if body.idempotency_key:
+        tx["idempotency_key"] = body.idempotency_key
     try:
         await db.astran_ledger.insert_one(tx)
     except Exception:
         await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": body.amount}})
         if body.idempotency_key:
-            existing = await db.astran_ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+            existing = await db.astran_ledger.find_one(
+                {"idempotency_key": body.idempotency_key, "user_id": current["user_id"]}, {"_id": 0})
             if existing:
                 return {"ok": True, "transaction": existing, "idempotent": True}
         raise HTTPException(status_code=409, detail="Transfer already in progress, try again")
@@ -1891,7 +1955,10 @@ class StripeProvider(PaymentProvider):
         if r.status_code != 200:
             return VerifyResult(False, detail="Stripe payment intent not found")
         data = r.json()
-        ok = data.get("status") == "succeeded" and int(data.get("amount", 0)) >= int(package["price"] * 100)
+        expected_cur = str(package.get("currency", "")).lower()
+        cur_ok = (not expected_cur) or str(data.get("currency", "")).lower() == expected_cur
+        ok = (data.get("status") == "succeeded" and cur_ok
+              and int(data.get("amount", 0)) >= round(package["price"] * 100))
         return VerifyResult(ok, external_id=token if ok else None, detail=None if ok else "Payment not completed")
 
 
@@ -2018,16 +2085,24 @@ class AppleProvider(PaymentProvider):
         if data.get("status") != 0:
             return VerifyResult(False, detail=f"Apple rejected receipt (status {data.get('status')})")
 
-        bundle_id = os.environ.get("APPLE_BUNDLE_ID")
+        # fail-closed: fara APPLE_BUNDLE_ID se foloseste bundle id-ul aplicatiei (app.json)
+        bundle_id = os.environ.get("APPLE_BUNDLE_ID") or "com.emergent.astranforge.wnjr5i"
         receipt = data.get("receipt", {})
-        if bundle_id and receipt.get("bundle_id") != bundle_id:
+        if receipt.get("bundle_id") != bundle_id:
             return VerifyResult(False, detail="Receipt belongs to a different app")
 
         product_id = package["package_id"]  # product id-ul din App Store Connect = package_id
         in_app = data.get("latest_receipt_info") or receipt.get("in_app") or []
-        match = next((it for it in in_app if it.get("product_id") == product_id), None)
-        if not match:
+        matches = [it for it in in_app if it.get("product_id") == product_id and it.get("transaction_id")]
+        if not matches:
             return VerifyResult(False, detail="Receipt does not contain this product")
+        # O chitanta poate contine mai multe achizitii ale aceluiasi produs: o alegem pe prima
+        # NECREDITATA inca (altfel a doua achizitie platita nu s-ar crediti niciodata).
+        match = matches[0]
+        for it in matches:
+            if not await db.astran_ledger.find_one({"provider_ref": it["transaction_id"]}, {"_id": 1}):
+                match = it
+                break
         return VerifyResult(True, external_id=match.get("transaction_id"))
 
     async def _call(self, body: dict, url: str) -> Optional[dict]:
@@ -2066,7 +2141,7 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     if provider.name == "mock" and os.environ.get("ALLOW_MOCK_PAYMENTS") != "1":
         raise HTTPException(status_code=403, detail="Mock payments are disabled")
 
-    result = await provider.verify(body.provider_token or "", package, current)
+    result = await provider.verify(body.provider_token or "", {**package, "currency": cfg.get("currency", "RON")}, current)
     if not result.ok:
         raise HTTPException(status_code=402, detail=result.detail or "Payment verification failed")
 
@@ -2088,10 +2163,11 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         "timestamp": now_utc(),
         "reference": f"buy:{package['package_id']}:{provider.name}",
         "provider": provider.name,
-        "provider_ref": result.external_id,
         "price": package["price"],
         "currency": cfg.get("currency", "RON"),
     }
+    if result.external_id:
+        tx["provider_ref"] = result.external_id
     try:
         await db.astran_ledger.insert_one(tx)
     except Exception:  # noqa: BLE001
@@ -2167,12 +2243,13 @@ if make_user_settings_router is not None:
 
 # GROUPS: /api/groups (create, page, membri, roluri, mute/ban, token privat, chat de grup)
 if make_group_router is not None:
-    api.include_router(make_group_router(get_current_user, db, _user_public))
+    api.include_router(make_group_router(get_current_user, db, _friend_public))
 
 # GAME COLLABORATION / TESTERS: /api/games/{id}/collaborators, /api/games/{id}/testers,
 # /api/games/{id}/my-access
 if make_game_permissions_router is not None:
-    api.include_router(make_game_permissions_router(get_current_user, db, _user_public))
+    # SECURITY: ownerul vede doar profilul public al colaboratorilor (fara email/sold)
+    api.include_router(make_game_permissions_router(get_current_user, db, _user_public_minimal))
 
 app.include_router(api)
 
