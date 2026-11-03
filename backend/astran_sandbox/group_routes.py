@@ -298,6 +298,10 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         if existing:
             if existing["status"] == "banned":
                 raise HTTPException(status_code=403, detail="You are banned from this Group")
+            if existing["status"] == "left":
+                await db.group_members.update_one(
+                    {"group_id": group_id, "user_id": current["user_id"]}, {"$set": {"status": "active", "role": "member"}})
+                return {"ok": True}
             raise HTTPException(status_code=409, detail="Already a member")
         await db.group_members.insert_one({
             "group_id": group_id, "user_id": current["user_id"], "role": "member",
@@ -317,7 +321,13 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         existing = await get_membership(group_id, current["user_id"])
         if existing and existing["status"] == "banned":
             raise HTTPException(status_code=403, detail="You are banned from this Group")
-        await db.group_members.delete_one({"group_id": group_id, "user_id": current["user_id"]})
+        if existing and existing.get("muted"):
+            # Un membru mutat nu isi poate sterge mute-ul parasind si re-intrand: pastram
+            # randul (status "left") si il reactivam la join cu muted neschimbat.
+            await db.group_members.update_one(
+                {"group_id": group_id, "user_id": current["user_id"]}, {"$set": {"status": "left", "role": "member"}})
+        else:
+            await db.group_members.delete_one({"group_id": group_id, "user_id": current["user_id"]})
         return {"ok": True}
 
     @router.post("/{group_id}/members/{user_id}/promote")
