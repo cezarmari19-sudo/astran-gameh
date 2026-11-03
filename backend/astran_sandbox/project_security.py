@@ -143,26 +143,41 @@ async def ensure_rate_limit_or_raise(db, *, user_id: str, scope_id: str, purpose
 
 
 async def record_failed_attempt(db, *, user_id: str, scope_id: str, purpose: str) -> None:
+    """Inregistreaza o incercare esuata. ATOMIC: contorul se incrementeaza cu $inc direct in
+    baza de date, nu prin citire -> calcul -> scriere. Varianta veche (find_one apoi
+    update_one) pierdea incrementari cand mai multe cereri esuate rulau in paralel (toate
+    citeau acelasi count) - un atacator care trimite cereri simultane nu atingea niciodata
+    pragul MAX_ATTEMPTS si ocolea blocarea temporara."""
     now = _now()
     window_start = now - timedelta(minutes=ATTEMPT_WINDOW_MINUTES)
-    doc = await db.security_attempts.find_one({"user_id": user_id, "scope_id": scope_id, "purpose": purpose})
-    if not doc or (doc.get("window_start") and doc["window_start"].replace(tzinfo=timezone.utc) < window_start):
-        count = 1
-        new_window = now
-    else:
-        count = doc.get("count", 0) + 1
-        new_window = doc.get("window_start", now)
-    update = {
-        "user_id": user_id, "scope_id": scope_id, "purpose": purpose,
-        "count": count, "window_start": new_window, "updated_at": now,
-    }
-    if count >= MAX_ATTEMPTS:
-        update["locked_until"] = now + timedelta(minutes=LOCKOUT_MINUTES)
-    await db.security_attempts.update_one(
-        {"user_id": user_id, "scope_id": scope_id, "purpose": purpose},
-        {"$set": update},
-        upsert=True,
+    key = {"user_id": user_id, "scope_id": scope_id, "purpose": purpose}
+
+    # 1) fereastra curenta inca valida: incrementare atomica
+    res = await db.security_attempts.update_one(
+        {**key, "window_start": {"$gte": window_start}},
+        {"$inc": {"count": 1}, "$set": {"updated_at": now}},
     )
+    if res.matched_count == 0:
+        # 2) nu exista inregistrare sau fereastra a expirat: o (re)pornim cu count=1
+        # Filtrul cere fereastra EXPIRATA: o inregistrare cu fereastra valida nu se potriveste,
+        # deci upsert-ul ar incerca un insert si se loveste de indexul unic (user,scope,purpose)
+        # -> exceptia de mai jos -> incrementam. Asa doua cereri "prime" simultane nu se
+        # suprascriu una pe alta (cea de-a doua ar reseta count-ul la 1).
+        try:
+            await db.security_attempts.update_one(
+                {**key, "window_start": {"$lt": window_start}},
+                {"$set": {**key, "count": 1, "window_start": now, "updated_at": now},
+                 "$unset": {"locked_until": ""}},
+                upsert=True,
+            )
+        except Exception:  # noqa: BLE001 - upsert pierdut in fata unei cereri paralele (index unic)
+            await db.security_attempts.update_one(key, {"$inc": {"count": 1}, "$set": {"updated_at": now}})
+
+    doc = await db.security_attempts.find_one(key)
+    if doc and doc.get("count", 0) >= MAX_ATTEMPTS:
+        await db.security_attempts.update_one(
+            key, {"$set": {"locked_until": now + timedelta(minutes=LOCKOUT_MINUTES)}},
+        )
 
 
 async def reset_attempts(db, *, user_id: str, scope_id: str, purpose: str) -> None:
@@ -247,12 +262,20 @@ async def get_valid_token(db, *, token_id: str, user_id: str, game_id: Optional[
     return doc
 
 
+MAX_CODE_ATTEMPTS = 5
+
+
 async def verify_recovery_code(db, *, token_id: str, user_id: str, game_id: Optional[str], purpose: str, code: str) -> dict:
     doc = await get_valid_token(db, token_id=token_id, user_id=user_id, game_id=game_id, purpose=purpose)
-    if doc.get("attempts", 0) >= 5:
+    # ATOMIC: fiecare ghicire consuma o incercare INAINTE sa fie comparata. Varianta veche
+    # verifica attempts >= 5, apoi compara, apoi incrementa - cereri paralele treceau toate
+    # de verificare cu attempts=0, deci un cod de 6 cifre putea fi ghicit in rafala.
+    updated = await db.recovery_tokens.find_one_and_update(
+        {"token_id": token_id}, {"$inc": {"attempts": 1}}, return_document=True,
+    )
+    if updated is None or updated.get("attempts", 0) > MAX_CODE_ATTEMPTS:
         raise HTTPException(status_code=429, detail="Prea multe incercari - solicita un cod nou")
     if not hmac.compare_digest(doc["code_hash"], _code_hash(code, token_id)):
-        await db.recovery_tokens.update_one({"token_id": token_id}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=401, detail="Cod de verificare incorect")
     await db.recovery_tokens.update_one({"token_id": token_id}, {"$set": {"stage": "email_verified"}})
     doc["stage"] = "email_verified"
@@ -411,7 +434,7 @@ async def webauthn_registration_options(db, *, user_id: str, username: str):
 
 async def webauthn_verify_registration(db, *, user_id: str, challenge_id: str, credential_json: str, label: Optional[str] = None):
     require_webauthn()
-    ch = await db.webauthn_challenges.find_one({"challenge_id": challenge_id, "user_id": user_id, "used": False})
+    ch = await db.webauthn_challenges.find_one({"challenge_id": challenge_id, "user_id": user_id, "used": False, "purpose": "register", "expires_at": {"$gt": _now()}})
     if not ch:
         raise HTTPException(status_code=400, detail="Provocare WebAuthn invalida sau expirata")
     verification = webauthn.verify_registration_response(
@@ -452,7 +475,7 @@ async def webauthn_authentication_options(db, *, user_id: str):
 
 async def webauthn_verify_authentication(db, *, user_id: str, challenge_id: str, credential_json: str) -> bool:
     require_webauthn()
-    ch = await db.webauthn_challenges.find_one({"challenge_id": challenge_id, "user_id": user_id, "used": False})
+    ch = await db.webauthn_challenges.find_one({"challenge_id": challenge_id, "user_id": user_id, "used": False, "purpose": "authenticate", "expires_at": {"$gt": _now()}})
     if not ch:
         raise HTTPException(status_code=400, detail="Provocare WebAuthn invalida sau expirata")
     import json as _json
