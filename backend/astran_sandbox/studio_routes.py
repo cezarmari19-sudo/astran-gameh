@@ -29,8 +29,8 @@ MAX_NAME_CHARS = 48
 MAX_MODELS_PER_USER = 100
 SHAPES = ("cube", "sphere", "cylinder", "cone", "plane", "torus")
 MATERIALS = ("matte", "glossy", "metal", "glass", "neon")
-_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
-_PART_ID = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}\Z")
+_PART_ID = re.compile(r"^[A-Za-z0-9_-]{1,24}\Z")
 
 
 def now_utc() -> datetime:
