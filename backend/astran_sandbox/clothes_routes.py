@@ -332,7 +332,11 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
 
     @router.patch("/items/{item_id}")
     async def update_meta(item_id: str, body: UpdateClothesMetaBody, current=Depends(get_current_user)):
-        await get_own_item(item_id, current)
+        existing_item = await get_own_item(item_id, current)
+        # Acelasi control ca /publish: un item fara continut nu poate deveni public (altfel
+        # cumparatorii ar plati pentru un item gol).
+        if body.is_public and not (existing_item.get("model") or existing_item.get("texture_url")):
+            raise HTTPException(status_code=400, detail="Add content before making this item public")
         updates: dict = {}
         if body.name is not None:
             updates["name"] = body.name
