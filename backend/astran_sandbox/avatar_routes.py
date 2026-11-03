@@ -76,7 +76,7 @@ def clean_body(raw: Optional[dict]) -> dict:
     d = default_body()
     color = raw.get("skin_color")
     import re
-    hexre = re.compile(r"^#[0-9a-fA-F]{6}$")
+    hexre = re.compile(r"^#[0-9a-fA-F]{6}\Z")
     return {
         "height": _clamp(raw.get("height"), 0.7, 1.4, d["height"]),
         "width": _clamp(raw.get("width"), 0.7, 1.4, d["width"]),
