@@ -35,10 +35,10 @@ CACHE_SIZE = 128
 
 SHAPE_TYPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
 OP_KINDS = ("create", "set", "destroy", "world", "material")
-_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$")
-_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")       # id de obiect (din script sau din scena Studio)
-_MATERIAL_ID_RE = re.compile(r"^m[0-9]{1,4}$")         # id de material: m1, m2, ...
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}\Z")
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\Z")
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}\Z")       # id de obiect (din script sau din scena Studio)
+_MATERIAL_ID_RE = re.compile(r"^m[0-9]{1,4}\Z")         # id de material: m1, m2, ...
 
 import logging
 
