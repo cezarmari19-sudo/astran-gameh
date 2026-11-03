@@ -80,7 +80,8 @@ class StaticFixesPresent(unittest.TestCase):  # STATIC
         body = self.server[self.server.index("async def transfer_astrans"):self.server.index("async def wallet_tx")]
         tx_literal = body[body.index("tx = {"):body.index("    try:\n        await db.astran_ledger.insert_one(tx)")]
         self.assertNotIn('"idempotency_key": body.idempotency_key,', tx_literal)  # null s-ar indexa
-        self.assertIn('tx["idempotency_key"] = body.idempotency_key', body)
+        self.assertIn('tx["idempotency_key"] = idem', body)
+        self.assertIn("if idem:", body)  # cheia (prefixata cu user_id) se pune doar cand exista
         self.assertIn('"user_id": current["user_id"]}, {"_id": 0})', body)  # lookup scopat pe user
 
     def test_logout_revokes_jwt(self):
