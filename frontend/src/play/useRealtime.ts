@@ -79,6 +79,11 @@ const SEND_INTERVAL_MS = 70;
 const STALE_AFTER_MS = 6000;
 const STALE_CHECK_INTERVAL_MS = 2000;
 const RECONNECT_DELAY_MS = 1500;
+// Coduri de inchidere trimise de backend/realtime.py care NU se rezolva reconectand:
+// 4401 = token invalid, 4403 = nu esti membru al instantei, 4409 = inlocuit de o conexiune
+// noua a aceluiasi cont. Reconectarea la 4409 punea doua dispozitive ale aceluiasi cont
+// intr-o bucla infinita in care se dau afara reciproc.
+const NO_RECONNECT_CODES = new Set([4401, 4403, 4409]);
 
 export function connectRealtime(
   gameId: string,
@@ -152,6 +157,9 @@ export function connectRealtime(
     if (closedByUs) return;
     try {
       const url = await wsUrl(`/ws/games/${gameId}/instances/${instanceId}`);
+      // close() poate fi apelat cat timp asteptam wsUrl: fara aceasta verificare se crea un
+      // socket orfan, niciodata inchis.
+      if (closedByUs) return;
       const socket = new WebSocket(url);
       ws = socket;
       socket.onopen = () => { isConnected = true; };
@@ -173,8 +181,9 @@ export function connectRealtime(
           onRosterChange?.();
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (ev: any) => {
         isConnected = false;
+        if (ev && NO_RECONNECT_CODES.has(ev.code)) return;
         // o cadere scurta de retea nu trebuie sa scoata jucatorul definitiv din sincronizare -
         // reconectare automata, doar daca noi (clientul) n-am inchis-o intentionat (vezi close() mai jos)
         if (!closedByUs) setTimeout(connect, RECONNECT_DELAY_MS);
