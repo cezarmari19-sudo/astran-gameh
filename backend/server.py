@@ -606,10 +606,19 @@ async def logout(authorization: Optional[str] = Header(None)):
         token = authorization.split(" ", 1)[1].strip()
         await db.user_sessions.delete_one({"session_token": token})
         # JWT-urile nu au stare pe server: le revocam explicit (pana la expirarea lor naturala).
-        await db.revoked_tokens.insert_one({
-            "token_hash": _token_hash(token),
-            "expires_at": now_utc() + timedelta(days=JWT_TTL_DAYS + 1),
-        })
+        # Doar token-uri CU semnatura valida: altfel oricine ar putea umple colectia cu
+        # siruri arbitrare. Un al doilea logout cu acelasi token nu mai da 500 (index unic).
+        try:
+            jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        except jwt.PyJWTError:
+            return {"ok": True}
+        try:
+            await db.revoked_tokens.insert_one({
+                "token_hash": _token_hash(token),
+                "expires_at": now_utc() + timedelta(days=JWT_TTL_DAYS + 1),
+            })
+        except DuplicateKeyError:
+            pass
     return {"ok": True}
 
 
@@ -1017,8 +1026,6 @@ how you can confirm an edit actually took effect, even before Play Mode can run 
         {"path": "client/rendering.lua", "source": rendering_lua, "target": "client"},
         {"path": "README.md", "source": readme_md, "target": "server"},  # ignorat la executie (nu e .lua) - vezi is_luau_path
         ]
-
-
 @api.post("/games")
 async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
     gid = new_id("game_")
@@ -1458,6 +1465,15 @@ async def webauthn_verify_for_recovery(game_id: str, body: WebAuthnVerifyBody, c
     tok = await db.recovery_tokens.find_one({"token_id": token_id, "user_id": current["user_id"]}, {"_id": 0})
     if not tok or tok.get("used") or tok.get("stage") not in ("email_verified",):
         raise HTTPException(status_code=400, detail="Verifica mai intai emailul")
+    # Tokenul trebuie sa apartina EXACT jocului din URL si sa nu fie expirat (inainte nu se
+    # verifica nici una, spre deosebire de get_valid_token folosit de restul fluxului).
+    if tok.get("game_id") != game_id:
+        raise HTTPException(status_code=400, detail="Token de recuperare invalid")
+    _exp = tok.get("expires_at")
+    if isinstance(_exp, datetime) and _exp.tzinfo is None:
+        _exp = _exp.replace(tzinfo=timezone.utc)
+    if not _exp or _exp < now_utc():
+        raise HTTPException(status_code=400, detail="Codul de verificare a expirat")
     await psec.webauthn_verify_authentication(db, user_id=current["user_id"], challenge_id=body.challenge_id, credential_json=body.credential)
     await psec.mark_token_stage(db, token_id=token_id, stage="biometric_verified")
     await psec.log_security_event(db, action="webauthn_authenticate", result="success", user_id=current["user_id"], game_id=tok.get("game_id"))
@@ -1511,11 +1527,18 @@ async def recently_played(current=Depends(get_current_user)):
         {"game_id": {"$in": game_ids}, "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
     ).to_list(50)
     idx = {g["game_id"]: g for g in games}
-    ordered = [idx[gid] for gid in game_ids if gid in idx]
+    ordered = []
+    for gid in game_ids:
+        gg = idx.get(gid)
+        if gg is None:
+            continue
+        if gg.get("age_category") == "adult_18" and current.get("age_category") == "under_18":
+            continue
+        if not gg.get("is_public") and not await _can_view_private_game(gg, current):
+            continue
+        ordered.append(gg)
     ordered = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in ordered]))
     return {"games": ordered}
-
-
 async def _can_view_private_game(g: dict, current: dict) -> bool:
     """SECURITY: un joc PRIVAT (draft, inca nepublicat) e vizibil DOAR pentru owner,
     platform admin, sau cineva cu acces explicit (Editor/Tester) - niciodata doar pentru
@@ -1594,6 +1617,32 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
     await reap_empty_instances(game_id)
 
     instance = None
+    # Jucatorul e deja intr-o instanta deschisa a acestui joc: il re-folosim, nu incrementam
+    # din nou player_count (un refresh / dublu-apel umfla contorul si umplea serverele "fantoma").
+    mine = await db.instance_players.find({"user_id": current["user_id"]}, {"_id": 0, "instance_id": 1}).to_list(20)
+    my_ids = [m["instance_id"] for m in mine]
+    current_inst = None
+    if my_ids:
+        current_inst = await db.game_instances.find_one(
+            {"instance_id": {"$in": my_ids}, "game_id": game_id, "status": "open"}, {"_id": 0})
+    if current_inst and (not body.instance_id or body.instance_id == current_inst["instance_id"]):
+        await db.instance_players.update_one(
+            {"instance_id": current_inst["instance_id"], "user_id": current["user_id"]},
+            {"$set": {"last_seen": now_utc()}},
+        )
+        await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1}})
+        return {
+            "ok": True,
+            "session": {"instance_id": current_inst["instance_id"], "game_id": game_id},
+            "max_players": max_players,
+            "player_character_model_id": g.get("player_character_model_id"),
+        }
+    if current_inst:
+        # trece intr-o alta instanta: o parasim curat pe cea veche
+        left = await db.instance_players.delete_one({"instance_id": current_inst["instance_id"], "user_id": current["user_id"]})
+        if left.deleted_count:
+            await db.game_instances.update_one(
+                {"instance_id": current_inst["instance_id"], "player_count": {"$gt": 0}}, {"$inc": {"player_count": -1}})
     if body.instance_id:
         already = await db.instance_players.find_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
         if already:
@@ -1662,11 +1711,14 @@ async def instance_heartbeat(game_id: str, body: HeartbeatBody, current=Depends(
 @api.post("/games/{game_id}/instance/leave")
 async def instance_leave(game_id: str, body: HeartbeatBody, current=Depends(get_current_user)):
     """Apelat la Leave, ca instanta sa se elibereze imediat (nu doar dupa expirarea TTL)."""
-    await db.instance_players.delete_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
-    await db.game_instances.update_one(
-        {"instance_id": body.instance_id, "player_count": {"$gt": 0}},
-        {"$inc": {"player_count": -1}},
-    )
+    res = await db.instance_players.delete_one({"instance_id": body.instance_id, "user_id": current["user_id"]})
+    # Decrementam DOAR daca jucatorul chiar era in instanta (altfel orice user ar putea goli
+    # contorul altei instante) si doar pe o instanta a jocului din URL.
+    if res.deleted_count:
+        await db.game_instances.update_one(
+            {"instance_id": body.instance_id, "game_id": game_id, "player_count": {"$gt": 0}},
+            {"$inc": {"player_count": -1}},
+        )
     return {"ok": True}
 
 
@@ -1689,6 +1741,17 @@ async def list_instances(game_id: str, current=Depends(get_current_user)):
 
 def _pair(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a < b else (b, a)
+
+
+def _friend_public(user: dict) -> dict:
+    """Profilul public al unui prieten / membru de grup (fara email, sold sau limba).
+
+    BUG REPARAT: functia era apelata (list_friends, list_requests si, la nivel de modul,
+    make_group_router(..., _friend_public)) dar nu era definita nicaieri -> NameError la
+    import, deci serverul nu pornea deloc cand modulul de grupuri se incarca.
+    "online" e fals: backend-ul nu tine evidenta prezentei, iar valoarea fixa True din
+    _user_public ar fi aratat pe toata lumea ca fiind online."""
+    return {**_user_public_minimal(user), "online": False}
 
 
 @api.get("/friends")
@@ -1847,10 +1910,12 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
     if not recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
-    if body.idempotency_key:
-        # scopat pe user: o cheie a altcuiva nu trebuie sa intoarca tranzactia acelui user
+    # Cheia se STOCHEAZA prefixata cu user_id: indexul unic e global, deci fara prefix un user
+    # putea "rezerva" cheia altuia si ii bloca transferurile cu 409.
+    idem = f"{current['user_id']}:{body.idempotency_key}" if body.idempotency_key else None
+    if idem:
         existing = await db.astran_ledger.find_one(
-            {"idempotency_key": body.idempotency_key, "user_id": current["user_id"]}, {"_id": 0})
+            {"idempotency_key": idem, "user_id": current["user_id"]}, {"_id": 0})
         if existing:
             return {"ok": True, "transaction": existing, "idempotent": True}
 
@@ -1877,15 +1942,15 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
         "reference": f"transfer_to:{recipient['username']}",
     }
     # indexul sparse+unique INDEXEAZA valorile null: cheia se pune doar daca exista
-    if body.idempotency_key:
-        tx["idempotency_key"] = body.idempotency_key
+    if idem:
+        tx["idempotency_key"] = idem
     try:
         await db.astran_ledger.insert_one(tx)
     except Exception:
         await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": body.amount}})
-        if body.idempotency_key:
+        if idem:
             existing = await db.astran_ledger.find_one(
-                {"idempotency_key": body.idempotency_key, "user_id": current["user_id"]}, {"_id": 0})
+                {"idempotency_key": idem, "user_id": current["user_id"]}, {"_id": 0})
             if existing:
                 return {"ok": True, "transaction": existing, "idempotent": True}
         raise HTTPException(status_code=409, detail="Transfer already in progress, try again")
@@ -2150,7 +2215,6 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         if existing:
             return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
 
-    await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": package["astrans"]}})
     tx = {
         "tx_id": new_id("tx_"),
         "user_id": current["user_id"],
@@ -2168,12 +2232,23 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     }
     if result.external_id:
         tx["provider_ref"] = result.external_id
+    # ORDINE: INTAI ledger-ul (indexul unic pe provider_ref e singurul arbitru al "o plata =
+    # o creditare"), APOI soldul. Varianta veche crediteaza intai si anuleaza dupa: in fereastra
+    # dintre ele Astrans-ii puteau fi cheltuiti (sold negativ la rollback), iar orice eroare
+    # de DB era raportata ca "idempotent ok" cu transaction=None desi plata fusese luata.
     try:
         await db.astran_ledger.insert_one(tx)
-    except Exception:  # noqa: BLE001
-        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": -package["astrans"]}})
+    except DuplicateKeyError:
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
         return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
+    except Exception:  # noqa: BLE001
+        log.exception("ledger insert failed for verified payment")
+        raise HTTPException(status_code=503, detail="Could not record the purchase, try again - you will not be charged twice")
+    try:
+        await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": package["astrans"]}})
+    except Exception:  # noqa: BLE001
+        await db.astran_ledger.delete_one({"tx_id": tx["tx_id"]})
+        raise HTTPException(status_code=503, detail="Could not credit the purchase, try again")
     return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
 
 
