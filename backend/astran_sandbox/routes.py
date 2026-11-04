@@ -110,7 +110,7 @@ MAX_PATH_DEPTH = 32  # plafon de siguranta anti-abuz, NU o limita practica de de
 MAX_FILE_CHARS = MAX_SOURCE_CHARS  # un fisier de proiect poate fi la fel de mare ca un script Luau
 MAX_PROJECT_TOTAL_CHARS = 400000  # tot proiectul la un loc (independent de limita stricta doar-Luau)
 
-_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,%d}$" % MAX_PATH_SEGMENT_CHARS)
+_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,%d}\Z" % MAX_PATH_SEGMENT_CHARS)
 
 # Extensiile care chiar ajung in sandbox-ul Luau (vezi luau_bundle()). Orice alta
 # extensie e continut de proiect pur organizational/editabil, nu executabil.
@@ -643,6 +643,8 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_play:
             raise HTTPException(status_code=403, detail="No access to play this game")
+        if g.get("age_category") == "adult_18" and current.get("age_category") == "under_18" and access.role not in ("owner", "editor"):
+            raise HTTPException(status_code=403, detail="Age-restricted content")
         try:
             project_files, _folders = await load_project(game_id, g)
             files = luau_bundle(project_files)
@@ -677,6 +679,8 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_play:
             raise HTTPException(status_code=403, detail="No access to play this game")
+        if g.get("age_category") == "adult_18" and current.get("age_category") == "under_18" and access.role not in ("owner", "editor"):
+            raise HTTPException(status_code=403, detail="Age-restricted content")
 
         project_files, _folders = await load_project(game_id, g)
         files = luau_client_bundle(project_files)
