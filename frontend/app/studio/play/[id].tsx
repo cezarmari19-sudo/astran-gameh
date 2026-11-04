@@ -178,6 +178,7 @@ export default function PlayScreen() {
   const { width: screenW, height: screenH } = useWindowDimensions();
 
   const [game, setGame] = useState<any>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -537,11 +538,21 @@ export default function PlayScreen() {
         }
       } catch (e: any) {
         console.log("[play] game load failed", e);
+        // Fara asta ecranul ramanea gol, fara niciun mesaj (joc privat / restrictionat / retea).
+        if (!cancelled) setLoadError(e?.message || "Could not load this game");
         return;
       }
 
       try {
         const r = await api(`/games/${id}/play`, { method: "POST" });
+        if (cancelled) {
+          // Ecranul a fost inchis in timpul join-ului: cleanup-ul a rulat deja cu
+          // instanceRef null, deci eliberam noi locul din instanta.
+          if (r?.session?.instance_id) {
+            api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: r.session.instance_id }) }).catch(() => {});
+          }
+          return;
+        }
         instanceRef.current = r?.session ?? null;
       } catch (e) { console.log("[play] instance join failed", e); }
 
@@ -958,7 +969,7 @@ export default function PlayScreen() {
       {Platform.OS === "web" || !canStartGL ? (
         <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
           <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
-          <Text style={styles.webText}>{game?.title || ""}</Text>
+          <Text style={styles.webText}>{loadError || game?.title || ""}</Text>
         </View>
       ) : (
         <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
