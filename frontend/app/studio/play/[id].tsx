@@ -14,6 +14,7 @@ import { PhysicsWorld, MaterialDef, DEFAULT_MATERIAL, PhysicsShapeType } from "@
 import { AvatarBody, defaultBody, buildBodyMeshes, layoutBody, bodyHeightWorld } from "@/src/avatar/avatarTypes";
 import type { Part } from "@/src/studio3d/modelTypes";
 import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d/modelTypes";
+import SettingsModalShell from "@/src/components/SettingsModalShell";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 import ScriptSandboxWebView, { ScriptSandboxHandle } from "@/src/components/ScriptSandboxWebView";
 import { PRELUDE_SOURCE } from "@/src/sandbox/preludeSource";
@@ -1062,59 +1063,41 @@ export default function PlayScreen() {
         </Pressable>
       </Modal>
 
-      <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
-        <Pressable style={styles.menuBackdrop} onPress={() => setShowSettings(false)}>
-          <Pressable
-            style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}
-            onPress={(e: any) => e.stopPropagation?.()}
-          >
-            <ScrollView
-              style={{ maxHeight: Math.max(220, Math.round(screenH * 0.7) - spacing.lg * 2) }}
-              showsVerticalScrollIndicator={false}
+      <SettingsModalShell visible={showSettings} onClose={() => setShowSettings(false)}>
+            <Text style={styles.settingLabel}>Viziune</Text>
+            <View style={styles.qualityRow}>
+              {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
+                <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
+                  <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
+            <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
+
+            <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
+            <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
+
+            <Text style={styles.settingLabel}>Shift Lock</Text>
+            <Pressable
+              testID="play-shiftlock-toggle"
+              onPress={() => updateSetting("shift_lock", !shiftLock)}
+              style={styles.shiftLockRow}
             >
-              <Text style={styles.menuTitle}>Settings</Text>
-
-              <Text style={styles.settingLabel}>Viziune</Text>
-              <View style={styles.qualityRow}>
-                {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
-                  <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
-                    <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
-                  </Pressable>
-                ))}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
+                <Text style={styles.shiftLockDesc}>
+                  {shiftLock
+                    ? "Avatarul privește mereu spre cameră."
+                    : "Avatarul privește spre direcția de mers."}
+                </Text>
               </View>
-
-              <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
-              <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
-
-              <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
-              <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
-
-              <Text style={styles.settingLabel}>Shift Lock</Text>
-              <Pressable
-                testID="play-shiftlock-toggle"
-                onPress={() => updateSetting("shift_lock", !shiftLock)}
-                style={styles.shiftLockRow}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
-                  <Text style={styles.shiftLockDesc}>
-                    {shiftLock
-                      ? "Avatarul privește mereu spre cameră."
-                      : "Avatarul privește spre direcția de mers."}
-                  </Text>
-                </View>
-                <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
-                  <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
-                </View>
-              </Pressable>
-
-              <Pressable testID="play-settings-close" onPress={() => setShowSettings(false)} style={styles.menuCloseBtn}>
-                <Text style={styles.menuCloseBtnText}>Close</Text>
-              </Pressable>
-            </ScrollView>
-          </Pressable>
-        </Pressable>
-      </Modal>
+              <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
+                <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
+              </View>
+            </Pressable>
+      </SettingsModalShell>
     </View>
   );
 }
