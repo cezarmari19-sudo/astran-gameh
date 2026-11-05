@@ -17,6 +17,11 @@
 // "ghicim" (extrapolam) unde o sa fie, ci doar sa interpolam intre doua puncte reale.
 
 import { wsUrl } from "@/src/api/client";
+import {
+  ChatState, PENDING_TIMEOUT_MS, addPending, applyHistory, applyMessage, applyServerError, blockLocal,
+  expirePending, failAllSending, failPending, initialChatState, normalizeInput, removePending,
+  setConnection, setInfo, setNotice,
+} from "@/src/play/chatStore";
 
 export type RemotePlayerState = {
   user_id: string;
@@ -37,7 +42,24 @@ export type RenderState = { x: number; y: number; z: number; ry: number; anim?: 
 // EAS (desi e sintaxa TS perfect valida, acceptata de tsc) - vezi getRenderState() mai jos.
 export type RenderStateMap = Map<string, RenderState>;
 
+export type ChatSendResult = { ok: true; cid: string } | { ok: false; error: string };
+
+// CHAT IN JOC (acelasi socket; protocolul e documentat in backend/astran_sandbox/chat_core.py).
+// Starea chatului traieste aici (nu in React), ca sa nu se piarda mesajele primite inainte ca
+// UI-ul sa se monteze; GameChat.tsx o citeste cu useSyncExternalStore (getState + subscribe).
+export type ChatApi = {
+  getState: () => ChatState;
+  subscribe: (listener: () => void) => () => void;
+  send: (text: string) => ChatSendResult;
+  retry: (cid: string) => ChatSendResult;
+  dismissPending: (cid: string) => void;
+  report: (messageId: string, reason: string) => boolean;
+  blockLocal: (userId: string) => void;
+  clearNotice: () => void;
+};
+
 export type RealtimeHandle = {
+  chat: ChatApi;
   remotePlayers: Map<string, RemotePlayerState>; // starea bruta, "ultima primita" - pastrata pentru roster/UI, NU pentru desenat (vezi getRenderState)
   // Pozitiile INTERPOLATE, gata de desenat, pentru momentul `now` dat (de obicei Date.now()
   // din bucla de randare). Recalculeaza putin la fiecare apel (cateva operatii per jucator) -
@@ -98,6 +120,40 @@ export function connectRealtime(
   let closedByUs = false;
   let isConnected = false;
   let pendingState: { x: number; y: number; z: number; ry: number; anim?: string } | null = null;
+
+  // ---- CHAT: stare + abonati (vezi ChatApi mai sus)
+  let chatState: ChatState = initialChatState();
+  const chatListeners = new Set<() => void>();
+  const chatTimers = new Set<ReturnType<typeof setTimeout>>();
+  function setChat(next: ChatState) {
+    if (next === chatState) return;
+    chatState = next;
+    chatListeners.forEach(l => { try { l(); } catch {} });
+  }
+  function newCid(): string {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+  function sendChat(rawText: string): ChatSendResult {
+    const text = normalizeInput(rawText);
+    if (!text) return { ok: false, error: "empty" };
+    if (text.length > chatState.maxLen) return { ok: false, error: "too_long" };
+    if (!ws || ws.readyState !== WebSocket.OPEN) return { ok: false, error: "offline" };
+    const cid = newCid();
+    setChat(addPending(chatState, cid, text, Date.now()));
+    try {
+      ws.send(JSON.stringify({ t: "chat", text, cid }));
+    } catch {
+      setChat(failPending(chatState, cid, "offline"));
+      return { ok: false, error: "offline" };
+    }
+    // fara confirmare de la server in PENDING_TIMEOUT_MS -> mesajul apare ca esuat (cu "retrimite")
+    const timer = setTimeout(() => {
+      chatTimers.delete(timer);
+      setChat(expirePending(chatState, Date.now()));
+    }, PENDING_TIMEOUT_MS + 50);
+    chatTimers.add(timer);
+    return { ok: true, cid };
+  }
 
   function applyState(user_id: string, partial: Partial<RemotePlayerState>) {
     const prev = remotePlayers.get(user_id);
@@ -162,7 +218,7 @@ export function connectRealtime(
       if (closedByUs) return;
       const socket = new WebSocket(url);
       ws = socket;
-      socket.onopen = () => { isConnected = true; };
+      socket.onopen = () => { isConnected = true; setChat(setConnection(chatState, true)); };
       socket.onmessage = (ev: any) => {
         let msg: any;
         try { msg = JSON.parse(ev.data); } catch { return; }
@@ -179,10 +235,21 @@ export function connectRealtime(
           remotePlayers.delete(msg.user_id);
           history.delete(msg.user_id);
           onRosterChange?.();
+        } else if (msg.t === "chat") {
+          setChat(applyMessage(chatState, msg));
+        } else if (msg.t === "chat_history") {
+          setChat(applyHistory(chatState, msg.messages));
+        } else if (msg.t === "chat_info") {
+          setChat(setInfo(chatState, msg.mode, msg.max_len));
+        } else if (msg.t === "chat_error") {
+          setChat(applyServerError(chatState, msg.code, msg.cid, Date.now()));
+        } else if (msg.t === "chat_report_ack") {
+          setChat(setNotice(chatState, "reported", Date.now()));
         }
       };
       socket.onclose = (ev: any) => {
         isConnected = false;
+        setChat(failAllSending(setConnection(chatState, false), "offline"));
         if (ev && NO_RECONNECT_CODES.has(ev.code)) return;
         // o cadere scurta de retea nu trebuie sa scoata jucatorul definitiv din sincronizare -
         // reconectare automata, doar daca noi (clientul) n-am inchis-o intentionat (vezi close() mai jos)
@@ -211,13 +278,36 @@ export function connectRealtime(
     if (changed) onRosterChange?.();
   }, STALE_CHECK_INTERVAL_MS);
 
+  const chat: ChatApi = {
+    getState: () => chatState,
+    subscribe: (listener) => { chatListeners.add(listener); return () => { chatListeners.delete(listener); }; },
+    send: sendChat,
+    retry: (cid) => {
+      const p = chatState.pending.find(x => x.cid === cid && x.status === "failed");
+      if (!p) return { ok: false, error: "invalid" };
+      setChat(removePending(chatState, cid));
+      return sendChat(p.text);
+    },
+    dismissPending: (cid) => setChat(removePending(chatState, cid)),
+    report: (messageId, reason) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      try { ws.send(JSON.stringify({ t: "chat_report", id: messageId, reason })); return true; } catch { return false; }
+    },
+    blockLocal: (userId) => setChat(blockLocal(chatState, userId)),
+    clearNotice: () => { if (chatState.notice) setChat({ ...chatState, notice: null }); },
+  };
+
   return {
+    chat,
     remotePlayers,
     getRenderState,
     sendState: (s) => { pendingState = s; },
     connected: () => isConnected,
     close: () => {
       closedByUs = true;
+      chatTimers.forEach(t => clearTimeout(t));
+      chatTimers.clear();
+      chatListeners.clear();
       clearInterval(sendTimer);
       clearInterval(staleTimer);
       try { ws?.close(); } catch {}
