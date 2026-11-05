@@ -1,0 +1,27 @@
+{
+  "_readme": "Lista de pornire pentru chatul filtrat (utilizatori sub 18 ani). Editeaza liber: salvezi fisierul si regulile se reincarca singure (max ~15s), fara sa atingi codul. Daca ai salvat reguli prin API-ul de admin (/api/admin/chat/rules), acelea au prioritate fata de acest fisier. Campuri: term (cuvant/expresie), action = mask_word (doar cuvantul -> ####) | mask_sentence (tot mesajul -> ####), match = whole_word | contains, obfuscation = tolereaza b4dw0rd / baaad / b.a.d, enabled. Vezi antetul din backend/astran_sandbox/chat_filter.py.",
+  "version": 1,
+  "rules": [
+    { "id": "en_fuck",   "term": "fuck",   "action": "mask_word", "match": "contains" },
+    { "id": "en_shit",   "term": "shit",   "action": "mask_word" },
+    { "id": "en_bitch",  "term": "bitch",  "action": "mask_word" },
+    { "id": "en_asshole","term": "asshole","action": "mask_word" },
+    { "id": "en_dick",   "term": "dick",   "action": "mask_word" },
+    { "id": "en_pussy",  "term": "pussy",  "action": "mask_word" },
+    { "id": "en_cunt",   "term": "cunt",   "action": "mask_word" },
+    { "id": "en_slut",   "term": "slut",   "action": "mask_word" },
+    { "id": "en_whore",  "term": "whore",  "action": "mask_word" },
+    { "id": "en_kys",    "term": "kill yourself", "action": "mask_sentence" },
+    { "id": "en_nword",  "term": "nigger", "action": "mask_sentence", "match": "contains" },
+    { "id": "en_faggot", "term": "faggot", "action": "mask_sentence", "match": "contains" },
+    { "id": "ro_pula",   "term": "pula",   "action": "mask_word" },
+    { "id": "ro_pizda",  "term": "pizda",  "action": "mask_word" },
+    { "id": "ro_muie",   "term": "muie",   "action": "mask_word" },
+    { "id": "ro_cacat",  "term": "cacat",  "action": "mask_word" },
+    { "id": "ro_curva",  "term": "curva",  "action": "mask_word" },
+    { "id": "ro_fut",    "term": "fut",    "action": "mask_word" },
+    { "id": "ro_futu",   "term": "futu-ti", "action": "mask_sentence" },
+    { "id": "ro_sugi",   "term": "sugi pula", "action": "mask_sentence" },
+    { "id": "ro_spargi", "term": "sa te omori", "action": "mask_sentence" }
+  ]
+}
