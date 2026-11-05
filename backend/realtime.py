@@ -46,6 +46,12 @@ adevarat. E suficient pentru joc cooperativ/social (te vezi cu altii, va jucati 
 dar NU e suficient pentru PvP competitiv real - acolo serverul trebuie sa decida cine a
 lovit pe cine, nu clientul care pretinde ca a lovit. Asta ramane un pas separat.
 
+CHAT IN JOC (acelasi socket): mesajele "chat" / "chat_report" si raspunsurile "chat", "chat_history",
+"chat_info", "chat_error", "chat_report_ack" - protocolul si garantiile de securitate sunt in
+astran_sandbox/chat_core.py; filtrul pentru utilizatorii sub 18 ani in astran_sandbox/chat_filter.py.
+Mesajele de chat NU trec prin broadcast()-ul de mai jos (fiecare destinatar poate primi un text
+diferit, in functie de varsta si de blocari), ci prin hub.chat (ChatDispatcher).
+
 LIMITARE REALA #3 - fara interpolare/predictie pe client inca: frontend-ul (useRealtime.ts)
 primeste pozitiile brute si le aplica direct - la 60-80ms interval + jitter de retea, alti
 jucatori pot parea usor sacadati pe o conexiune proasta. Pentru miscare perfect fluida ar
@@ -59,12 +65,16 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from astran_sandbox.realtime_validation import clean_state_technical
+from astran_sandbox.chat_core import ADULT, ROOM_BUFFER, ChatDispatcher, ChatLimiter
+from astran_sandbox.chat_filter import shared_store
 
 try:
     import redis.asyncio as redis_asyncio  # pachetul 'redis' (redis-py), nu Redis insusi
@@ -177,11 +187,19 @@ class _RoomMember:
     username: str
     last_state: dict = field(default_factory=dict)
     msg_times: list = field(default_factory=list)  # timestamps recente (monotonic), pt rate-limit
+    # CHAT: varsta la momentul conectarii (din DB, NU de la client) - doar o presupunere initiala;
+    # chat_core o reverifica din DB la fiecare mesaj/livrare. chat_limiter: anti-spam per conexiune.
+    is_adult: bool = False
+    chat_limiter: Any = None
 
 
 @dataclass
 class _Room:
     members: dict = field(default_factory=dict)  # user_id -> _RoomMember
+    instance_id: str = ""
+    game_id: Optional[str] = None
+    # ultimele mesaje de chat ale camerei - DOAR in memorie (nu se salveaza in DB); dispar cu camera
+    chat_buffer: deque = field(default_factory=lambda: deque(maxlen=ROOM_BUFFER))
 
 
 class RealtimeHub:
@@ -192,11 +210,12 @@ class RealtimeHub:
     def __init__(self) -> None:
         self.rooms: dict[str, _Room] = {}
         self.redis: Optional[RedisBridge] = None
+        self.chat: Optional[ChatDispatcher] = None  # setat in make_realtime_router
 
     def room(self, instance_id: str) -> _Room:
         r = self.rooms.get(instance_id)
         if r is None:
-            r = _Room()
+            r = _Room(instance_id=instance_id)
             self.rooms[instance_id] = r
         return r
 
@@ -219,6 +238,11 @@ class RealtimeHub:
         procese)."""
         r = self.rooms.get(instance_id)
         if r is None:
+            return
+        if payload.get("t") == "chat_x":
+            # mesaj de chat de la alt proces: livrare per destinatar (varsta/blocari), nu relay brut
+            if self.chat is not None:
+                await self.chat.relay_remote(r, payload)
             return
         text = json.dumps(payload)
         for member in list(r.members.values()):
@@ -243,6 +267,49 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
     la handshake, deci aici token-ul vine ca query param (?token=...), dar e decodat cu
     EXACT aceleasi reguli (sesiune sau JWT), fara o cale de autentificare paralela/mai slaba."""
     router = APIRouter()
+
+    # ---- CHAT: accesul la date, injectat in ChatDispatcher (logica e in astran_sandbox/chat_core.py)
+    async def chat_user_state(uid: str) -> Optional[dict]:
+        doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "age_category": 1, "chat_muted_until": 1})
+        if doc is None:
+            return None
+        until = doc.get("chat_muted_until")
+        epoch = None
+        if isinstance(until, datetime):
+            epoch = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).timestamp()
+        return {"age_category": doc.get("age_category"), "chat_muted_until": epoch}
+
+    async def chat_recipient_ages(ids: list) -> dict:
+        rows = await db.users.find({"user_id": {"$in": ids}}, {"_id": 0, "user_id": 1, "age_category": 1}).to_list(len(ids))
+        return {r["user_id"]: r.get("age_category") == ADULT for r in rows}
+
+    async def chat_blocked_with(uid: str, ids: list) -> set:
+        rows = await db.blocks.find(
+            {"$or": [
+                {"blocker_id": uid, "blocked_id": {"$in": ids}},
+                {"blocked_id": uid, "blocker_id": {"$in": ids}},
+            ]},
+            {"_id": 0, "blocker_id": 1, "blocked_id": 1},
+        ).to_list(2 * len(ids) + 10)
+        return {r["blocked_id"] if r["blocker_id"] == uid else r["blocker_id"] for r in rows}
+
+    async def chat_report_sink(doc: dict) -> None:
+        await db.reports.insert_one(doc)
+
+    async def chat_publish(instance_id: str, payload: dict) -> None:
+        if hub.redis is not None:
+            await hub.redis.publish(instance_id, payload)
+
+    store = shared_store(db)
+    chat = ChatDispatcher(
+        rules_provider=store.get_compiled,
+        user_state=chat_user_state,
+        recipient_ages=chat_recipient_ages,
+        blocked_with=chat_blocked_with,
+        report_sink=chat_report_sink,
+        publish=chat_publish,
+    )
+    hub.chat = chat
 
     async def is_member_of_instance(instance_id: str, game_id: str, user_id: str) -> bool:
         """Jucatorul trebuie sa fi intrat deja in instanta prin fluxul HTTP normal
@@ -272,7 +339,12 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
         # drop_if_empty al altei conexiuni putea sterge camera din hub intre timp, iar noii
         # jucatori ar fi creat o a doua camera pentru aceeasi instanta (jucatori separati).
         room = hub.room(instance_id)
-        member = _RoomMember(ws=websocket, user_id=user_id, username=username)
+        room.game_id = game_id
+        member = _RoomMember(
+            ws=websocket, user_id=user_id, username=username,
+            is_adult=user.get("age_category") == ADULT,   # din DB (resolve_user_from_token), nu de la client
+            chat_limiter=ChatLimiter(),
+        )
         previous = room.members.get(user_id)
         room.members[user_id] = member
         if previous is not None:
@@ -302,10 +374,13 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
             roster = [{"user_id": m.user_id, "username": m.username, **m.last_state} for m in room.members.values() if m.user_id != user_id]
             await websocket.send_text(json.dumps({"t": "roster", "players": roster}))
             await broadcast({"t": "join", "user_id": user_id, "username": username}, except_user_id=user_id)
+            await chat.on_join(room, member)
 
             while True:
                 raw = await websocket.receive_text()
                 if len(raw) > MAX_STATE_MSG_CHARS:
+                    if raw.startswith('{"t":"chat"'):  # un mesaj de chat urias: spunem de ce nu a fost trimis
+                        await chat.error(member, "too_long")
                     continue
 
                 now = time.monotonic()
@@ -318,7 +393,21 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
                     continue
-                if not isinstance(msg, dict) or msg.get("t") != "state":
+                if not isinstance(msg, dict):
+                    continue
+                kind = msg.get("t")
+                if kind in ("chat", "chat_report"):
+                    # Identitatea/varsta vin EXCLUSIV din `member` (verificat la handshake) si din DB;
+                    # orice user_id/username/age trimis de client in `msg` e ignorat de ChatDispatcher.
+                    try:
+                        if kind == "chat":
+                            await chat.handle_chat(room, member, msg)
+                        else:
+                            await chat.handle_report(room, member, msg)
+                    except Exception:  # noqa: BLE001 - o eroare de chat nu trebuie sa scoata jucatorul din joc
+                        log.exception("chat handler failed (user_id=%s instance_id=%s)", user_id, instance_id)
+                    continue
+                if kind != "state":
                     continue
 
                 state = _clean_state(msg)
