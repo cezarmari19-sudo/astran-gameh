@@ -183,11 +183,12 @@ function GameChatInner({ chat, reservedBottom }: { chat: ChatApi; reservedBottom
   const chatBtnLeft = left + BTN + 8;
   const panelTop = kbOpen ? insets.top + 4 : btnTop + BTN + 8;
   const availW = W - left - rightMargin;
-  // portret: aproape toata latimea (max 560); landscape/desktop: ~45% din ecran, intre 340 si 560
-  const wantW = isLandscape ? Math.round(W * 0.45) : Math.round(W * 0.94);
-  const panelW = Math.max(220, Math.min(Math.min(560, Math.max(wantW, isLandscape ? 340 : 0)), availW));
-  const wantH = isLandscape ? Math.round(H * 0.7) : Math.round(H * 0.5);
-  const desiredH = Math.min(wantH, 560);
+  // proportii luate de pe chatul Roblox (screenshot landscape: ~36% din latime, ~49% din inaltime)
+  // landscape/desktop: 36% x 49% din ecran; portret: 88% x 42%; cu limite min/max ca sa nu fie nici prea mic, nici urias
+  const wantW = isLandscape ? Math.round(W * 0.36) : Math.round(W * 0.88);
+  const panelW = Math.max(220, Math.min(Math.min(isLandscape ? 480 : 440, Math.max(wantW, isLandscape ? 300 : 0)), availW));
+  const wantH = isLandscape ? Math.round(H * 0.49) : Math.round(H * 0.42);
+  const desiredH = Math.min(Math.max(wantH, 150), isLandscape ? 420 : 440);
   const screenBottom = H - Math.max(insets.bottom, spacing.sm);
   let bottomLimit: number;
   if (kbOpen) {
@@ -196,11 +197,11 @@ function GameChatInner({ chat, reservedBottom }: { chat: ChatApi; reservedBottom
   } else {
     bottomLimit = H - reservedBottom;
     // telefon in landscape: dupa rezervarea joystick-ului n-ar ramane loc de mesaje -> folosim tot ecranul
-    if (bottomLimit - panelTop < Math.min(desiredH, 220)) bottomLimit = screenBottom;
+    if (bottomLimit - panelTop < Math.min(desiredH, 190)) bottomLimit = screenBottom;
   }
   const panelH = Math.max(80, Math.min(desiredH, bottomLimit - panelTop));
   // telefon in landscape cu tastatura: putin loc vertical -> header si input mai compacte, mesajelor le ramane mai mult
-  const compact = panelH < 200;
+  const compact = panelH < 170;
 
   function renderRow({ item }: { item: Row }) {
     if (item.kind === "pending") {
