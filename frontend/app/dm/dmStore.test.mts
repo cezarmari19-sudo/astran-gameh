@@ -6,7 +6,7 @@ import * as S from "./dmStore.ts";
 
 const msg = (id: string, ts: number, conv = "c1", mine = false, text = "hi"): S.DmMsg =>
   ({ id, conversation_id: conv, sender_id: mine ? "me" : "friend", ts, text, mine });
-const conv = (id: string, updated: number, unread = 0, last: S.DmMessage | null = null): S.DmConversation => ({
+const conv = (id: string, updated: number, unread = 0, last: S.DmMsg | null = null): S.DmConversation => ({
   conversation_id: id, friend: { user_id: "f" + id, username: "f" + id }, last_message: last, unread, can_send: true, updated_at: updated,
 });
 
