@@ -1,15 +1,19 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, FlatList, Pressable, TextInput, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
+import { errorKey } from "@/src/dm/dmStore";
 
 type Tab = "friends" | "requests" | "search";
 
 export default function FriendsScreen() {
   const { t } = useI18n();
+  const router = useRouter();
+  const [dmError, setDmError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("friends");
   const [friends, setFriends] = useState<any[]>([]);
   const [incoming, setIncoming] = useState<any[]>([]);
@@ -46,6 +50,21 @@ export default function FriendsScreen() {
     await load();
   }
 
+  // Mesagerie privata: apasarea pe un prieten deschide (sau creeaza O SINGURA DATA) conversatia
+  // persistenta cu el; serverul verifica prietenia/blocarea.
+  async function openChat(item: any) {
+    setDmError(null);
+    try {
+      const r = await api("/dm/open", { method: "POST", body: JSON.stringify({ friend_id: item.user_id }) });
+      router.push({
+        pathname: "/dm/[id]",
+        params: { id: r.conversation_id, fid: item.user_id, name: item.display_name || item.username, username: item.username, avatar: item.avatar_url || "" },
+      });
+    } catch (e: any) {
+      setDmError(t(errorKey(e?.code, e?.status)));
+    }
+  }
+
   const TabBtn = ({ id, label, testID }: { id: Tab; label: string; testID: string }) => (
     <Pressable testID={testID} onPress={() => setTab(id)} style={[styles.tab, tab === id && styles.tabActive]}>
       <Text style={[styles.tabText, tab === id && styles.tabTextActive]}>{label}</Text>
@@ -80,6 +99,8 @@ export default function FriendsScreen() {
         </View>
       ) : null}
 
+      {dmError ? <Text style={styles.dmError} testID="friends-dm-error">{dmError}</Text> : null}
+
       {loading ? (
         <ActivityIndicator style={{ marginTop: 20 }} color={colors.brand} />
       ) : (
@@ -93,7 +114,12 @@ export default function FriendsScreen() {
             </Text>
           }
           renderItem={({ item }) => (
-            <View style={styles.row} testID={`friend-row-${item.user_id}`}>
+            <Pressable
+              style={styles.row}
+              testID={`friend-row-${item.user_id}`}
+              disabled={tab !== "friends"}
+              onPress={() => openChat(item)}
+            >
               <View style={styles.avatar}>
                 <Text style={styles.avatarText}>{(item.display_name || item.username || "?")[0].toUpperCase()}</Text>
                 {item.online ? <View style={styles.onlineDot} /> : null}
@@ -103,9 +129,14 @@ export default function FriendsScreen() {
                 <Text style={styles.meta}>@{item.username}</Text>
               </View>
               {tab === "friends" ? (
-                <Pressable testID={`friend-remove-${item.user_id}`} onPress={() => act("/friends/remove", item.user_id)} style={styles.actBtn}>
-                  <MaterialCommunityIcons name="account-minus" size={18} color={colors.onSurface} />
-                </Pressable>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <Pressable testID={`friend-message-${item.user_id}`} onPress={() => openChat(item)} style={[styles.actBtn, { backgroundColor: colors.brand }]}>
+                    <MaterialCommunityIcons name="message-text" size={18} color={colors.onBrand} />
+                  </Pressable>
+                  <Pressable testID={`friend-remove-${item.user_id}`} onPress={() => act("/friends/remove", item.user_id)} style={styles.actBtn}>
+                    <MaterialCommunityIcons name="account-minus" size={18} color={colors.onSurface} />
+                  </Pressable>
+                </View>
               ) : tab === "requests" ? (
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <Pressable testID={`friend-accept-${item.user_id}`} onPress={() => act("/friends/accept", item.user_id)} style={[styles.actBtn, { backgroundColor: colors.brand }]}>
@@ -120,7 +151,7 @@ export default function FriendsScreen() {
                   <MaterialCommunityIcons name="account-plus" size={18} color={colors.onBrand} />
                 </Pressable>
               )}
-            </View>
+            </Pressable>
           )}
         />
       )}
@@ -140,6 +171,7 @@ const styles = StyleSheet.create({
   searchBox: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface2, paddingHorizontal: 12, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   searchInput: { flex: 1, color: colors.onSurface, paddingVertical: 10, fontSize: 14 },
   empty: { color: colors.onSurface3, textAlign: "center", marginTop: 40, fontSize: 13 },
+  dmError: { color: colors.error, fontSize: 12, textAlign: "center", marginBottom: spacing.sm },
   row: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, marginBottom: 8, borderWidth: 1, borderColor: colors.border },
   avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center", position: "relative" },
   avatarText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
