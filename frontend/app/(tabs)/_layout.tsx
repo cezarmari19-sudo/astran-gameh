@@ -3,9 +3,11 @@ import { Tabs } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors } from "@/src/theme";
 import { useI18n } from "@/src/i18n";
+import { useDm } from "@/src/dm/DmContext";
 
 export default function TabsLayout() {
   const { t } = useI18n();
+  const { unread } = useDm();
   return (
     <Tabs
       screenOptions={{
@@ -49,6 +51,15 @@ export default function TabsLayout() {
         options={{
           title: t("friends"),
           tabBarIcon: ({ color }) => <MaterialCommunityIcons name="account-group" size={22} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="messages"
+        options={{
+          title: t("messages"),
+          tabBarBadge: unread > 0 ? (unread > 99 ? "99+" : unread) : undefined,
+          tabBarBadgeStyle: { backgroundColor: colors.brand, color: colors.onBrand, fontSize: 10, fontWeight: "900" },
+          tabBarIcon: ({ color }) => <MaterialCommunityIcons name="message-text-outline" size={22} color={color} />,
         }}
       />
       <Tabs.Screen
