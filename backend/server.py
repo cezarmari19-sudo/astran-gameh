@@ -114,6 +114,16 @@ except Exception as exc:  # noqa: BLE001
     make_chat_admin_router = None
     log.warning("Chat admin disabled: %s", exc)
 
+# MESAGERIE PRIVATA intre prieteni (sistem separat de chatul din joc): /api/dm/..., WebSocket /ws/dm
+# - vezi astran_sandbox/dm_core.py (logica), dm_store.py (MongoDB), dm_routes.py (rute).
+try:
+    from astran_sandbox.dm_routes import make_dm_routers
+    from astran_sandbox.dm_store import ensure_indexes as dm_ensure_indexes
+except Exception as exc:  # noqa: BLE001
+    make_dm_routers = None
+    dm_ensure_indexes = None
+    log.warning("Private messaging disabled: %s", exc)
+
 # GAME COLLABORATION / TESTERS: acces de Editor (granular, pe fisiere/foldere) si Tester
 # pentru un joc - complet separat de Groups (vezi astran_sandbox/game_permissions.py).
 try:
@@ -374,6 +384,11 @@ async def startup():
     await db.friendships.create_index([("user_a", 1), ("user_b", 1)], unique=True)
     await db.friend_requests.create_index([("from_id", 1), ("to_id", 1)], unique=True)
     await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
+    if dm_ensure_indexes is not None:
+        try:
+            await dm_ensure_indexes(db)
+        except Exception:  # noqa: BLE001 - mesageria nu trebuie sa impiedice pornirea serverului
+            log.warning("DM indexes could not be created", exc_info=True)
     await db.astran_ledger.create_index("tx_id", unique=True)
     await db.astran_ledger.create_index("idempotency_key", unique=True, sparse=True)
     # O singura creditare per plata REALA (purchase token Google / transaction_id Apple /
@@ -1584,7 +1599,6 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
 # Cand un server ajunge la max_players, urmatorul jucator intra intr-o instanta noua, nu in
 # aceeasi sesiune. O instanta "moare" (status=closed) cand ultimul jucator pleaca de 60s+
 # (vezi indexul TTL pe instance_players.last_seen si reap_empty_instances de mai jos).
-
 async def reap_empty_instances(game_id: str) -> None:
     """Inchide instantele fara niciun jucator activ (curatare oportunista, apelata la join)."""
     open_instances = await db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).to_list(200)
@@ -2327,6 +2341,13 @@ if make_group_router is not None:
 # CHAT IN JOC (admin): /api/admin/chat/rules (GET/PUT/POST/DELETE), /api/admin/chat/mute|unmute
 if make_chat_admin_router is not None:
     api.include_router(make_chat_admin_router(get_current_user, db))
+
+# MESAGERIE PRIVATA: /api/dm/open, /api/dm/conversations, /api/dm/unread,
+# /api/dm/conversations/{id}/messages|read, /api/dm/messages/{id}/report  +  WebSocket /ws/dm
+if make_dm_routers is not None:
+    _dm_api_router, _dm_ws_router = make_dm_routers(get_current_user, resolve_user_from_token, db, _friend_public)
+    api.include_router(_dm_api_router)
+    app.include_router(_dm_ws_router)  # pe `app`, fara prefixul /api (ca WebSocket-ul din realtime.py)
 
 # GAME COLLABORATION / TESTERS: /api/games/{id}/collaborators, /api/games/{id}/testers,
 # /api/games/{id}/my-access
