@@ -211,6 +211,9 @@ class RealtimeHub:
         self.rooms: dict[str, _Room] = {}
         self.redis: Optional[RedisBridge] = None
         self.chat: Optional[ChatDispatcher] = None  # setat in make_realtime_router
+        # Mesageria privata (astran_sandbox/dm_routes.py) reutilizeaza canalul Redis, cu id "dm_<user_id>";
+        # dm_relay(user_id, payload) e setat de acolo. Nu atinge chatul din joc / camerele.
+        self.dm_relay: Optional[Callable[[str, dict], Awaitable[None]]] = None
 
     def room(self, instance_id: str) -> _Room:
         r = self.rooms.get(instance_id)
@@ -236,6 +239,10 @@ class RealtimeHub:
         """Un mesaj venit de la UN ALT proces (prin Redis) - il trimitem doar catre membrii
         NOSTRI locali ai acestei camere; NU il republicam (altfel ar circula la infinit intre
         procese)."""
+        if instance_id.startswith("dm_"):  # instantele de joc sunt "inst_..."; "dm_<uid>" = mesagerie privata
+            if self.dm_relay is not None and payload.get("t") == "dm_x":
+                await self.dm_relay(instance_id[3:], payload)
+            return
         r = self.rooms.get(instance_id)
         if r is None:
             return
