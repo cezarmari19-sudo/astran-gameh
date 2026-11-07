@@ -9,6 +9,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider } from "@/src/context/AuthContext";
 import { I18nProvider } from "@/src/i18n";
+import { DmProvider } from "@/src/dm/DmContext";
 
 LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
@@ -35,8 +36,10 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <I18nProvider>
           <AuthProvider>
-            <StatusBar barStyle="light-content" />
-            <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0F1012" } }} />
+            <DmProvider>
+              <StatusBar barStyle="light-content" />
+              <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0F1012" } }} />
+            </DmProvider>
           </AuthProvider>
         </I18nProvider>
       </SafeAreaProvider>
