@@ -28,7 +28,9 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
 
+from . import money
 from .studio_routes import make_studio_router, shape_count, summary_object, validate_parts
 
 log = logging.getLogger("astran.shop")
@@ -168,6 +170,20 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             return True
         return await db.shop_purchases.find_one({"user_id": user_id, "item_id": item["item_id"]}, {"_id": 0}) is not None
 
+    async def owned_set(user_id: str, docs: list[dict]) -> set:
+        """Ce iteme din `docs` detine userul - O SINGURA interogare pentru tot batch-ul (inainte
+        owns() rula cate un find_one per item = N+1 la fiecare lista/cautare)."""
+        def free_or_mine(d: dict) -> bool:
+            return d["owner_id"] == user_id or (d["price"] == 0 and d["is_public"])
+        candidates = [d["item_id"] for d in docs if not free_or_mine(d)]
+        bought: set = set()
+        if candidates:
+            rows = await db.shop_purchases.find(
+                {"user_id": user_id, "item_id": {"$in": candidates}}, {"_id": 0, "item_id": 1}
+            ).to_list(len(candidates))
+            bought = {r["item_id"] for r in rows}
+        return {d["item_id"] for d in docs if free_or_mine(d) or d["item_id"] in bought}
+
     def visible(item: dict, current: dict) -> bool:
         """Poate vedea ca itemul exista (lista/cautare/detaliu), indiferent daca ii detine continutul."""
         if item["is_public"]:
@@ -206,11 +222,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             [("score", {"$meta": "textScore"})] if q else [("downloads", -1), ("created_at", -1)]
         ).limit(50)
         docs = await cursor.to_list(50)
-        out = []
-        for d in docs:
-            is_owned = await owns(current["user_id"], d)
-            out.append(_public_item(d, is_owned))
-        return out
+        owned = await owned_set(current["user_id"], docs)
+        return [_public_item(d, d["item_id"] in owned) for d in docs]
 
     async def publish(kind: str, owner_id: str, owner_username: str, name: str, description: str, price: int, is_public: bool, extra: dict) -> dict:
         await ensure_indexes()
@@ -273,9 +286,11 @@ def make_shop_router(get_current_user, db) -> APIRouter:
     @router.get("/items/{item_id}")
     async def get_item_detail(item_id: str, current=Depends(get_current_user)):
         it = await get_item(item_id)
-        if not visible(it, current):
-            raise HTTPException(status_code=403, detail="This item is private")
+        # owns() INAINTE de visible(): cine a platit pastreaza accesul la continut si dupa ce autorul
+        # face itemul privat (inainte primea 403 si pierdea ce cumparase).
         is_owned = await owns(current["user_id"], it)
+        if not is_owned and not visible(it, current):
+            raise HTTPException(status_code=403, detail="This item is private")
         result = _public_item(it, is_owned)
         if is_owned:
             result.update(_owner_content(it))
@@ -329,57 +344,70 @@ def make_shop_router(get_current_user, db) -> APIRouter:
     @router.post("/items/{item_id}/buy")
     async def buy_item(item_id: str, current=Depends(get_current_user)):
         it = await get_item(item_id)
-        if not visible(it, current):
-            raise HTTPException(status_code=403, detail="This item is private")
         if it["owner_id"] == current["user_id"]:
             raise HTTPException(status_code=400, detail="You already own this item")
-
-        # Rezervam INTAI randul de purchase (indexul unic (user_id,item_id) e garda impotriva
-        # dublei cumparari - dublu-click, retry de retea), INAINTE de orice transfer de Astrans.
-        # Daca doua cereri concurente ajung aici simultan, doar UNA reuseste insertia - cealalta
-        # esueaza pe indexul unic si se opreste AICI, fara sa debiteze/crediteze pe nimeni.
-        # Inainte, aceasta rezervare se facea DUPA transferul de bani (la finalul functiei):
-        # indexul unic proteja doar randul de purchase, nu si banii - doua cereri concurente
-        # puteau ambele trece de verificarea initiala "already owned" si ambele debita
-        # cumparatorul/credita autorul, inainte ca vreuna sa apuce sa insereze randul de
-        # purchase. Rezultat: userul era taxat de doua ori pentru acelasi item.
-        try:
-            await db.shop_purchases.insert_one({"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()})
-        except Exception:
+        # Cine a PLATIT deja pastreaza accesul chiar daca autorul a facut itemul privat intre timp
+        # (inainte, visible() rula primul si il respingea cu 403).
+        if await db.shop_purchases.find_one({"user_id": current["user_id"], "item_id": item_id}, {"_id": 1}):
             return {"ok": True, "already_owned": True}
+        if not visible(it, current):
+            raise HTTPException(status_code=403, detail="This item is private")
 
         price = it["price"]
-        if price > 0:
-            fee, author_share = split_price(price)
-            debit = await db.users.update_one(
-                {"user_id": current["user_id"], "astrans_balance": {"$gte": price}},
-                {"$inc": {"astrans_balance": -price}},
-            )
-            if debit.modified_count == 0:
-                # Nu avea destui Astrans - anulam rezervarea de mai sus, ca userul sa poata
-                # incerca din nou (altfel ar ramane cu item-ul "detinut" dar neplatit).
-                await db.shop_purchases.delete_one({"user_id": current["user_id"], "item_id": item_id})
-                raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
+        purchase_row = {"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()}
 
-            await db.users.update_one({"user_id": it["owner_id"]}, {"$inc": {"astrans_balance": author_share}})
+        if price <= 0:
+            try:
+                await db.shop_purchases.insert_one(purchase_row)
+            except DuplicateKeyError:  # dublu-click / retry: indexul unic (user_id, item_id) arbitreaza
+                return {"ok": True, "already_owned": True}
+            await db.shop_items.update_one({"item_id": item_id}, {"$inc": {"downloads": 1}})
+            return {"ok": True, "already_owned": False}
 
-            tx_buyer = {
-                "tx_id": new_id("tx_"), "user_id": current["user_id"], "counterparty_id": it["owner_id"],
-                "type": "shop_purchase", "amount": price, "fee": fee, "net": price,
-                "status": "completed", "timestamp": now_utc(),
-                "reference": f"shop:{it['kind']}:{it['name']}",
-            }
-            tx_seller = {
-                "tx_id": new_id("tx_"), "user_id": it["owner_id"], "counterparty_id": current["user_id"],
-                "type": "shop_sale", "amount": author_share, "fee": fee, "net": author_share,
-                "status": "completed", "timestamp": now_utc(),
-                "reference": f"shop:{it['kind']}:{it['name']}",
-            }
-            await db.astran_ledger.insert_one(tx_buyer)
-            await db.astran_ledger.insert_one(tx_seller)
+        fee, author_share = split_price(price)
+        tx_buyer = {
+            "tx_id": new_id("tx_"), "user_id": current["user_id"], "counterparty_id": it["owner_id"],
+            "type": "shop_purchase", "amount": price, "fee": fee, "net": price,
+            "status": "completed", "timestamp": now_utc(), "reference": f"shop:{it['kind']}:{it['name']}",
+        }
+        tx_seller = {
+            "tx_id": new_id("tx_"), "user_id": it["owner_id"], "counterparty_id": current["user_id"],
+            "type": "shop_sale", "amount": author_share, "fee": fee, "net": author_share,
+            "status": "completed", "timestamp": now_utc(), "reference": f"shop:{it['kind']}:{it['name']}",
+        }
+
+        # Debit + credit autor + ledger + randul de purchase NU mai sunt pasi independenti: intentia
+        # se scrie INTAI in jurnal (money.py), iar fiecare pas e idempotent. Daca procesul pica dupa
+        # debit, task-ul de recuperare termina operatia (autorul e platit, ledger-ul scris); daca pica
+        # inainte de debit, randul de purchase rezervat se sterge (nu ramane item gratis).
+        # Randul de purchase se rezerva INAINTE de debit: indexul unic (user_id, item_id) opreste
+        # dubla cumparare concurenta fara sa taxeze doua ori.
+        op_id = money.new_op_id("shop_")
+        await money.begin(
+            db, op_id=op_id, kind="shop_purchase", payer_id=current["user_id"], amount=price,
+            credits=[{"user_id": it["owner_id"], "amount": author_share}],
+            inserts=[{"collection": "astran_ledger", "doc": tx_buyer}, {"collection": "astran_ledger", "doc": tx_seller}],
+            reservations=[{"collection": "shop_purchases", "filter": {"user_id": current["user_id"], "item_id": item_id, "op_id": op_id}}],
+        )
+        # randul poarta op_id: rollback/recuperarea sterg DOAR randul acestei operatii, niciodata
+        # randul altei cereri concurente (care ar fi castigat indexul unic)
+        purchase_row["op_id"] = op_id
+        try:
+            await db.shop_purchases.insert_one(purchase_row)
+        except DuplicateKeyError:
+            await money.rollback(db, op_id, "already owned")
+            return {"ok": True, "already_owned": True}
+        # Orice ALTA eroare de DB NU mai e raportata ca "already_owned" (inainte `except Exception`
+        # inghitea orice): se propaga ca 500, iar op-ul ramas fara debit e abandonat de recuperare.
+        except Exception:
+            await money.rollback(db, op_id, "could not reserve purchase")
+            raise
+
+        if await money.run(db, op_id) == "insufficient":
+            # run() a anulat deja totul si a sters rezervarea: userul poate reincerca dupa ce adauga Astrans
+            raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
 
         await db.shop_items.update_one({"item_id": item_id}, {"$inc": {"downloads": 1}})
-
         return {"ok": True, "already_owned": False}
 
     @router.get("/mine/purchases")
