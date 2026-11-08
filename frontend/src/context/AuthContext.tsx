@@ -12,6 +12,8 @@ export type User = {
   language: string;
   is_platform_owner: boolean;
   is_platform_admin: boolean;
+  // false = cont Google (fara parola de cont): fluxurile de securitate a proiectelor nu cer parola contului
+  has_password?: boolean;
   created_at: string;
   online: boolean;
 };
@@ -19,6 +21,9 @@ export type User = {
 type Ctx = {
   user: User | null;
   loading: boolean;
+  // true cand serverul nu a putut fi contactat (retea / 5xx) si NU putem sti starea sesiunii.
+  // Diferit de "deconectat": tokenul e pastrat, iar UI-ul trebuie sa ofere "Reincearca", nu login.
+  connectionError: boolean;
   refresh: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   register: (data: { email: string; password: string; username: string; age_category: "under_18" | "adult_18"; language: string }) => Promise<void>;
@@ -30,6 +35,7 @@ type Ctx = {
 const AuthContext = createContext<Ctx>({
   user: null,
   loading: true,
+  connectionError: false,
   refresh: async () => {},
   login: async () => {},
   register: async () => {},
@@ -41,6 +47,7 @@ const AuthContext = createContext<Ctx>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [connectionError, setConnectionError] = useState(false);
 
   const refresh = useCallback(async () => {
     const { getItemAsync } = await import("expo-secure-store");
@@ -53,7 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!token) {
       try { token = await getItemAsync("astran_session_token"); } catch {}
     }
-    if (!token) { setUser(null); return; }
+    if (!token) { setUser(null); setConnectionError(false); return; }
     try {
       // Backend-ul gratuit (Render) poate dura zeci de secunde la "cold start": reincercam
       // erorile tranzitorii (retea / 5xx) inainte sa aratam utilizatorul ca deconectat.
@@ -69,14 +76,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
       setUser(res.user);
+      setConnectionError(false);
     } catch (e: any) {
       // Sesiunea se considera invalida DOAR cand serverul o respinge (401/403). La eroare de
-      // retea / server indisponibil (status 0) sau 5xx pastram tokenul, ca utilizatorul sa nu
-      // fie deconectat doar pentru ca backend-ul e temporar nedisponibil.
+      // retea / server indisponibil (status 0) sau 5xx pastram tokenul SI utilizatorul curent:
+      // inainte se facea setUser(null) si aplicatia te trimitea pe ecranul de login desi
+      // sesiunea era perfect valida (utilizatorul credea ca a fost deconectat).
       if (e?.status === 401 || e?.status === 403) {
         await setToken(null);
+        setUser(null);
+        setConnectionError(false);
+      } else {
+        setConnectionError(true);
       }
-      setUser(null);
     }
   }, []);
 
@@ -112,7 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, refresh, login, register, loginWithSessionId, logout, setUser }}>
+    <AuthContext.Provider value={{ user, loading, connectionError, refresh, login, register, loginWithSessionId, logout, setUser }}>
       {children}
     </AuthContext.Provider>
   );
