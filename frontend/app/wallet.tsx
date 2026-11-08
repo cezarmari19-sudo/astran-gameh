@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, ActivityIndicator, Modal, KeyboardAvoidingView, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -9,6 +9,35 @@ import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
+
+// Tipurile de tranzactii in care utilizatorul CHELTUIE Astrans. Inainte doar `transfer_out` era
+// tratat ca iesire; shop_purchase / clothes_purchase / group_create apareau ca "+" verde (incasari).
+// `net < 0` e plasa de siguranta pentru tipuri viitoare scrise cu net negativ (ex. group_create).
+const DEBIT_TYPES = new Set(["transfer_out", "shop_purchase", "clothes_purchase", "group_create"]);
+function isDebitTx(tx: { type?: string; net?: number }): boolean {
+  return DEBIT_TYPES.has(tx.type || "") || (typeof tx.net === "number" && tx.net < 0);
+}
+
+function txIcon(type: string): any {
+  switch (type) {
+    case "purchase": return "cart";
+    case "transfer_out": return "send";
+    case "transfer_in": return "download";
+    case "shop_purchase":
+    case "clothes_purchase": return "shopping";
+    case "shop_sale":
+    case "clothes_sale": return "cash";
+    case "group_create": return "account-group";
+    default: return "gift";
+  }
+}
+
+// Respingere DEFINITIVA a serverului (plata nu va fi niciodata acceptata) vs eroare trecatoare
+// (retea / server jos / 5xx / sesiune expirata) care merita reincercata.
+function isDefinitiveRejection(e: any): boolean {
+  const st = e?.status;
+  return typeof st === "number" && [400, 402, 403, 404, 409, 422].includes(st);
+}
 
 export default function WalletScreen() {
   const router = useRouter();
@@ -24,6 +53,9 @@ export default function WalletScreen() {
   const [transferPreview, setTransferPreview] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Cheia de idempotenta a transferului ramane aceeasi la RETRY dupa o eroare de retea (daca
+  // primul request a ajuns totusi la server, al doilea nu mai muta banii a doua oara).
+  const transferKeyRef = useRef<string | null>(null);
   // Mesaj special pentru cazul rar in care Google/Apple au confirmat plata, dar creditarea
   // pe server a esuat (retea, server jos) - vezi handlePurchaseSuccess mai jos. Diferit de
   // `err` (eroare normala de achizitie), ca userul sa stie ca BANII AU FOST LUATI, nu doar
@@ -133,20 +165,37 @@ export default function WalletScreen() {
       await load();
     } catch (e: any) {
       console.log("[wallet] credit after purchase failed", e);
-      setPendingCreditWarning(
-        "Plata a fost confirmată de magazin, dar creditarea Astrans a eșuat (conexiune). " +
-        "Nu e nevoie să plătești din nou - redeschide acest ecran și achiziția va fi " +
-        "finalizată automat."
-      );
-      // NU apelam finishTransaction: tranzactia ramane needisa la Google/Apple si va
-      // ajunge din nou in onPurchaseSuccess (acelasi purchase) data viitoare.
+      if (isDefinitiveRejection(e)) {
+        // Serverul a RESPINS plata (nu e o problema de retea): reincercarea ar primi acelasi raspuns
+        // la nesfarsit, iar mesajul "redeschide ecranul" ar fi fals. Inchidem tranzactia la magazin
+        // ca sa nu mai fie redata la fiecare deschidere; daca e inca in asteptare la magazin (plata
+        // amanata), finishTransaction esueaza si ea ramane de redat cand devine finala.
+        try { await finishTransaction({ purchase, isConsumable: true }); } catch (fe) {
+          console.log("[wallet] could not close rejected purchase", fe);
+        }
+        const orderId = purchase?.transactionId ?? purchase?.orderId ?? purchase?.orderIdAndroid ?? purchase?.id;
+        setPendingCreditWarning(null);
+        setErr(
+          `Plata nu a putut fi validată de server: ${e?.message || "respinsă"}. ` +
+          "Astranii nu au fost adăugați. Dacă ai fost taxat, contactează suportul" +
+          (orderId ? ` și indică id-ul comenzii: ${orderId}.` : ".")
+        );
+      } else {
+        setPendingCreditWarning(
+          "Plata a fost confirmată de magazin, dar creditarea Astrans a eșuat (conexiune). " +
+          "Nu e nevoie să plătești din nou - redeschide acest ecran și achiziția va fi " +
+          "finalizată automat."
+        );
+        // NU apelam finishTransaction: tranzactia ramane needisa la Google/Apple si va
+        // ajunge din nou in onPurchaseSuccess (acelasi purchase) data viitoare.
+      }
     } finally {
       setBusy(false);
     }
   }
 
   async function preview() {
-    setErr(null); setTransferPreview(null);
+    setErr(null); setTransferPreview(null); transferKeyRef.current = null;
     try {
       const res = await api("/wallet/transfer/preview", { method: "POST", body: JSON.stringify({ recipient_user_id: transferTo, amount: Number(transferAmt) }) });
       setTransferPreview(res);
@@ -155,13 +204,19 @@ export default function WalletScreen() {
 
   async function doTransfer() {
     setBusy(true); setErr(null);
+    if (!transferKeyRef.current) transferKeyRef.current = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
       await api("/wallet/transfer", { method: "POST", body: JSON.stringify({
-        recipient_user_id: transferTo, amount: Number(transferAmt), idempotency_key: `${Date.now()}-${Math.random()}`,
+        recipient_user_id: transferTo, amount: Number(transferAmt), idempotency_key: transferKeyRef.current,
       })});
+      transferKeyRef.current = null;
       setShowTransfer(false); setTransferTo(""); setTransferAmt(""); setTransferPreview(null);
       await refresh(); await load();
-    } catch (e: any) { setErr(e.message); }
+    } catch (e: any) {
+      setErr(e.message);
+      // eroare de retea/5xx: pastram cheia (retry sigur); respingere definitiva: cheie noua la urmatoarea incercare
+      if (isDefinitiveRejection(e)) transferKeyRef.current = null;
+    }
     finally { setBusy(false); }
   }
 
@@ -219,16 +274,16 @@ export default function WalletScreen() {
         {transactions.map(tx => (
           <View key={tx.tx_id} style={styles.tx}>
             <MaterialCommunityIcons
-              name={tx.type === "purchase" ? "cart" : tx.type === "transfer_out" ? "send" : tx.type === "transfer_in" ? "download" : "gift"}
+              name={txIcon(tx.type)}
               size={20}
-              color={tx.type === "transfer_out" ? colors.error : colors.brand}
+              color={isDebitTx(tx) ? colors.error : colors.brand}
             />
             <View style={{ flex: 1 }}>
               <Text style={styles.txTitle}>{tx.reference || tx.type}</Text>
               <Text style={styles.txMeta}>{new Date(tx.timestamp).toLocaleString()}</Text>
             </View>
-            <Text style={[styles.txAmt, { color: tx.type === "transfer_out" ? colors.error : colors.brand }]}>
-              {tx.type === "transfer_out" ? "-" : "+"}{tx.amount}
+            <Text style={[styles.txAmt, { color: isDebitTx(tx) ? colors.error : colors.brand }]}>
+              {isDebitTx(tx) ? "-" : "+"}{Math.abs(tx.amount)}
             </Text>
           </View>
         ))}
@@ -248,6 +303,9 @@ export default function WalletScreen() {
                 <Text style={styles.previewLine}>{t("send")}: {transferPreview.gross}</Text>
                 <Text style={styles.previewLine}>{t("fee")}: {transferPreview.fee}</Text>
                 <Text style={styles.previewLine}>{t("receive")}: {transferPreview.net}</Text>
+                {transferPreview.valid === false ? (
+                  <Text style={styles.err}>Suma este prea mică: taxa ar consuma-o integral.</Text>
+                ) : null}
               </View>
             ) : null}
             {err ? <Text style={styles.err}>{err}</Text> : null}
@@ -256,7 +314,7 @@ export default function WalletScreen() {
                 <PrimaryButton testID="transfer-preview-btn" label="Preview" onPress={preview} disabled={!transferTo || !transferAmt} />
               </View>
               <View style={{ flex: 1 }}>
-                <PrimaryButton testID="transfer-confirm-btn" label={busy ? "..." : t("send")} onPress={doTransfer} disabled={!transferPreview || busy} />
+                <PrimaryButton testID="transfer-confirm-btn" label={busy ? "..." : t("send")} onPress={doTransfer} disabled={!transferPreview || busy || transferPreview.valid === false} />
               </View>
             </View>
           </ScrollView>
