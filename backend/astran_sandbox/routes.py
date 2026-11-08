@@ -548,8 +548,11 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
                 if not path_allowed(fld, access):
                     raise HTTPException(status_code=403, detail=f"No access to path: {fld}")
 
-            old_in_scope = {f["path"]: f["source"] for f in old_files if path_allowed(f["path"], access)}
-            new_in_scope = {f["path"]: f["source"] for f in submitted_files}
+            # Comparam (source, target), nu doar source: `target` decide DOAR unde ruleaza fisierul
+            # (server vs client). Inainte, un Editor cu drept doar de "view" putea muta un fisier
+            # din client in server (sau invers) fara nicio verificare, pentru ca source ramanea identic.
+            old_in_scope = {f["path"]: (f["source"], _clean_target(f.get("target"))) for f in old_files if path_allowed(f["path"], access)}
+            new_in_scope = {f["path"]: (f["source"], _clean_target(f.get("target"))) for f in submitted_files}
             old_folders_in_scope = {fo for fo in old_folders if path_allowed(fo, access)}
             new_folders_in_scope = set(submitted_folders)
 
