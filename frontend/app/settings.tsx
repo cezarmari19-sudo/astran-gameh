@@ -16,10 +16,22 @@ export default function SettingsScreen() {
   const [distance, setDistance] = useState(2);
   const [ageCat, setAgeCat] = useState<"under_18" | "adult_18">(user?.age_category || "under_18");
 
+  const [ageErr, setAgeErr] = useState<string | null>(null);
+
   async function changeAge(v: "under_18" | "adult_18") {
+    if (v === ageCat) return;
+    const prev = ageCat;
+    setAgeErr(null);
     setAgeCat(v);
-    await api("/users/me", { method: "PATCH", body: JSON.stringify({ age_category: v }) });
-    await refresh();
+    try {
+      await api("/users/me", { method: "PATCH", body: JSON.stringify({ age_category: v }) });
+      await refresh();
+    } catch (e: any) {
+      // Serverul refuza ridicarea la 18+ dupa ce categoria a fost setata (anti-ocolire a filtrelor
+      // pentru minori): revenim la valoarea reala in loc sa aratam una pe care serverul n-a salvat-o.
+      setAgeCat(prev);
+      setAgeErr(e?.status === 403 ? t("age_raise_blocked") : (e?.message || "Error"));
+    }
   }
 
   const Slider = ({ value, onChange, testID }: any) => (
@@ -54,6 +66,7 @@ export default function SettingsScreen() {
             <Text style={[styles.ageBtnText, ageCat === "adult_18" && { color: colors.brand }]}>{t("age_18_plus")}</Text>
           </Pressable>
         </View>
+        {ageErr ? <Text style={{ color: colors.error, fontSize: 12, marginTop: 8 }} testID="settings-age-error">{ageErr}</Text> : null}
 
         <Text style={styles.section}>{t("graphics").toUpperCase()}</Text>
         <Slider value={graphics} onChange={setGraphics} testID="graphics-slider" />
