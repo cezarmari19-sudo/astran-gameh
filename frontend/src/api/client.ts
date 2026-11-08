@@ -122,19 +122,19 @@ export const authApi = {
 export const projectSecurityApi = {
   deleteProject: (gameId: string, projectPassword: string) =>
     api(`/games/${gameId}`, { method: "DELETE", body: JSON.stringify({ project_password: projectPassword, confirm: true }) }),
-  setupPassword: (gameId: string, body: { account_password: string; project_password: string; project_password_confirm: string }) =>
+  setupPassword: (gameId: string, body: { account_password?: string; project_password: string; project_password_confirm: string }) =>
     api(`/games/${gameId}/security/password/setup`, { method: "POST", body: JSON.stringify(body) }),
   listTrash: () => api("/games/trash"),
 
-  recoverStart: (gameId: string, accountPassword: string) =>
-    api(`/games/${gameId}/security/recover/start`, { method: "POST", body: JSON.stringify({ account_password: accountPassword }) }),
+  recoverStart: (gameId: string, accountPassword?: string) =>
+    api(`/games/${gameId}/security/recover/start`, { method: "POST", body: JSON.stringify(accountPassword ? { account_password: accountPassword } : {}) }),
   recoverVerifyEmail: (gameId: string, tokenId: string, code: string) =>
     api(`/games/${gameId}/security/recover/verify-email`, { method: "POST", body: JSON.stringify({ token_id: tokenId, code }) }),
   recoverConfirm: (gameId: string, tokenId: string) =>
     api(`/games/${gameId}/security/recover/confirm`, { method: "POST", body: JSON.stringify({ token_id: tokenId }) }),
 
-  resetPasswordStart: (gameId: string, accountPassword: string) =>
-    api(`/games/${gameId}/security/password/reset/start`, { method: "POST", body: JSON.stringify({ account_password: accountPassword }) }),
+  resetPasswordStart: (gameId: string, accountPassword?: string) =>
+    api(`/games/${gameId}/security/password/reset/start`, { method: "POST", body: JSON.stringify(accountPassword ? { account_password: accountPassword } : {}) }),
   resetPasswordVerifyEmail: (gameId: string, tokenId: string, code: string) =>
     api(`/games/${gameId}/security/password/reset/verify-email`, { method: "POST", body: JSON.stringify({ token_id: tokenId, code }) }),
   resetPasswordConfirm: (gameId: string, tokenId: string, newPw: string, newPwConfirm: string) =>
