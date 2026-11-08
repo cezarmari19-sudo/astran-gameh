@@ -16,12 +16,16 @@ export default function AgeOnboardingScreen() {
   const [choice, setChoice] = useState<"under_18" | "adult_18">(user?.age_category || "under_18");
   const [busy, setBusy] = useState(false);
 
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
   async function save() {
-    setBusy(true);
+    setBusy(true); setSaveErr(null);
     try {
       await api("/users/me", { method: "PATCH", body: JSON.stringify({ age_category: choice }) });
       await refresh();
       router.replace("/(tabs)");
+    } catch (e: any) {
+      setSaveErr(e?.message || "Error");
     } finally {
       setBusy(false);
     }
@@ -58,6 +62,7 @@ export default function AgeOnboardingScreen() {
         </Pressable>
       </ScrollView>
       <View style={styles.footer}>
+        {saveErr ? <Text style={{ color: colors.error, fontSize: 12, marginBottom: 8 }}>{saveErr}</Text> : null}
         <PrimaryButton testID="onboarding-continue" label={busy ? "..." : t("continue")} onPress={save} disabled={busy} />
       </View>
     </SafeAreaView>
