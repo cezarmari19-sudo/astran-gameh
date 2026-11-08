@@ -4,6 +4,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton, SecondaryButton } from "@/src/components/ui";
 import { projectSecurityApi } from "@/src/api/client";
+import { useAuth } from "@/src/context/AuthContext";
 import { biometricsAvailable, authenticateWithPasskey } from "@/src/security/webauthnWeb";
 
 type Stage = "account_password" | "email_code" | "biometric" | "biometric_unavailable" | "done";
@@ -17,6 +18,9 @@ export default function RecoverProjectFlow({
   onClose: () => void;
   onRecovered: () => void;
 }) {
+  // Conturile Google nu au parola de cont: sar peste campul de parola (codul de pe email urmeaza oricum)
+  const { user } = useAuth();
+  const hasPassword = user?.has_password !== false;
   const [stage, setStage] = useState<Stage>("account_password");
   const [accountPassword, setAccountPassword] = useState("");
   const [code, setCode] = useState("");
@@ -34,7 +38,7 @@ export default function RecoverProjectFlow({
   async function submitAccountPassword() {
     setBusy(true); setErr(null);
     try {
-      const r = await projectSecurityApi.recoverStart(gameId, accountPassword);
+      const r = await projectSecurityApi.recoverStart(gameId, hasPassword ? accountPassword : undefined);
       setTokenId(r.token_id);
       setMaskedEmail(r.email_sent_to);
       setStage("email_code");
@@ -86,18 +90,24 @@ export default function RecoverProjectFlow({
 
           {stage === "account_password" && (
             <>
-              <Text style={styles.body}>Reintrodu parola contului tău Owner pentru a continua.</Text>
-              <TextInput
-                testID="recover-account-password" value={accountPassword} onChangeText={setAccountPassword}
-                secureTextEntry autoCapitalize="none" placeholder="Parola contului"
-                placeholderTextColor={colors.onSurface3} style={styles.input}
-              />
+              {hasPassword ? (
+                <>
+                  <Text style={styles.body}>Reintrodu parola contului tău Owner pentru a continua.</Text>
+                  <TextInput
+                    testID="recover-account-password" value={accountPassword} onChangeText={setAccountPassword}
+                    secureTextEntry autoCapitalize="none" placeholder="Parola contului"
+                    placeholderTextColor={colors.onSurface3} style={styles.input}
+                  />
+                </>
+              ) : (
+                <Text style={styles.body}>Contul tău folosește autentificarea Google, deci nu are parolă. Îți trimitem un cod de verificare pe email.</Text>
+              )}
               {err ? <Text style={styles.err}>{err}</Text> : null}
               <View style={styles.row}>
                 <View style={{ flex: 1 }}><SecondaryButton label="Anulează" onPress={close} /></View>
                 <View style={{ flex: 1 }}>
                   {busy ? <ActivityIndicator color={colors.brand} /> : (
-                    <PrimaryButton testID="recover-submit-password" label="Continuă" onPress={submitAccountPassword} disabled={!accountPassword} />
+                    <PrimaryButton testID="recover-submit-password" label="Continuă" onPress={submitAccountPassword} disabled={hasPassword && !accountPassword} />
                   )}
                 </View>
               </View>
