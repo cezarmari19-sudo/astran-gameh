@@ -36,12 +36,18 @@ from __future__ import annotations
 import logging
 import secrets
 import string
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
+
+from . import money
+from .chat_core import _INVISIBLE
+from .chat_filter import filter_text, shared_store
 
 log = logging.getLogger("astran.groups")
 
@@ -162,19 +168,11 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         if await db.groups.find_one({"owner_id": current["user_id"]}, {"_id": 0, "group_id": 1}):
             raise HTTPException(status_code=400, detail="You already own a Group (max one per account)")
 
-        # Taxa se incaseaza ATOMIC (verifica soldul in aceeasi operatie), inainte de create.
-        debit = await db.users.update_one(
-            {"user_id": current["user_id"], "astrans_balance": {"$gte": GROUP_CREATE_COST}},
-            {"$inc": {"astrans_balance": -GROUP_CREATE_COST}},
-        )
-        if debit.modified_count == 0:
-            raise HTTPException(status_code=402, detail=f"Insufficient Astrans balance (need {GROUP_CREATE_COST})")
-
-        async def refund() -> None:
-            await db.users.update_one({"user_id": current["user_id"]}, {"$inc": {"astrans_balance": GROUP_CREATE_COST}})
-
+        # Tot ce poate esua (generarea tokenului) se face INAINTE de debit: inainte, daca
+        # _generate_token ridica 500 dupa debit, taxa de 200 Astrans era luata fara grup si fara refund.
         token = await _generate_token(db)
         gid = new_id("group_")
+        now = now_utc()
         doc = {
             "group_id": gid,
             "owner_id": current["user_id"],
@@ -183,30 +181,48 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
             "logo_url": body.logo_url,
             "token": token,
             "chat_mode": "everyone",
-            "created_at": now_utc(),
-            "updated_at": now_utc(),
+            "created_at": now,
+            "updated_at": now,
         }
-        try:
-            await db.groups.insert_one(doc)
-        except Exception:  # noqa: BLE001 - race condition pe unique index owner_id/token
-            await refund()
-            raise HTTPException(status_code=400, detail="You already own a Group (max one per account)")
-
-        try:
-            await db.group_members.insert_one({
-                "group_id": gid, "user_id": current["user_id"], "role": "owner",
-                "status": "active", "muted": False, "joined_at": now_utc(),
-            })
-        except Exception:  # noqa: BLE001
-            await db.groups.delete_one({"group_id": gid})
-            await refund()
-            raise HTTPException(status_code=500, detail="Could not create Group, try again")
-
-        await db.astran_ledger.insert_one({
+        member_doc = {
+            "group_id": gid, "user_id": current["user_id"], "role": "owner",
+            "status": "active", "muted": False, "joined_at": now,
+        }
+        ledger_doc = {
             "tx_id": new_id("tx_"), "user_id": current["user_id"], "counterparty_id": "system",
             "type": "group_create", "amount": GROUP_CREATE_COST, "fee": 0, "net": -GROUP_CREATE_COST,
-            "status": "completed", "timestamp": now_utc(), "reference": f"group:{body.name}",
-        })
+            "status": "completed", "timestamp": now, "reference": f"group:{body.name}",
+        }
+
+        # Jurnal -> debit -> grup -> membru + ledger (vezi money.py). Daca procesul pica dupa debit,
+        # task-ul de recuperare insereaza grupul/membrul/ledger-ul lipsa; banii nu dispar.
+        op_id = money.new_op_id("grp_")
+        await money.begin(
+            db, op_id=op_id, kind="group_create", payer_id=current["user_id"], amount=GROUP_CREATE_COST,
+            inserts=[
+                {"collection": "groups", "doc": doc},
+                {"collection": "group_members", "doc": member_doc},
+                {"collection": "astran_ledger", "doc": ledger_doc},
+            ],
+        )
+        if await money.debit(db, current["user_id"], GROUP_CREATE_COST, op_id) == "insufficient":
+            await money.rollback(db, op_id, "insufficient funds")
+            raise HTTPException(status_code=402, detail=f"Insufficient Astrans balance (need {GROUP_CREATE_COST})")
+
+        try:
+            await db.groups.insert_one(dict(doc))
+        except DuplicateKeyError:  # cursa pe indexul unic owner_id / token: refund complet
+            await money.rollback(db, op_id, "group already exists")
+            raise HTTPException(status_code=400, detail="You already own a Group (max one per account)")
+        except Exception:  # noqa: BLE001
+            log.exception("group insert failed after debit")
+            await money.rollback(db, op_id, "group insert failed")
+            raise HTTPException(status_code=500, detail="Could not create Group, try again")
+
+        try:
+            await money.settle(db, op_id)
+        except Exception:  # noqa: BLE001 - grupul exista si banii sunt luati: recuperarea termina restul
+            log.exception("group settle failed - left for money recovery (op %s)", op_id)
         return {"group": _group_public(doc, 1)}
 
     @router.get("/mine")
@@ -248,7 +264,13 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
     async def update_group(group_id: str, body: UpdateGroupBody, current=Depends(get_current_user)):
         g = await get_group_or_404(group_id)
         await require_owner(g, current["user_id"])
-        updates = {k: v for k, v in body.dict().items() if v is not None}
+        provided = body.dict(exclude_unset=True)
+        updates = {k: v for k, v in provided.items() if v is not None}
+        # logo_url: null / "" trimis explicit = STERGE logo-ul (inainte None era ignorat, deci nu se putea elimina)
+        if "logo_url" in provided and not provided["logo_url"]:
+            updates["logo_url"] = None
+        if updates.get("logo_url") and len(updates["logo_url"]) > 500_000:
+            raise HTTPException(status_code=400, detail="logo_url too large")
         if updates:
             updates["updated_at"] = now_utc()
             await db.groups.update_one({"group_id": group_id}, {"$set": updates})
@@ -424,6 +446,17 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
             return membership["role"] in ("owner", "admin")
         return membership["role"] == "owner"  # owner_only
 
+    async def _viewer_state(uid: str) -> dict:
+        doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "age_category": 1, "chat_muted_until": 1}) or {}
+        return doc
+
+    async def _blocked_with(uid: str) -> set:
+        """Utilizatorii blocati in ORICARE directie fata de `uid` (blocker sau blocat)."""
+        rows = await db.blocks.find(
+            {"$or": [{"blocker_id": uid}, {"blocked_id": uid}]}, {"_id": 0, "blocker_id": 1, "blocked_id": 1},
+        ).to_list(5000)
+        return {r["blocked_id"] if r["blocker_id"] == uid else r["blocker_id"] for r in rows}
+
     @router.get("/{group_id}/chat/messages")
     async def list_chat(group_id: str, current=Depends(get_current_user)):
         await get_group_or_404(group_id)
@@ -431,7 +464,27 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         cursor = db.group_chat_messages.find({"group_id": group_id}, {"_id": 0}).sort("created_at", -1).limit(CHAT_PAGE_SIZE)
         msgs = await cursor.to_list(CHAT_PAGE_SIZE)
         msgs.reverse()
-        return {"messages": msgs}
+        try:
+            viewer_adult = (await _viewer_state(current["user_id"])).get("age_category") == "adult_18"
+            blocked = await _blocked_with(current["user_id"])
+            compiled = await shared_store(db).get_compiled()
+        except Exception:  # noqa: BLE001 - fail closed: nu livram mesaje nefiltrate daca nu putem filtra
+            log.warning("group chat: filtrul/blocarile nu au putut fi citite", exc_info=True)
+            raise HTTPException(status_code=503, detail="Chat temporarily unavailable")
+        out = []
+        for m in msgs:
+            if m["user_id"] in blocked and m["user_id"] != current["user_id"]:
+                continue
+            raw = m.get("text", "")
+            # Aceeasi regula ca in chat-ul din joc (chat_core.text_for): textul ORIGINAL il vad doar
+            # adultii, si doar daca autorul e adult; in rest se livreaza varianta filtrata. Mesajele
+            # vechi (fara sender_adult) se trateaza ca "autor necunoscut" -> filtrate pentru toti.
+            if viewer_adult and m.get("sender_adult") is True:
+                text = raw
+            else:
+                text = filter_text(raw, compiled).text
+            out.append({k: v for k, v in m.items() if k != "sender_adult"} | {"text": text})
+        return {"messages": out}
 
     @router.post("/{group_id}/chat/messages")
     async def send_chat(group_id: str, body: ChatMessageBody, current=Depends(get_current_user)):
@@ -439,11 +492,30 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         m = await get_membership(group_id, current["user_id"])
         if not await can_speak(g, m):
             raise HTTPException(status_code=403, detail="You are not allowed to speak in this Group right now")
+        try:
+            state = await _viewer_state(current["user_id"])
+            compiled = await shared_store(db).get_compiled()
+        except Exception:  # noqa: BLE001
+            log.warning("group chat: starea/regulile nu au putut fi citite", exc_info=True)
+            raise HTTPException(status_code=503, detail="Chat temporarily unavailable")
+        # mute global de chat (admin), la fel ca in chat-ul din joc
+        until = state.get("chat_muted_until")
+        if isinstance(until, datetime):
+            until = until if until.tzinfo else until.replace(tzinfo=timezone.utc)
+            if until > now_utc():
+                raise HTTPException(status_code=403, detail="You are muted")
+        text = unicodedata.normalize("NFC", body.text)
+        text = _INVISIBLE.sub("", text).strip()  # caractere de control / zero-width / bidi
+        if not text:
+            raise HTTPException(status_code=400, detail="Message is empty")
+        sender_adult = state.get("age_category") == "adult_18"  # DOAR din DB; orice altceva = sub 18
         doc = {
             "message_id": new_id("gmsg_"), "group_id": group_id, "user_id": current["user_id"],
-            "username": current["username"], "text": body.text, "created_at": now_utc(),
+            "username": current["username"], "text": text, "sender_adult": sender_adult,
+            "created_at": now_utc(),
         }
         await db.group_chat_messages.insert_one(doc)
-        return {"message": {k: v for k, v in doc.items() if k != "_id"}}
+        shown = text if sender_adult else filter_text(text, compiled).text
+        return {"message": {k: v for k, v in doc.items() if k not in ("_id", "sender_adult")} | {"text": shown}}
 
     return router
