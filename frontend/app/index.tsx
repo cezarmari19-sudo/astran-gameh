@@ -1,10 +1,12 @@
 import React, { useEffect } from "react";
-import { View, ActivityIndicator, StyleSheet, Platform } from "react-native";
+import { View, Text, ActivityIndicator, StyleSheet, Platform } from "react-native";
 import { Redirect, useRouter } from "expo-router";
 import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { useAuth } from "@/src/context/AuthContext";
-import { colors } from "@/src/theme";
+import { useI18n } from "@/src/i18n";
+import { PrimaryButton } from "@/src/components/ui";
+import { colors, spacing } from "@/src/theme";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -17,8 +19,10 @@ function extractSessionId(url: string | null | undefined): string | null {
 }
 
 export default function Index() {
-  const { user, loading, loginWithSessionId } = useAuth();
+  const { user, loading, connectionError, refresh, loginWithSessionId } = useAuth();
+  const { t } = useI18n();
   const router = useRouter();
+  const [retrying, setRetrying] = React.useState(false);
 
   useEffect(() => {
     if (Platform.OS === "web" && typeof window !== "undefined") {
@@ -64,10 +68,31 @@ export default function Index() {
     );
   }
 
+  // Token salvat, dar serverul nu raspunde: NU trimitem utilizatorul la login (ar crede ca a fost
+  // deconectat) - aratam un ecran cu "Incearca din nou".
+  if (!user && connectionError) {
+    return (
+      <View style={styles.center} testID="app-server-down">
+        <Text style={styles.title}>{t("server_unreachable_title")}</Text>
+        <Text style={styles.body}>{t("server_unreachable_body")}</Text>
+        <View style={{ marginTop: spacing.lg, alignSelf: "stretch" }}>
+          <PrimaryButton
+            testID="app-retry"
+            label={retrying ? "..." : t("try_again")}
+            disabled={retrying}
+            onPress={async () => { setRetrying(true); try { await refresh(); } finally { setRetrying(false); } }}
+          />
+        </View>
+      </View>
+    );
+  }
+
   if (!user) return <Redirect href="/(auth)/login" />;
   return <Redirect href="/(tabs)" />;
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface, padding: spacing.xl },
+  title: { color: colors.onSurface, fontSize: 18, fontWeight: "800", textAlign: "center" },
+  body: { color: colors.onSurface3, fontSize: 13, textAlign: "center", marginTop: 8 },
 });
