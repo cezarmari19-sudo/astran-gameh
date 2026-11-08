@@ -530,11 +530,11 @@ export default function PlayScreen() {
           if (av?.avatar?.body) avatarBodyRef.current = { ...defaultBody(), ...av.avatar.body };
         } catch (e) { console.log("[play] avatar load failed", e); }
 
-        const charId = g.game?.player_character_model_id;
-        if (charId && g.game?.player_character_source === "shop_model") {
+        // vezi app/play/[id].tsx: endpointul dedicat al jocului, nu /shop/items sau /studio/models
+        if (g.game?.player_character_model_id) {
           try {
-            const item = await api(`/shop/items/${charId}`);
-            if (Array.isArray(item?.item?.parts)) characterPartsRef.current = item.item.parts;
+            const ch = await api(`/games/${id}/player-character`);
+            if (Array.isArray(ch?.parts)) characterPartsRef.current = ch.parts;
           } catch (e) { console.log("[play] character load failed", e); }
         }
       } catch (e: any) {
