@@ -4,6 +4,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton, SecondaryButton } from "@/src/components/ui";
 import { projectSecurityApi } from "@/src/api/client";
+import { useAuth } from "@/src/context/AuthContext";
 import ResetProjectPasswordFlow from "@/src/components/ResetProjectPasswordFlow";
 
 type Stage = "warning" | "setup_password" | "auth" | "locked";
@@ -23,6 +24,8 @@ export default function DeleteProjectFlow({
   const [newPw, setNewPw] = useState("");
   const [newPwConfirm, setNewPwConfirm] = useState("");
   const [accountPassword, setAccountPassword] = useState("");
+  const { user } = useAuth();
+  const hasPassword = user?.has_password !== false;   // conturile Google nu au parola de cont
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [lockMsg, setLockMsg] = useState<string | null>(null);
@@ -60,7 +63,7 @@ export default function DeleteProjectFlow({
     setBusy(true); setErr(null);
     try {
       await projectSecurityApi.setupPassword(gameId, {
-        account_password: accountPassword,
+        ...(hasPassword ? { account_password: accountPassword } : {}),
         project_password: newPw,
         project_password_confirm: newPwConfirm,
       });
@@ -151,12 +154,20 @@ export default function DeleteProjectFlow({
                 Acest proiect a fost creat înainte de activarea parolei de securitate. Pentru a-l
                 putea șterge sau recupera în siguranță, stabilește acum o parolă (6–30 caractere).
               </Text>
-              <Text style={styles.label}>Parola contului tău</Text>
-              <TextInput
-                testID="setup-account-password" value={accountPassword} onChangeText={setAccountPassword}
-                secureTextEntry autoCapitalize="none" placeholder="Parola contului"
-                placeholderTextColor={colors.onSurface3} style={styles.input}
-              />
+              {hasPassword ? (
+                <>
+                  <Text style={styles.label}>Parola contului tău</Text>
+                  <TextInput
+                    testID="setup-account-password" value={accountPassword} onChangeText={setAccountPassword}
+                    secureTextEntry autoCapitalize="none" placeholder="Parola contului"
+                    placeholderTextColor={colors.onSurface3} style={styles.input}
+                  />
+                </>
+              ) : (
+                <Text style={styles.body}>
+                  Contul tău folosește Google. Dacă te-ai autentificat mai demult, ieși și intră din nou cu Google înainte de a continua.
+                </Text>
+              )}
               <Text style={styles.label}>Parolă nouă de proiect</Text>
               <TextInput
                 testID="setup-new-password" value={newPw} onChangeText={setNewPw}
@@ -174,7 +185,7 @@ export default function DeleteProjectFlow({
                 <View style={{ flex: 1 }}><SecondaryButton testID="setup-cancel" label="Anulează" onPress={close} /></View>
                 <View style={{ flex: 1 }}>
                   {busy ? <ActivityIndicator color={colors.brand} /> : (
-                    <PrimaryButton testID="setup-submit" label="Salvează parola" onPress={submitPasswordSetup} disabled={!accountPassword || !newPw || !newPwConfirm} />
+                    <PrimaryButton testID="setup-submit" label="Salvează parola" onPress={submitPasswordSetup} disabled={(hasPassword && !accountPassword) || !newPw || !newPwConfirm} />
                   )}
                 </View>
               </View>
