@@ -16,6 +16,10 @@ const STRINGS: Partial<Record<LangCode, Dict>> = {
   ro: {
     app_name: "Astran Game",
     tagline: "Joacă. Creează. Explorează.",
+    server_unreachable_title: "Serverul nu răspunde",
+    server_unreachable_body: "Ești încă autentificat. Nu te-am deconectat — verifică conexiunea și încearcă din nou.",
+    try_again: "Încearcă din nou",
+    age_raise_blocked: "Categoria de vârstă nu mai poate fi ridicată la 18+. Contactează suportul.",
     login: "Autentificare",
     register: "Înregistrare",
     logout: "Ieșire",
@@ -138,6 +142,10 @@ const STRINGS: Partial<Record<LangCode, Dict>> = {
   },
   en: {
     app_name: "Astran Game", tagline: "Play. Create. Explore.",
+    server_unreachable_title: "Server not responding",
+    server_unreachable_body: "You are still signed in. We did not log you out — check your connection and try again.",
+    try_again: "Try again",
+    age_raise_blocked: "The age category can no longer be raised to 18+. Please contact support.",
     login: "Log in", register: "Sign up", logout: "Log out",
     email: "Email", password: "Password", username: "Username",
     continue: "Continue", or: "or", google_login: "Continue with Google",
