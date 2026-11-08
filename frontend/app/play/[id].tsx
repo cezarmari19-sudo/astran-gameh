@@ -618,11 +618,13 @@ export default function PlayScreen() {
           if (av?.avatar?.body) avatarBodyRef.current = { ...defaultBody(), ...av.avatar.body };
         } catch (e) { console.log("[play] avatar load failed", e); }
 
-        const charId = g.game?.player_character_model_id;
-        if (charId && g.game?.player_character_source === "shop_model") {
+        // Personajul custom al jocului vine de la endpointul DEDICAT al jocului: /shop/items/{id} da
+        // continutul doar celor care detin itemul, iar /studio/models/{id} doar owner-ului - deci
+        // pentru restul jucatorilor modelul nu se incarca niciodata.
+        if (g.game?.player_character_model_id) {
           try {
-            const item = await api(`/shop/items/${charId}`);
-            if (Array.isArray(item?.item?.parts)) characterPartsRef.current = normalizeParts(item.item.parts);
+            const ch = await api(`/games/${id}/player-character`);
+            if (Array.isArray(ch?.parts)) characterPartsRef.current = normalizeParts(ch.parts);
           } catch (e) { console.log("[play] character load failed", e); }
         }
       } catch (e: any) {
