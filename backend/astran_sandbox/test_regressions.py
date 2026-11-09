@@ -78,7 +78,7 @@ class StaticFixesPresent(unittest.TestCase):  # STATIC
 
     def test_transfer_does_not_store_null_idempotency_key(self):
         body = self.server[self.server.index("async def transfer_astrans"):self.server.index("async def wallet_tx")]
-        tx_literal = body[body.index("tx = {"):body.index("    try:\n        await db.astran_ledger.insert_one(tx)")]
+        tx_literal = body[body.index("tx = {"):body.index("tx_in = {")]  # literalul tx_out (inainte de tx_in)
         self.assertNotIn('"idempotency_key": body.idempotency_key,', tx_literal)  # null s-ar indexa
         self.assertIn('tx["idempotency_key"] = idem', body)
         self.assertIn("if idem:", body)  # cheia (prefixata cu user_id) se pune doar cand exista
