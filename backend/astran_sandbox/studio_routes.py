@@ -27,7 +27,16 @@ ROOT_ID = "root"
 MAX_PARTS = 300
 MAX_NAME_CHARS = 48
 MAX_MODELS_PER_USER = 100
-SHAPES = ("cube", "sphere", "cylinder", "cone", "plane", "torus")
+SHAPES = ("cube", "sphere", "cylinder", "cone", "plane", "torus", "mesh")
+
+# Mesh editabil (Edit Mode): geometrie reala salvata in piesa. Limitele oglindesc MESH_LIMITS din
+# frontend/src/studio3d/meshData.ts; MAX_MESH_VERTS_TOTAL tine sub control marimea documentului.
+MAX_MESH_VERTS = 6000
+MAX_MESH_FACES = 6000
+MAX_FACE_VERTS = 64
+MAX_MESH_COORD = 1000.0
+MAX_MESH_VERTS_TOTAL = 20000
+MAX_MESH_FACES_TOTAL = 20000
 MATERIALS = ("matte", "glossy", "metal", "glass", "neon")
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}\Z")
 _PART_ID = re.compile(r"^[A-Za-z0-9_-]{1,24}\Z")
@@ -59,6 +68,37 @@ def default_root(name: str = "Model") -> dict:
     }
 
 
+def validate_mesh(raw: Any) -> dict:
+    """Verifica geometria unei piese de tip "mesh": {"v": [x,y,z,...], "f": [[i,j,k,...], ...]}.
+    Intoarce o copie curata (coordonate rotunjite la 4 zecimale). Ridica ValueError."""
+    if not isinstance(raw, dict):
+        raise ValueError("Mesh part has no geometry")
+    v, f = raw.get("v"), raw.get("f")
+    if not isinstance(v, list) or not isinstance(f, list):
+        raise ValueError("Invalid mesh")
+    if len(v) == 0 or len(v) % 3 != 0 or len(v) // 3 > MAX_MESH_VERTS:
+        raise ValueError(f"Invalid mesh (1..{MAX_MESH_VERTS} vertices)")
+    if len(f) == 0 or len(f) > MAX_MESH_FACES:
+        raise ValueError(f"Invalid mesh (1..{MAX_MESH_FACES} faces)")
+    nv = len(v) // 3
+    coords: list[float] = []
+    for x in v:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or x != x or abs(x) > MAX_MESH_COORD:
+            raise ValueError("Invalid mesh vertex")
+        coords.append(round(float(x), 4))
+    faces: list[list[int]] = []
+    for face in f:
+        if not isinstance(face, list) or not (3 <= len(face) <= MAX_FACE_VERTS):
+            raise ValueError("Invalid mesh face")
+        for i in face:
+            if isinstance(i, bool) or not isinstance(i, int) or i < 0 or i >= nv:
+                raise ValueError("Invalid mesh face index")
+        if len(set(face)) != len(face):
+            raise ValueError("Invalid mesh face (repeated vertex)")
+        faces.append([int(i) for i in face])
+    return {"v": coords, "f": faces}
+
+
 def validate_parts(raw: Any) -> list[dict]:
     """Verifica lista de piese si intoarce o copie curata. Ridica ValueError."""
     if not isinstance(raw, list) or not raw:
@@ -68,6 +108,8 @@ def validate_parts(raw: Any) -> list[dict]:
 
     clean: list[dict] = []
     ids: set[str] = set()
+    total_verts = 0
+    total_faces = 0
     for p in raw:
         if not isinstance(p, dict):
             raise ValueError("Invalid part")
@@ -94,7 +136,16 @@ def validate_parts(raw: Any) -> list[dict]:
             color = "#cccccc"
         material = p.get("material") if p.get("material") in MATERIALS else "matte"
 
+        mesh = None
+        if ptype == "mesh":
+            mesh = validate_mesh(p.get("mesh"))
+            total_verts += len(mesh["v"]) // 3
+            total_faces += len(mesh["f"])
+            if total_verts > MAX_MESH_VERTS_TOTAL or total_faces > MAX_MESH_FACES_TOTAL:
+                raise ValueError("The model's meshes are too detailed")
+
         clean.append({
+            **({"mesh": mesh} if mesh is not None else {}),
             "id": pid, "name": name, "type": ptype, "parent": parent,
             "x": _num(p.get("x"), -1000, 1000, 0.0),
             "y": _num(p.get("y"), -1000, 1000, 0.0),
