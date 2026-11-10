@@ -30,6 +30,11 @@ export function useHistory<T>(initial: T, limit = 100) {
     });
   }, [limit]);
 
+  // renunta la un gest/operatie inceputa cu begin(): revine la starea de dinainte, fara sa adauge un pas de istoric
+  const cancel = useCallback(() => {
+    setState(s => (s.batchBase === null ? s : { ...s, present: s.batchBase, batchBase: null }));
+  }, []);
+
   const undo = useCallback(() => {
     setState(s => (s.batchBase !== null || s.past.length === 0 ? s : {
       past: s.past.slice(0, -1),
@@ -51,5 +56,5 @@ export function useHistory<T>(initial: T, limit = 100) {
   // schimba starea curenta fara sa o pui in istoric (ex: dupa incarcarea de pe server)
   const reset = useCallback((value: T) => setState({ past: [], present: value, future: [], batchBase: null }), []);
 
-  return { present: state.present, set, begin, end, undo, redo, reset, canUndo: state.past.length > 0, canRedo: state.future.length > 0 };
+  return { present: state.present, set, begin, end, cancel, undo, redo, reset, canUndo: state.past.length > 0, canRedo: state.future.length > 0 };
 }
