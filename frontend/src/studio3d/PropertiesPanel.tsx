@@ -7,6 +7,16 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, radius } from "@/src/theme";
 import NumField from "./NumField";
 import { Part, MATERIALS, MaterialKind, PALETTE, BASE_SIZE } from "./modelTypes";
+import { MeshData, vertCount } from "./meshData";
+
+function meshBaseSize(m: MeshData): [number, number, number] {
+  const n = vertCount(m);
+  if (n === 0) return [1, 1, 1];
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) { const v = m.v[i * 3 + a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; }
+  const d = (a: number) => { const x = hi[a] - lo[a]; return x < 1e-4 ? 0 : Math.round(x * 1000) / 1000; };
+  return [d(0), d(1), d(2)];
+}
 
 type Section = "pos" | "rot" | "scale" | "size";
 
@@ -92,7 +102,8 @@ export default function PropertiesPanel({ selected, onPatch }: Props) {
   };
 
   const showSize = primary.type !== "group";
-  const base = BASE_SIZE[primary.type];
+  // mesh editabil: dimensiunea reala = cutia care ii inconjoara varfurile (se schimba pe masura ce il modelezi)
+  const base: [number, number, number] = primary.type === "mesh" && primary.mesh ? meshBaseSize(primary.mesh) : BASE_SIZE[primary.type];
 
   const LinkButton = (
     <Pressable onPress={() => setLinked(l => !l)} hitSlop={6} style={[styles.linkBtn, linked && styles.linkBtnActive]}>
