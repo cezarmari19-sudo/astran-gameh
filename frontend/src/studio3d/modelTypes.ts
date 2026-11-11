@@ -1,8 +1,9 @@
 // frontend/src/studio3d/modelTypes.ts
 // Structura unui model din Studio (lista plata de piese cu ierarhie) + functii pentru arbore si three.js.
 import * as THREE from "three";
+import { MeshData, cubeMesh, primitiveMesh, sanitizeMesh, buildRenderBuffers, joinMeshes, mapVerts } from "./meshData";
 
-export type PartType = "group" | "cube" | "sphere" | "cylinder" | "cone" | "plane" | "torus";
+export type PartType = "group" | "cube" | "sphere" | "cylinder" | "cone" | "plane" | "torus" | "mesh";
 export type MaterialKind = "matte" | "glossy" | "metal" | "glass" | "neon";
 
 export type Part = {
@@ -17,10 +18,11 @@ export type Part = {
   material: MaterialKind;
   opacity: number; // 0..1
   visible: boolean;
+  mesh?: MeshData; // doar pentru type === "mesh": geometrie editabila (Edit Mode), salvata odata cu modelul
 };
 
 export const ROOT_ID = "root";
-export const SHAPES: PartType[] = ["cube", "sphere", "cylinder", "cone", "plane", "torus"];
+export const SHAPES: PartType[] = ["cube", "sphere", "cylinder", "cone", "plane", "torus", "mesh"];
 export const MATERIALS: MaterialKind[] = ["matte", "glossy", "metal", "glass", "neon"];
 export const PALETTE = [
   "#CCFF00", "#FF3366", "#00E5FF", "#FFD500", "#00FF66", "#FF9500",
@@ -28,12 +30,12 @@ export const PALETTE = [
 ];
 
 export const PART_LABEL: Record<PartType, string> = {
-  group: "Group", cube: "Cube", sphere: "Sphere", cylinder: "Cylinder", cone: "Cone", plane: "Plane", torus: "Torus",
+  group: "Group", cube: "Cube", sphere: "Sphere", cylinder: "Cylinder", cone: "Cone", plane: "Plane", torus: "Torus", mesh: "Mesh",
 };
 
 export const PART_ICON: Record<PartType, string> = {
   group: "folder-outline", cube: "cube-outline", sphere: "circle-outline", cylinder: "cylinder",
-  cone: "triangle-outline", plane: "square-outline", torus: "circle-double",
+  cone: "triangle-outline", plane: "square-outline", torus: "circle-double", mesh: "vector-polygon",
 };
 
 // Dimensiunea reala (latime, inaltime, adancime) a formei la scala 1. Size = scala * aceste valori.
@@ -45,6 +47,7 @@ export const BASE_SIZE: Record<PartType, [number, number, number]> = {
   cone: [1, 1, 1],
   plane: [1, 0, 1],
   torus: [1, 1, 0.2],
+  mesh: [1, 1, 1],
 };
 
 const DEG = Math.PI / 180;
@@ -66,10 +69,11 @@ export function newRootPart(name = "Model"): Part {
   };
 }
 
-const DEFAULT_Y: Record<PartType, number> = { group: 0, cube: 0.5, sphere: 0.5, cylinder: 0.5, cone: 0.5, plane: 0.01, torus: 0.1 };
+const DEFAULT_Y: Record<PartType, number> = { group: 0, cube: 0.5, sphere: 0.5, cylinder: 0.5, cone: 0.5, plane: 0.01, torus: 0.1, mesh: 0.5 };
 
 export function newPart(type: PartType, parent: string, name: string): Part {
   return {
+    ...(type === "mesh" ? { mesh: cubeMesh() } : {}),
     id: uid(), name, type, parent,
     x: 0, y: DEFAULT_Y[type], z: 0,
     rx: type === "torus" ? 90 : 0, ry: 0, rz: 0,
@@ -109,6 +113,7 @@ export function normalizeParts(raw: any): Part[] {
       material: (MATERIALS.includes(p.material) ? p.material : "matte") as MaterialKind,
       opacity: Math.max(0, Math.min(1, num(p.opacity, 1))),
       visible: p.visible !== false,
+      ...(p.type === "mesh" ? { mesh: sanitizeMesh(p.mesh) ?? cubeMesh() } : {}),
     }));
   if (!parts.some(p => p.id === ROOT_ID)) parts.unshift(newRootPart("Model"));
   const ids = new Set(parts.map(p => p.id));
@@ -310,10 +315,67 @@ function geometryForShape(type: PartType): THREE.BufferGeometry {
   }
 }
 
+// Geometrie reala din mesh-ul editabil: shading plat, un triunghi-lista; userData.faceOfTri leaga triunghiul de fata
+export function geometryFromMesh(m: MeshData): THREE.BufferGeometry {
+  const { positions, normals, faceOfTri } = buildRenderBuffers(m);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  g.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  g.computeBoundingSphere();
+  g.computeBoundingBox();
+  g.userData.faceOfTri = faceOfTri;
+  return g;
+}
+
+// Reconstruieste geometria unui obiect "mesh" daca mesh-ul piesei s-a schimbat (comparatie pe referinta)
+export function syncMeshGeometry(o: THREE.Object3D, p: Part): boolean {
+  if (p.type !== "mesh" || !p.mesh) return false;
+  const mesh = o as THREE.Mesh;
+  if (!mesh.isMesh || mesh.userData.meshRef === p.mesh) return false;
+  mesh.geometry.dispose();
+  mesh.geometry = geometryFromMesh(p.mesh);
+  mesh.userData.meshRef = p.mesh;
+  return true;
+}
+
 export function createObject(p: Part): THREE.Object3D {
   if (p.type === "group") return new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(p.color), side: p.type === "plane" ? THREE.DoubleSide : THREE.FrontSide });
-  return new THREE.Mesh(geometryForShape(p.type), mat);
+  const isMesh = p.type === "mesh" && !!p.mesh;
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(p.color), side: p.type === "plane" || isMesh ? THREE.DoubleSide : THREE.FrontSide });
+  const obj = new THREE.Mesh(isMesh ? geometryFromMesh(p.mesh!) : geometryForShape(p.type), mat);
+  if (isMesh) obj.userData.meshRef = p.mesh;
+  return obj;
+}
+
+// ---------- Object Mode <-> Edit Mode ----------
+
+// Primitiva devine mesh editabil (aceeasi forma, aceeasi pozitie/rotatie/scala/culoare)
+export function convertToMesh(p: Part): Part {
+  if (p.type === "mesh" || p.type === "group") return p;
+  return { ...p, type: "mesh", mesh: primitiveMesh(p.type) };
+}
+
+// Alipeste mai multe piese intr-un singur mesh editabil (in spatiul primei piese)
+export function joinParts(parts: Part[], ids: string[]): { parts: Part[]; targetId: string } | null {
+  const by = byIdMap(parts);
+  const leaves = ids.map(id => by.get(id)).filter((p): p is Part => !!p && p.type !== "group");
+  if (leaves.length < 2) return null;
+  const target = convertToMesh(leaves[0]);
+  const inv = worldMatrix(parts, target.id).invert();
+  const meshes: MeshData[] = [target.mesh!];
+  const tmp = new THREE.Vector3();
+  for (const p of leaves.slice(1)) {
+    const c = convertToMesh(p);
+    const mtx = inv.clone().multiply(worldMatrix(parts, p.id));
+    const all = Array.from({ length: c.mesh!.v.length / 3 }, (_, i) => i);
+    // oglindire (determinant negativ) inverseaza orientarea fetelor
+    const flip = mtx.determinant() < 0;
+    const mm = mapVerts(c.mesh!, all, pt => tmp.set(pt[0], pt[1], pt[2]).applyMatrix4(mtx).toArray() as [number, number, number]);
+    meshes.push(flip ? { v: mm.v, f: mm.f.map(f => f.slice().reverse()) } : mm);
+  }
+  const drop = new Set(leaves.slice(1).map(p => p.id));
+  const joined: Part = { ...target, mesh: joinMeshes(meshes) };
+  return { parts: parts.filter(p => !drop.has(p.id)).map(p => (p.id === target.id ? joined : p)), targetId: target.id };
 }
 
 export function disposeObject(o: THREE.Object3D) {
