@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from . import money
+from .shop_integrity import files_hash, parts_hash
 from .studio_routes import make_studio_router, shape_count, summary_object, validate_parts
 
 log = logging.getLogger("astran.shop")
@@ -52,7 +53,12 @@ def new_id(prefix: str) -> str:
 
 def split_price(price: int) -> tuple[int, int]:
     """Intoarce (comision_platforma, venit_autor) pentru un pret dat."""
-    fee = (price * PLATFORM_FEE_PERCENT) // 100
+    # Rotunjire IN SUS (la fel ca taxa de transfer din server.py): cu `//` taxa era 0 pentru orice
+    # pret < 20, deci doua conturi ale aceleiasi persoane mutau Astrans fara taxa prin iteme ieftine.
+    # Autorul pastreaza minim 1 Astran (un pret de 1 nu se poate imparti).
+    if price <= 1:
+        return 0, max(price, 0)
+    fee = min(-(-price * PLATFORM_FEE_PERCENT // 100), price - 1)
     return fee, price - fee
 
 
@@ -207,11 +213,22 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             "part_count": count,
             "object": summary_object(parts),
             "source_model_id": model_id,
+            "content_hash": parts_hash(parts, count),
         }
+
+    async def assert_not_copy(content_hash: Optional[str], current: dict, ignore_item_id: Optional[str] = None) -> None:
+        """Refuza publicarea unui continut identic cu al ALTUI autor (vezi shop_integrity.py)."""
+        if not content_hash:
+            return
+        q: dict = {"content_hash": content_hash, "owner_id": {"$ne": current["user_id"]}, "delisted": {"$ne": True}}
+        if ignore_item_id:
+            q["item_id"] = {"$ne": ignore_item_id}
+        if await db.shop_items.find_one(q, {"_id": 1}):
+            raise HTTPException(status_code=409, detail="This content matches an existing listing by another author")
 
     async def list_or_search(kind: str, q: Optional[str], mine: bool, current: dict) -> list[dict]:
         await ensure_indexes()
-        query: dict = {"kind": kind}
+        query: dict = {"kind": kind, "delisted": {"$ne": True}}
         if mine:
             query["owner_id"] = current["user_id"]
         else:
@@ -254,6 +271,7 @@ def make_shop_router(get_current_user, db) -> APIRouter:
     async def publish_model(body: PublishModelBody, current=Depends(get_current_user)):
         thumb = _clean_thumbnail(body.thumbnail_url)
         extra = await snapshot_from_studio(body.model_id, current)
+        await assert_not_copy(extra.get("content_hash"), current)
         if thumb:
             extra["thumbnail_url"] = thumb
         doc = await publish(
@@ -275,9 +293,12 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=400, detail="Duplicate script names")
         if "main" not in names:
             raise HTTPException(status_code=400, detail="Missing the 'main' script (it runs first)")
+        script_files = [f.dict() for f in body.files]
+        chash = files_hash(script_files)
+        await assert_not_copy(chash, current)
         doc = await publish(
             "script", current["user_id"], current["username"], body.name, body.description,
-            body.price, body.is_public, {"files": [f.dict() for f in body.files]},
+            body.price, body.is_public, {"files": script_files, "content_hash": chash},
         )
         return {"item": _public_item(doc, True)}
 
@@ -289,6 +310,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         # owns() INAINTE de visible(): cine a platit pastreaza accesul la continut si dupa ce autorul
         # face itemul privat (inainte primea 403 si pierdea ce cumparase).
         is_owned = await owns(current["user_id"], it)
+        if it.get("delisted") and not (is_owned and it["owner_id"] != current["user_id"]):
+            raise HTTPException(status_code=404, detail="Item not found")   # retras: doar cumparatorii il mai vad
         if not is_owned and not visible(it, current):
             raise HTTPException(status_code=403, detail="This item is private")
         result = _public_item(it, is_owned)
@@ -301,6 +324,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         it = await get_item(item_id)
         if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
             raise HTTPException(status_code=403, detail="Not the owner")
+        if it.get("delisted"):
+            raise HTTPException(status_code=404, detail="Item not found")   # sters de autor (cumparatorii il pastreaza)
 
         updates: dict = {}
         if body.name is not None:
@@ -317,6 +342,7 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             if it["kind"] != "model":
                 raise HTTPException(status_code=400, detail="This item is not a model")
             updates.update(await snapshot_from_studio(body.model_id, current))
+            await assert_not_copy(updates.get("content_hash"), current, ignore_item_id=item_id)
         if body.files is not None:
             if it["kind"] != "script":
                 raise HTTPException(status_code=400, detail="This item is not a script")
@@ -326,6 +352,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             if "main" not in names:
                 raise HTTPException(status_code=400, detail="Missing the 'main' script (it runs first)")
             updates["files"] = [f.dict() for f in body.files]
+            updates["content_hash"] = files_hash(updates["files"])
+            await assert_not_copy(updates["content_hash"], current, ignore_item_id=item_id)
 
         if updates:
             updates["updated_at"] = now_utc()
@@ -338,6 +366,15 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         it = await get_item(item_id)
         if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
             raise HTTPException(status_code=403, detail="Not the owner")
+        # RUG-PULL: stergerea definitiva a unui item deja vandut ii lasa pe cumparatori fara ce au platit
+        # (si strica jocurile care il folosesc), fara nicio rambursare. Daca exista cumparari, itemul e doar
+        # RETRAS din Magazin (`delisted`): nu mai apare in liste, nu mai poate fi cumparat sau editat, dar
+        # cei care l-au cumparat il pastreaza (owns() / inventar / jocuri). Fara cumparari: stergere reala.
+        if await db.shop_purchases.find_one({"item_id": item_id}, {"_id": 1}):
+            await db.shop_items.update_one(
+                {"item_id": item_id},
+                {"$set": {"delisted": True, "is_public": False, "delisted_at": now_utc(), "updated_at": now_utc()}})
+            return {"ok": True, "delisted": True}
         await db.shop_items.delete_one({"item_id": item_id})
         return {"ok": True}
 
