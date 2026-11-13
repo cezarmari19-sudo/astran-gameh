@@ -6,6 +6,7 @@ export type User = {
   username: string;
   display_name: string;
   email?: string;
+  email_verified?: boolean;
   avatar_url?: string;
   age_category: "under_18" | "adult_18";
   astrans_balance: number;
