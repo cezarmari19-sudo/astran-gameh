@@ -6,6 +6,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
+import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import { colors, radius, spacing } from "@/src/theme";
 
 export default function SettingsScreen() {
@@ -50,6 +51,7 @@ export default function SettingsScreen() {
         <View style={{ width: 26 }} />
       </View>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 40 }}>
+        <EmailVerifyCard />
         <Text style={styles.section}>{t("language").toUpperCase()}</Text>
         <Pressable onPress={() => router.push("/language")} style={styles.row} testID="settings-language">
           <MaterialCommunityIcons name="translate" size={20} color={colors.brand} />
