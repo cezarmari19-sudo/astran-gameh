@@ -34,6 +34,7 @@ GARANTII DE SECURITATE (toate aplicate PE SERVER)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -47,6 +48,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from astran_sandbox.chat_filter import CompiledRule, filter_text
 
+from astran_sandbox.ws_fanout import send_safely
 log = logging.getLogger("astran.chat")
 
 MAX_CHAT_LEN = 200          # caractere (code points), dupa curatare
@@ -202,10 +204,8 @@ class ChatDispatcher:
     # ---------------------------------------------------------------- helpers
     @staticmethod
     async def _send(member: Any, payload: dict) -> None:
-        try:
-            await member.ws.send_text(json.dumps(payload, ensure_ascii=False))
-        except Exception:  # noqa: BLE001 - socket inchis; se curata in finally-ul conexiunii
-            pass
+        # cu timeout: un client care nu citeste e deconectat (ws_fanout), nu blocheaza livrarea
+        await send_safely(member.ws, json.dumps(payload, ensure_ascii=False))
 
     async def error(self, member: Any, code: str, cid: Optional[str] = None, retry_after: Optional[float] = None) -> None:
         payload: dict = {"t": "chat_error", "code": code}
@@ -310,13 +310,16 @@ class ChatDispatcher:
             })
 
     async def _fan_out(self, members: list, rec: ChatRecord, blocked: set, ages: dict, echo_cid: Optional[str]) -> None:
+        sends = []
         for m in members:
             if m.user_id == rec.user_id:
-                await self._send(m, self._public(rec, text_for(rec, bool(rec.sender_adult)), echo_cid))  # expeditorul isi vede propriul text
+                sends.append(self._send(m, self._public(rec, text_for(rec, bool(rec.sender_adult)), echo_cid)))  # expeditorul isi vede propriul text
                 continue
             if m.user_id in blocked:
                 continue
-            await self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False)))))
+            sends.append(self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False))))))
+        if sends:
+            await asyncio.gather(*sends)   # concurent: un destinatar lent nu-i intarzie pe ceilalti
 
     # ---------------------------------------------------------------- mesaj venit de la alt proces
     async def relay_remote(self, room: Any, payload: dict) -> None:
@@ -342,10 +345,10 @@ class ChatDispatcher:
             log.warning("chat: livrarea mesajului remote a esuat (audienta)", exc_info=True)
             return
         room.chat_buffer.append(rec)
-        for m in members:
-            if m.user_id in blocked:
-                continue
-            await self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False)))))
+        sends = [self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False)))))
+                 for m in members if m.user_id not in blocked]
+        if sends:
+            await asyncio.gather(*sends)
 
     # ---------------------------------------------------------------- raportare
     async def handle_report(self, room: Any, member: Any, msg: dict) -> None:
