@@ -72,6 +72,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from astran_sandbox.ws_fanout import fan_out
 from astran_sandbox.realtime_validation import clean_state_technical
 from astran_sandbox.chat_core import ADULT, ROOM_BUFFER, ChatDispatcher, ChatLimiter
 from astran_sandbox.chat_filter import shared_store
@@ -251,12 +252,7 @@ class RealtimeHub:
             if self.chat is not None:
                 await self.chat.relay_remote(r, payload)
             return
-        text = json.dumps(payload)
-        for member in list(r.members.values()):
-            try:
-                await member.ws.send_text(text)
-            except Exception:  # noqa: BLE001
-                pass
+        await fan_out([m.ws for m in list(r.members.values())], json.dumps(payload))
 
 
 hub = RealtimeHub()
@@ -363,14 +359,9 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
             await hub.redis.ensure_subscribed(instance_id)
 
         async def broadcast(payload: dict, except_user_id: Optional[str] = None) -> None:
-            text = json.dumps(payload)
-            for other in list(room.members.values()):
-                if other.user_id == except_user_id:
-                    continue
-                try:
-                    await other.ws.send_text(text)
-                except Exception:  # noqa: BLE001
-                    pass  # socket-ul lui probabil s-a inchis deja - se curata cand ii vine randul la finally
+            # concurent + timeout per client (vezi ws_fanout): un client lent nu mai blocheaza camera
+            await fan_out([o.ws for o in list(room.members.values()) if o.user_id != except_user_id],
+                          json.dumps(payload))
             # si catre membrii ACELEIASI instante, dar conectati la ALTE procese (daca Redis
             # e configurat) - fara asta, doi jucatori din aceeasi instanta, pe procese diferite,
             # nu s-ar vedea deloc (vezi LIMITAREA REALA #1 din docstring-ul fisierului).
