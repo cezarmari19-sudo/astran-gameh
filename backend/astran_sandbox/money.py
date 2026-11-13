@@ -87,6 +87,24 @@ async def credit(db, user_id: str, amount: int, marker: str) -> bool:
     return res.matched_count == 1
 
 
+async def clawback(db, user_id: str, amount: int, op_id: str) -> bool:
+    """Retrage `amount` Astrans dupa o plata rambursata / contestata (refund, chargeback).
+
+    Spre deosebire de debit(), NU cere sold suficient: banii au fost deja cheltuiti, iar rambursarea
+    reala nu poate fi oprita, deci soldul poate ajunge NEGATIV. Un sold negativ blocheaza orice
+    cheltuiala (debit() cere `astrans_balance >= amount`) pana cand userul cumpara din nou.
+    Idempotent: markerul `<op_id>:x` se aplica o singura data. True daca s-a aplicat acum."""
+    if amount <= 0:
+        return False
+    marker = _m(op_id, "x")
+    res = await db.users.update_one(
+        {"user_id": user_id, MARKER: {"$ne": marker}},
+        {"$inc": {"astrans_balance": -int(amount)},
+         "$push": {MARKER: {"$each": [marker], "$slice": -MARKER_KEEP}}},
+    )
+    return res.matched_count == 1
+
+
 async def _was_debited(db, op: dict) -> bool:
     return await db.users.find_one(
         {"user_id": op["payer_id"], MARKER: _m(op["op_id"], "d")}, {"_id": 1}
@@ -162,6 +180,10 @@ async def rollback(db, op_id: str, reason: str = "") -> None:
         log.info("money op %s rolled back: %s", op_id, reason)
 
 
+class MoneyOpFailed(RuntimeError):
+    """Operatia a fost anulata (rollback) si nu mai poate fi dusa la capat cu acest op_id."""
+
+
 async def run(db, op_id: str) -> str:
     """debit -> settle. Intoarce 'done' sau 'insufficient' (in acest caz totul e anulat)."""
     op = await get_op(db, op_id)
@@ -170,7 +192,10 @@ async def run(db, op_id: str) -> str:
     if op["state"] == "done":
         return "done"
     if op["state"] != "pending":
-        return op["state"]
+        # De ex. "failed": recuperarea a anulat operatia (a stat prea mult in `pending`). Intorceam
+        # starea, iar apelantii comparau doar cu "insufficient" => raspundeau "ok" fara ca banii /
+        # itemul / Astransii cumparati sa fi fost mutati. Acum esecul e explicit.
+        raise MoneyOpFailed(f"money op {op_id} is in state {op['state']!r}")
     status = await debit(db, op["payer_id"], op["amount"], op_id)
     if status == "insufficient":
         await rollback(db, op_id, "insufficient funds")
