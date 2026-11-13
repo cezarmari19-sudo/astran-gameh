@@ -71,6 +71,9 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from .project_rev import ProjectConflict, save_project_doc
+from .scope_rules import target_escalation
+
 from .runner import (
     MAX_NAME_CHARS,
     MAX_SOURCE_CHARS,
@@ -331,6 +334,10 @@ class ProjectFileBody(BaseModel):
 class SaveProjectBody(BaseModel):
     files: List[ProjectFileBody] = Field(default_factory=list)
     folders: List[str] = Field(default_factory=list, max_length=MAX_PROJECT_FOLDERS)
+    # Revizia pe care clientul a incarcat-o (din GET /files sau din ultimul PUT). Daca difera de cea
+    # de pe server => 409 (alt dispozitiv / alt colaborator a salvat intre timp), in loc sa fie
+    # suprascrisa tacit munca lui. Lipsa campului = client vechi: comportament neschimbat.
+    base_rev: Optional[int] = Field(default=None, ge=0)
 
 
 MAX_GAME_ASSETS = 100
@@ -499,7 +506,8 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         files, folders = await load_project(game_id, g)
         if filter_project_to_scope is not None:
             files, folders = filter_project_to_scope(files, folders, access)
-        return {"files": files, "folders": folders}
+        rev_doc = await db.game_scripts.find_one({"game_id": game_id}, {"_id": 0, "rev": 1})
+        return {"files": files, "folders": folders, "rev": int((rev_doc or {}).get("rev") or 0)}
 
     @router.put("/games/{game_id}/files")
     async def save_files(game_id: str, body: SaveProjectBody, current=Depends(get_current_user)):
@@ -562,6 +570,11 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             added_folders = [fo for fo in new_folders_in_scope if fo not in old_folders_in_scope]
             removed_folders = [fo for fo in old_folders_in_scope if fo not in new_folders_in_scope]
 
+            bad = target_escalation(bool(access.allowed_paths or access.denied_paths),
+                                    old_in_scope, new_in_scope, added, changed)
+            if bad:
+                raise HTTPException(status_code=403,
+                                    detail=f"A path-restricted editor cannot create or move server code: {bad}")
             if added and not access.can_create_files:
                 raise HTTPException(status_code=403, detail="No permission to create files")
             if changed and not access.can_edit_files:
@@ -584,15 +597,14 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
                 raise HTTPException(status_code=400, detail=str(exc))
 
         await ensure_index()
-        await db.game_scripts.update_one(
-            {"game_id": game_id},
-            {"$set": {"game_id": game_id, "files": files, "folders": folders, "updated_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
+        try:
+            new_rev = await save_project_doc(db, game_id, files, folders, body.base_rev)
+        except ProjectConflict:
+            raise HTTPException(status_code=409, detail="The project was changed elsewhere. Reload it before saving.")
         out_files, out_folders = (files, folders)
         if not access.is_owner and filter_project_to_scope is not None:
             out_files, out_folders = filter_project_to_scope(files, folders, access)
-        return {"ok": True, "files": out_files, "folders": out_folders}
+        return {"ok": True, "files": out_files, "folders": out_folders, "rev": new_rev}
 
     @router.get("/games/{game_id}/assets")
     async def get_game_assets(game_id: str, current=Depends(get_current_user)):
