@@ -271,3 +271,15 @@ class TestRecoveryCodeBruteForce(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ParseOutputLineSeparatorTests(unittest.TestCase):
+    """Regresie: parse_output nu mai pierde ops cand un string contine U+2028/U+2029/U+0085."""
+
+    def test_unicode_line_separators_do_not_drop_ops(self):
+        import json
+        from astran_sandbox import runner
+        for ch in ("\u2028", "\u2029", "\u0085"):
+            ops = [{"op": "create", "id": "p1", "type": "cube", "name": "a" + ch + "b"}]
+            line = json.dumps({"type": "ops", "data": {"ops": ops}}, ensure_ascii=False) + "\n"
+            res = runner.parse_output(line.encode(), 0)
+            self.assertEqual(len(res["ops"]), 1, repr(ch))
