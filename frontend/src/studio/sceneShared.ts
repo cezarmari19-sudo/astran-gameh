@@ -165,7 +165,8 @@ export function applyTransform(m: THREE.Object3D, o: TransformLike) {
 export function buildMesh(o: SceneObj): THREE.Mesh {
   const isSpawn = o.type === "spawn";
   const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(isSpawn ? spawnMarkerColor(o) : o.color),
+    // culoare invalida (ex. un string arbitrar dintr-o scena veche) cade pe gri, in loc sa arunce / sa umple consola
+    color: new THREE.Color(isSpawn ? spawnMarkerColor(o) : (/^#[0-9a-fA-F]{3,8}$/.test(String(o.color)) ? o.color : "#a3a3a3")),
     roughness: 0.5,
     metalness: 0.1,
     transparent: isSpawn,
