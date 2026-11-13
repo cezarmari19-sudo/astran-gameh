@@ -20,6 +20,12 @@ except Exception:  # noqa: BLE001
         pass
 
     pe.DuplicateKeyError = DuplicateKeyError
+
+    class ReturnDocument:  # doar atat folosesc modulele testate (project_rev)
+        BEFORE = False
+        AFTER = True
+
+    pm.ReturnDocument = ReturnDocument
     pm.errors = pe
     sys.modules["pymongo"] = pm
     sys.modules["pymongo.errors"] = pe
@@ -289,6 +295,17 @@ class MoneyTests(unittest.TestCase):
                 await _begin_transfer(db)
         run(go())
 
+
+
+class RunFailedStateTests(unittest.TestCase):
+    def test_run_on_rolled_back_op_raises_instead_of_pretending_ok(self):
+        async def go():
+            db = await _mkdb(buyer=100, seller=0)
+            await db[money.JOURNAL].insert_one({"op_id": "opF2", "state": "failed", "payer_id": "A", "amount": 10})
+            with self.assertRaises(money.MoneyOpFailed):
+                await money.run(db, "opF2")
+            self.assertEqual((await db.users.find_one({"user_id": "A"}))["astrans_balance"], 100)  # nimic debitat
+        run(go())
 
 if __name__ == "__main__":
     unittest.main()
