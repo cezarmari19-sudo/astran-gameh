@@ -31,6 +31,8 @@ MAX_OPS = 5000
 MAX_LOG_LINES = 200
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_CONCURRENT_RUNS = 4
+MAX_QUEUED_RUNS = 32  # rulari care pot astepta un slot; peste aceasta valoare -> SandboxBusy (503)
+_waiting = 0
 CACHE_SIZE = 128
 
 SHAPE_TYPES = {"cube", "sphere", "cylinder", "cone", "pyramid"}
@@ -47,6 +49,10 @@ log = logging.getLogger("astran.sandbox.runner")
 
 class SandboxUnavailable(RuntimeError):
     """Binarul luau-sandbox nu este instalat pe server."""
+
+
+class SandboxBusy(SandboxUnavailable):
+    """Prea multe rulari in asteptare: raspundem imediat 503 in loc sa crestem o coada nelimitata."""
 
 
 # ---------- fisiere ----------
@@ -185,9 +191,11 @@ def _bundle(files: list[dict], assets: Optional[list[dict]] = None, scene: Any =
     parts: list[bytes] = []
     for f in all_files:
         data = f["source"].encode("utf-8")
-        parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"\n")
+        parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"
+")
         parts.append(data)
-        parts.append(b"\n")
+        parts.append(b"
+")
     return b"".join(parts)
 
 
@@ -589,7 +597,12 @@ def parse_output(stdout: bytes, returncode: Optional[int]) -> dict:
     result = _empty_result()
     saw_ops = False
 
-    for line in stdout.decode("utf-8", "replace").splitlines():
+    # split("
+") si NU splitlines(): splitlines() rupe linia si la U+2028/U+2029/U+0085/\x0b/\x0c,
+    # caractere pe care jsonString din prelude nu le escapeaza. Un nume cu un astfel de caracter
+    # spargea linia JSON "ops" in doua jumatati invalide, iar operatiile dispareau fara eroare.
+    for line in stdout.decode("utf-8", "replace").split("
+"):
         try:
             msg = json.loads(line)
         except ValueError:
@@ -674,7 +687,16 @@ async def run_files(
         )
     cmd = _bwrap_wrap(bwrap, binary, PRELUDE, base_cmd) if bwrap else base_cmd
 
-    async with _get_semaphore():
+    global _waiting
+    sem = _get_semaphore()
+    if sem.locked() and _waiting >= MAX_QUEUED_RUNS:
+        raise SandboxBusy("The script server is busy right now, please try again in a few seconds.")
+    _waiting += 1
+    try:
+        await sem.acquire()
+    finally:
+        _waiting -= 1
+    try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -693,6 +715,13 @@ async def run_files(
             _kill(proc)
             await proc.wait()
             return _empty_result(ok=False, errors=["Script timed out"], truncated=True)
+        except BaseException:
+            # anulare (clientul a inchis conexiunea) sau orice alta eroare: fara kill, procesul
+            # ramanea in viata pana la propriul timeout si ocupa un slot din cele MAX_CONCURRENT_RUNS.
+            _kill(proc)
+            raise
+    finally:
+        sem.release()
 
     if len(stdout) > MAX_STDOUT_BYTES:
         return _empty_result(ok=False, errors=["Script output too large"])
