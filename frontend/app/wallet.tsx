@@ -7,6 +7,7 @@ import { useIAP } from "expo-iap";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
+import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 
@@ -229,6 +230,7 @@ export default function WalletScreen() {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 40 }}>
+        <EmailVerifyCard />
         <View style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>{t("balance")}</Text>
           <View style={styles.balanceRow}>
