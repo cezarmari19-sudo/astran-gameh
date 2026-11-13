@@ -105,6 +105,9 @@ export default function LoginScreen() {
               style={styles.input}
             />
             {err ? <Text style={styles.err} testID="login-error">{err}</Text> : null}
+            <Pressable testID="login-forgot-link" onPress={() => router.push("/(auth)/forgot")} style={{ marginTop: 12 }}>
+              <Text style={styles.footerLinkText}>{t("forgot_password")}</Text>
+            </Pressable>
             <View style={{ marginTop: 16 }}>
               <PrimaryButton
                 testID="login-submit-button"
