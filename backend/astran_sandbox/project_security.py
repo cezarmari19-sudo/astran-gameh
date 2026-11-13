@@ -316,6 +316,33 @@ def email_is_configured() -> bool:
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
 
 
+def send_plain_email(to_email: str, subject: str, body: str) -> bool:
+    """Trimite un email text simplu prin acelasi SMTP ca send_recovery_code_email. Blocant: apelantul
+    il ruleaza in thread (asyncio.to_thread). Intoarce False (si logheaza) daca nu s-a putut livra."""
+    if not email_is_configured():
+        log.warning("SMTP not configured - email NOT sent to %s (%s)", to_email, subject)
+        return False
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg.set_content(body)
+    try:
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10) as srv:
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as srv:
+                srv.starttls()
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.send_message(msg)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("Email NOT sent to %s: %s", to_email, exc)
+        return False
+
+
 def send_recovery_code_email(to_email: str, code: str, *, purpose: str, game_title: Optional[str] = None) -> bool:
     subject_map = {
         "project_delete": "Confirmare stergere proiect - Astran Game Studio",
