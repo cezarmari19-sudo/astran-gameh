@@ -403,7 +403,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             log.warning("could not create game_scripts/game_assets index", exc_info=True)
         index_ready = True
 
-    async def resolve_assets(user_id: str, asset_ids: list[str]) -> list[dict]:
+    async def resolve_assets(user_id: str, asset_ids: list[str], with_parts: bool = False) -> list[dict]:
         """Din id-uri de modele din Shop, intoarce doar cele pe care userul chiar le detine
         (autor, cumparate, sau gratis+publice) — restul se ignora silentios, ca un id vechi
         (sters sau devenit privat intre timp) sa nu strice rularea jocului."""
@@ -429,7 +429,14 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             owned = it["owner_id"] == user_id or (it["price"] == 0 and it["is_public"]) or aid in purchased_ids
             if not owned:
                 continue
-            resolved.append({"id": aid, "name": it.get("name", ""), "object": it.get("object", {})})
+            entry = {"id": aid, "name": it.get("name", ""), "object": it.get("object", {})}
+            if with_parts:
+                # geometria reala (piesele modelului) - doar la cerere: scriptele Luau primesc ca pana acum
+                # numai rezumatul "object", ca sa nu umflam fisierul __assets.
+                model = it.get("model")
+                parts = model.get("parts") if isinstance(model, dict) else None
+                entry["parts"] = parts if isinstance(parts, list) else []
+            resolved.append(entry)
         return resolved
 
     async def get_game(game_id: str) -> dict:
@@ -607,7 +614,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         return {"ok": True, "files": out_files, "folders": out_folders, "rev": new_rev}
 
     @router.get("/games/{game_id}/assets")
-    async def get_game_assets(game_id: str, current=Depends(get_current_user)):
+    async def get_game_assets(game_id: str, parts: bool = False, current=Depends(get_current_user)):
         """Id-urile modelelor din Shop atasate unui joc (owner sau Editor cu acces)."""
         g = await get_game(game_id)
         access = await get_access(g, current)
@@ -616,7 +623,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         await ensure_index()
         doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
         asset_ids = doc["asset_ids"] if doc and isinstance(doc.get("asset_ids"), list) else []
-        resolved = await resolve_assets(g["owner_id"], asset_ids)
+        resolved = await resolve_assets(g["owner_id"], asset_ids, with_parts=parts)
         # pastram si id-urile care nu s-au putut rezolva (ex: itemul a fost sters), ca sa le poata scoate din lista
         resolved_ids = {a["id"] for a in resolved}
         missing = [aid for aid in asset_ids if aid not in resolved_ids]
@@ -676,6 +683,25 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             return await run_cached_files(files, assets=assets, scene=scene)
         except Exception as exc:  # noqa: BLE001
             raise sandbox_error(exc)
+
+    @router.get("/games/{game_id}/scene-models")
+    async def get_scene_models(game_id: str, current=Depends(get_current_user)):
+        """Geometria modelelor din Shop pe care scena jocului le refera (obiecte type="model").
+        Foloseste ACELASI resolver ca Assets.load (resolve_assets): se intorc doar modelele pe care
+        proprietarul jocului chiar le detine; restul apar in `missing_ids`. Acelasi acces ca Play."""
+        check_rate_limit(current["user_id"])
+        g = await get_game(game_id)
+        access = await get_access(g, current)
+        if not access.can_play:
+            raise HTTPException(status_code=403, detail="No access to play this game")
+        objs = (g.get("scene") or {}).get("objects") or []
+        wanted = list(dict.fromkeys(
+            o["assetId"] for o in objs
+            if isinstance(o, dict) and o.get("type") == "model" and isinstance(o.get("assetId"), str)
+        ))[:MAX_GAME_ASSETS]
+        resolved = await resolve_assets(g["owner_id"], wanted, with_parts=True)
+        got = {a["id"] for a in resolved}
+        return {"models": resolved, "missing_ids": [a for a in wanted if a not in got]}
 
     @router.get("/games/{game_id}/client-bundle")
     async def get_client_bundle(game_id: str, current=Depends(get_current_user)):
