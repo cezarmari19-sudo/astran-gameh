@@ -191,11 +191,9 @@ def _bundle(files: list[dict], assets: Optional[list[dict]] = None, scene: Any =
     parts: list[bytes] = []
     for f in all_files:
         data = f["source"].encode("utf-8")
-        parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"
-")
+        parts.append(b"@@FILE " + f["name"].encode("ascii") + b" " + str(len(data)).encode("ascii") + b"\n")
         parts.append(data)
-        parts.append(b"
-")
+        parts.append(b"\n")
     return b"".join(parts)
 
 
@@ -597,12 +595,10 @@ def parse_output(stdout: bytes, returncode: Optional[int]) -> dict:
     result = _empty_result()
     saw_ops = False
 
-    # split("
-") si NU splitlines(): splitlines() rupe linia si la U+2028/U+2029/U+0085/\x0b/\x0c,
+    # split("\n") si NU splitlines(): splitlines() rupe linia si la U+2028/U+2029/U+0085/\x0b/\x0c,
     # caractere pe care jsonString din prelude nu le escapeaza. Un nume cu un astfel de caracter
     # spargea linia JSON "ops" in doua jumatati invalide, iar operatiile dispareau fara eroare.
-    for line in stdout.decode("utf-8", "replace").split("
-"):
+    for line in stdout.decode("utf-8", "replace").split("\n"):
         try:
             msg = json.loads(line)
         except ValueError:
