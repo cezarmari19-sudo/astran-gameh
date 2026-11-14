@@ -23,6 +23,10 @@ _TYPE = re.compile(r"^[A-Za-z0-9_-]{1,20}\Z")
 _NUM_KEYS = ("x", "y", "z", "rx", "ry", "rz")
 _SCALE_KEYS = ("scale", "sx", "sy", "sz")
 _BOOL_KEYS = ("visible", "solid", "initial", "enabled")
+# Obiect din Shop pus in scena (type == "model"): referinta la item_id-ul REAL (acelasi id ca la
+# Assets.load) + dimensiunea naturala a modelului (folosita la coliziune in Play).
+MODEL_TYPE = "model"
+_EXTENT_KEYS = ("ex", "ey", "ez")
 
 
 def _num(v: Any, default: float, lo: float, hi: float) -> float:
@@ -51,6 +55,14 @@ def clean_scene(scene: Any) -> dict:
         if not isinstance(oid, str) or not _ID.match(oid) or not isinstance(otype, str) or not _TYPE.match(otype):
             continue   # fara id/type valid obiectul nu poate fi nici randat, nici referit
         c: dict = {"id": oid, "type": otype, "color": _color(o.get("color"), DEFAULT_OBJECT_COLOR)}
+        if otype == MODEL_TYPE:
+            asset_id = o.get("assetId")
+            if not isinstance(asset_id, str) or not _ID.match(asset_id):
+                continue   # un model fara id real nu poate fi incarcat -> nu pastram un obiect gol / placeholder
+            c["assetId"] = asset_id
+            for k in _EXTENT_KEYS:
+                if k in o:
+                    c[k] = _num(o[k], 1.0, 0.0, MAX_SCALE)
         for k in _NUM_KEYS:
             if k in o:
                 c[k] = _num(o[k], 0.0, -MAX_COORD, MAX_COORD)
