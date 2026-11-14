@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, Request
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, Field, EmailStr
 from dotenv import load_dotenv
@@ -48,6 +49,9 @@ if JWT_SECRET == _DEFAULT_DEV_SECRET or len(JWT_SECRET) < 24:
         raise RuntimeError("JWT_SECRET missing/weak: set a random value of at least 24 characters")
     logging.getLogger("astran").warning("Using an insecure development JWT_SECRET - never do this in production")
 JWT_ALG = "HS256"
+# make_jwt(issued_at=marker) pune iat cu pana la 1s in viitor (dupa reset de credentiale); PyJWT respinge
+# iat din viitor fara toleranta.
+JWT_IAT_LEEWAY = 2
 JWT_TTL_DAYS = 7
 
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
@@ -56,6 +60,21 @@ client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 app = FastAPI(title="Astran Game API")
+
+# Plafon pentru corpul cererilor: nu exista altul (uvicorn nu pune limita), iar un POST/PUT de sute de MB
+# ajungea in memoria procesului inainte de orice validare Pydantic. Cele mai mari corpuri legitime
+# (proiect cu fisiere, model 3D, poze base64) sunt de ordinul MB. Limita se aplica pe Content-Length;
+# corpurile "chunked" fara Content-Length nu sunt acoperite aici (le limiteaza reverse proxy-ul).
+MAX_REQUEST_BYTES = int(os.environ.get("ASTRAN_MAX_REQUEST_BYTES", str(12 * 1024 * 1024)))
+
+
+@app.middleware("http")
+async def _limit_request_size(request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_REQUEST_BYTES:
+        from starlette.responses import JSONResponse
+        return JSONResponse({"detail": "Request body too large"}, status_code=413)
+    return await call_next(request)
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -92,6 +111,11 @@ for _name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "websockets", "w
 _register_limiter = SlidingWindowLimiter(10, 3600)    # conturi noi / ora / IP
 _login_ip_limiter = SlidingWindowLimiter(30, 600)     # incercari de login / 10 min / IP
 _report_limiter = SlidingWindowLimiter(10, 3600)      # rapoarte / ora / utilizator
+_friend_req_limiter = SlidingWindowLimiter(30, 3600)    # cereri de prietenie / ora / utilizator
+_user_search_limiter = SlidingWindowLimiter(60, 60)     # cautari de utilizatori / minut / utilizator
+MAX_PENDING_FRIEND_REQUESTS = 100
+_BLOCK_ADULT_TO_MINOR_REQUESTS = os.environ.get("ASTRAN_BLOCK_ADULT_TO_MINOR_FRIEND_REQUESTS", "0") == "1"
+_transfer_limiter = SlidingWindowLimiter(30, 3600)    # transferuri de Astrans / ora / utilizator
 
 
 def _client_ip(request: Request) -> str:
@@ -109,6 +133,24 @@ def _client_ip(request: Request) -> str:
             if parts:
                 return parts[-hops] if len(parts) >= hops else parts[0]
     return request.client.host if request.client else "unknown"
+
+
+def _clean_image_or_400(value, **kw):
+    try:
+        return clean_image_ref(value, **kw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _clean_scene_or_400(scene):
+    try:
+        return clean_scene(scene)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# Singurele hosturi externe acceptate pentru avatar: pozele de profil Google
+_AVATAR_HTTPS_HOSTS = ("googleusercontent.com",)
 
 
 def _too_many(wait: int) -> HTTPException:
@@ -202,6 +244,10 @@ import astran_sandbox.project_security as psec
 # Mutari de Astrans sigure la cadere (jurnal + pasi idempotenti) - vezi astran_sandbox/money.py.
 # NU e optional: fara el, platile/transferurile ar reveni la varianta cu pasi neatomici.
 from astran_sandbox import money
+from astran_sandbox import payment_reversal as preversal
+from astran_sandbox import email_verification as emailver
+from astran_sandbox.media_validation import clean_image_ref
+from astran_sandbox.scene_validation import clean_scene
 
 
 def now_utc() -> datetime:
@@ -232,10 +278,66 @@ async def verify_pw_async(pw: str, pw_hash: str) -> bool:
     return await asyncio.to_thread(verify_pw, pw, pw_hash)
 
 
-def make_jwt(user_id: str) -> str:
+PLAY_COUNT_COOLDOWN = timedelta(minutes=30)
+
+
+def _play_counts(prev: Optional[dict], now: datetime) -> bool:
+    """True daca acest play se numara in total_plays: prima data pentru (user, joc) sau dupa cooldown."""
+    if not prev:
+        return True
+    last = prev.get("played_at")
+    if not isinstance(last, datetime):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return now - last >= PLAY_COUNT_COOLDOWN
+
+
+WELCOME_BONUS = 100
+
+
+async def _claim_welcome_bonus(user_id: str) -> bool:
+    """Acorda bonusul de bun-venit O SINGURA DATA, dupa verificarea emailului. Idempotent la
+    cadere de proces: randul de ledger are tx_id determinist (unic), iar `welcome_bonus_pending`
+    se consuma atomic, deci nici retry-ul, nici doua verificari paralele nu dubleaza bonusul."""
+    if not await db.users.find_one({"user_id": user_id, "welcome_bonus_pending": True}, {"_id": 1}):
+        return False
+    try:
+        await db.astran_ledger.insert_one({
+            "tx_id": f"txwb_{user_id}", "user_id": user_id, "counterparty_id": "system",
+            "type": "welcome_bonus", "amount": WELCOME_BONUS, "fee": 0, "net": WELCOME_BONUS,
+            "status": "completed", "timestamp": now_utc(), "reference": "email_verified",
+        })
+    except DuplicateKeyError:
+        pass
+    res = await db.users.update_one({"user_id": user_id, "welcome_bonus_pending": True},
+                                    {"$set": {"welcome_bonus_pending": False},
+                                     "$inc": {"astrans_balance": WELCOME_BONUS}})
+    return res.matched_count == 1
+
+
+def _jwt_predates_reset(payload: dict, user: Optional[dict]) -> bool:
+    """True daca JWT-ul a fost emis ÎNAINTE de `sessions_valid_after` (resetare de credentiale)."""
+    after = (user or {}).get("sessions_valid_after")
+    if not isinstance(after, datetime):
+        return False
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=timezone.utc)
+    iat = payload.get("iat")
+    return not isinstance(iat, (int, float)) or iat < int(after.timestamp())
+
+
+def _credentials_reset_marker() -> datetime:
+    """Valoarea pentru `sessions_valid_after`: cu 1s IN VIITOR. `iat` are rezolutie de o secunda, deci
+    orice JWT emis pana acum (inclusiv in aceeasi secunda) are iat < marker si cade; un JWT emis dupa
+    resetare (iat >= marker, vezi make_jwt(issued_at=...)) trece."""
+    return now_utc() + timedelta(seconds=1)
+
+
+def make_jwt(user_id: str, issued_at: Optional[int] = None) -> str:
     payload = {
         "sub": user_id,
-        "iat": int(now_utc().timestamp()),
+        "iat": issued_at if issued_at is not None else int(now_utc().timestamp()),
         "exp": int((now_utc() + timedelta(days=JWT_TTL_DAYS)).timestamp()),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
@@ -297,7 +399,7 @@ class GameCreateBody(BaseModel):
     age_category: AgeCategory = "under_18"
     is_public: bool = True
     thumbnail_url: Optional[str] = None
-    category: str = "adventure"
+    category: str = Field(default="adventure", max_length=40)
     # GENRE/SUBGENRE: "category" de mai sus e deja folosit ca Genre (lista fixa existenta in
     # UI: adventure/shooter/...); subgenre e liber, optional, NU inventa o valoare daca lipseste.
     subgenre: Optional[str] = Field(default=None, max_length=40)
@@ -324,7 +426,7 @@ class GameUpdateBody(BaseModel):
     age_category: Optional[AgeCategory] = None
     is_public: Optional[bool] = None
     thumbnail_url: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[str] = Field(default=None, max_length=40)
     subgenre: Optional[str] = Field(default=None, max_length=40)
     scene: Optional[dict] = None
     script: Optional[str] = Field(default=None, max_length=20000)
@@ -432,8 +534,11 @@ async def resolve_user_from_token(token: str) -> Optional[dict]:
         return _strip_secret(await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0}))
 
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        return _strip_secret(await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0}))
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG], leeway=JWT_IAT_LEEWAY)
+        u = await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0})
+        if _jwt_predates_reset(payload, u):
+            return None
+        return _strip_secret(u)
     except jwt.PyJWTError:
         return None
 
@@ -491,6 +596,12 @@ async def startup():
     # (cadere de proces intre debit si credit/ledger) - vezi astran_sandbox/money.py.
     await money.ensure_indexes(db)
     app.state.money_recovery_task = asyncio.create_task(money.recovery_loop(db))
+    await db.payment_reversed_refs.create_index("ref", unique=True)
+    await db.email_verifications.create_index("user_id", unique=True)
+    await db.password_resets.create_index("user_id", unique=True)
+    await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
+    await db.email_verifications.create_index("expires_at", expireAfterSeconds=0)
+    app.state.google_voided_task = asyncio.create_task(_google_voided_loop())
     await db.reports.create_index("report_id", unique=True)
     await db.recently_played.create_index([("user_id", 1), ("played_at", -1)])
     # Server instances: mai multe "camere" pentru acelasi joc, fiecare cu propriul plafon de jucatori.
@@ -569,6 +680,9 @@ async def shutdown():
     task = getattr(app.state, "money_recovery_task", None)
     if task is not None:
         task.cancel()
+    gtask = getattr(app.state, "google_voided_task", None)
+    if gtask is not None:
+        gtask.cancel()
     client.close()
 
 
@@ -580,6 +694,7 @@ def _user_public(user: dict) -> dict:
         out["has_password"] = bool(user["has_password"])
     elif "password_hash" in user:
         out["has_password"] = bool(user["password_hash"])
+    out["email_verified"] = bool(user.get("email_verified"))
     return out
 
 
@@ -640,7 +755,12 @@ async def register(body: RegisterBody, request: Request):
         # Categoria de varsta declarata la inregistrare e FINALA pentru API (nu se poate ridica la
         # 18+ ulterior). NOTA: e o declaratie, nu o verificare - vezi update_me.
         "age_locked": True,
-        "astrans_balance": 100,
+        # Emailul nu e verificat la inregistrare. Cu SMTP configurat, bonusul de bun-venit se acorda
+        # DOAR dupa verificare (altfel: conturi-farm cu adrese inventate = Astrans gratis). Fara
+        # SMTP (dev) verificarea nu se poate face, deci ramane comportamentul vechi.
+        "email_verified": False,
+        "astrans_balance": 0 if psec.email_is_configured() else WELCOME_BONUS,
+        "welcome_bonus_pending": bool(psec.email_is_configured()),
         "language": body.language,
         "is_platform_owner": False,
         "is_platform_admin": False,
@@ -650,18 +770,19 @@ async def register(body: RegisterBody, request: Request):
         await db.users.insert_one(doc)
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Email or username already exists")
-    await db.astran_ledger.insert_one({
-        "tx_id": new_id("tx_"),
-        "user_id": user_id,
-        "counterparty_id": "system",
-        "type": "welcome_bonus",
-        "amount": 100,
-        "fee": 0,
-        "net": 100,
-        "status": "completed",
-        "timestamp": now_utc(),
-        "reference": "signup",
-    })
+    if not psec.email_is_configured():
+        await db.astran_ledger.insert_one({
+            "tx_id": new_id("tx_"),
+            "user_id": user_id,
+            "counterparty_id": "system",
+            "type": "welcome_bonus",
+            "amount": WELCOME_BONUS,
+            "fee": 0,
+            "net": WELCOME_BONUS,
+            "status": "completed",
+            "timestamp": now_utc(),
+            "reference": "signup",
+        })
     token = make_jwt(user_id)
     return {"token": token, "session_token": token, "user": _user_public(doc)}
 
@@ -708,17 +829,37 @@ async def google_session(body: SessionBody):
     if not email:
         raise HTTPException(status_code=401, detail="No email in session")
     name = data.get("name") or email.split("@")[0]
-    picture = data.get("picture")
+    try:
+        picture = clean_image_ref(data.get("picture"), https_hosts=_AVATAR_HTTPS_HOSTS)
+    except ValueError:
+        picture = None   # poza nevalida de la broker nu se stocheaza (contul se creeaza oricum)
     session_token = data.get("session_token") or secrets.token_urlsafe(32)
 
-    existing = await db.users.find_one({"email": email})
+    # case-insensitive, ca in /auth/register (emailul se salveaza cu litere mici acolo): fara asta,
+    # "User@Gmail.com" de la Google nu gasea contul "user@gmail.com" si crea un cont duplicat.
+    existing = await db.users.find_one({"email": {"$regex": f"^{re.escape(email.strip())}$", "$options": "i"}})
+    password_login_reset = False
     if existing:
         user_id = existing["user_id"]
         patch = {"display_name": existing.get("display_name") or name}
         # poza Google se pune doar daca userul nu are una si nu a sters-o explicit (update_me)
         if not existing.get("avatar_url") and not existing.get("avatar_cleared"):
             patch["avatar_url"] = picture
+        if not existing.get("email_verified"):
+            # PRE-HIJACKING: emailul acestui cont nu a fost niciodata verificat, deci cine l-a
+            # inregistrat cu parola a putut fi ORICINE (nu neaparat proprietarul adresei). Google tocmai
+            # a dovedit ca utilizatorul curent detine adresa => contul ii apartine lui; orice parola
+            # setata inainte de verificare este stearsa, iar sesiunile / JWT-urile vechi sunt invalidate.
+            patch["email_verified"] = True
+            patch["email_verified_at"] = now_utc()
+            if existing.get("password_hash"):
+                patch["password_hash"] = None
+                patch["sessions_valid_after"] = _credentials_reset_marker()
+                password_login_reset = True
         await db.users.update_one({"user_id": user_id}, {"$set": patch})
+        if password_login_reset:
+            await db.user_sessions.delete_many({"user_id": user_id})
+        await _claim_welcome_bonus(user_id)
         user = await db.users.find_one({"user_id": user_id})
     else:
         user_id = new_id("user_")
@@ -734,6 +875,7 @@ async def google_session(body: SessionBody):
             "username": username,
             "display_name": name,
             "password_hash": None,
+            "email_verified": True,   # emailul vine de la Google (proprietatea adresei e dovedita)
             "avatar_url": picture,
             "age_category": "under_18",
             "astrans_balance": 100,
@@ -755,7 +897,151 @@ async def google_session(body: SessionBody):
         "created_at": now_utc(),
         "expires_at": now_utc() + timedelta(days=7),
     })
-    return {"session_token": session_token, "token": session_token, "user": _user_public(user)}
+    resp_body = {"session_token": session_token, "token": session_token, "user": _user_public(user)}
+    if password_login_reset:
+        # clientul poate informa utilizatorul: parola veche nu mai e valida (autentificare doar Google)
+        resp_body["password_login_reset"] = True
+    return resp_body
+
+
+class EmailCodeBody(BaseModel):
+    code: str = Field(min_length=4, max_length=12)
+
+
+_email_send_limiter = SlidingWindowLimiter(5, 3600)   # coduri de verificare trimise / ora / utilizator
+
+
+@api.post("/auth/email/send-code")
+async def email_send_code(current=Depends(get_current_user)):
+    """Trimite pe emailul contului un cod de verificare (15 min, 5 incercari, retrimitere la 60s)."""
+    if current.get("email_verified"):
+        return {"already_verified": True}
+    if not psec.email_is_configured():
+        raise HTTPException(status_code=503, detail="Email service is not configured")
+    wait = _email_send_limiter.hit(current["user_id"])
+    if wait is not None:
+        raise _too_many(wait)
+    try:
+        code = await emailver.issue(db, current["user_id"], current["email"])
+    except emailver.VerificationError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail,
+                            headers={"Retry-After": str(e.retry_after)} if e.retry_after else None)
+    sent = await asyncio.to_thread(
+        psec.send_plain_email, current["email"], "Verifica emailul - Astran Game",
+        f"Codul tau de verificare este: {code}\n\nExpira in {emailver.CODE_TTL_MINUTES} minute si poate fi "
+        "folosit o singura data. Daca nu ai creat tu un cont Astran Game, ignora acest email.")
+    if not sent:
+        raise HTTPException(status_code=502, detail="Could not send the verification email")
+    return {"sent": True, "expires_in_minutes": emailver.CODE_TTL_MINUTES}
+
+
+@api.post("/auth/email/verify")
+async def email_verify(body: EmailCodeBody, current=Depends(get_current_user)):
+    if current.get("email_verified"):
+        return {"user": _user_public(current)}
+    try:
+        await emailver.verify(db, current["user_id"], current["email"], body.code)
+    except emailver.VerificationError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    await db.users.update_one({"user_id": current["user_id"]},
+                              {"$set": {"email_verified": True, "email_verified_at": now_utc()}})
+    await _claim_welcome_bonus(current["user_id"])
+    user = await db.users.find_one({"user_id": current["user_id"]}, {"_id": 0})
+    return {"user": _user_public(_strip_secret(user))}
+
+
+# ---------------- parola contului: recuperare (email) si schimbare ----------------
+
+class ForgotPasswordBody(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordBody(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=12)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str = Field(max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+_PW_RESET_COLLECTION = "password_resets"
+_forgot_ip_limiter = SlidingWindowLimiter(5, 3600)        # cereri "am uitat parola" / ora / IP
+_pw_change_limiter = SlidingWindowLimiter(10, 3600)       # incercari schimbare parola / ora / utilizator
+
+
+async def _send_reset_email(email: str, code: str) -> None:
+    await asyncio.to_thread(
+        psec.send_plain_email, email, "Resetare parola - Astran Game",
+        f"Codul tau pentru resetarea parolei este: {code}\n\nExpira in {emailver.CODE_TTL_MINUTES} minute si "
+        "poate fi folosit o singura data. Daca nu ai cerut tu resetarea, ignora acest email: parola ta ramane "
+        "neschimbata.")
+
+
+@api.post("/auth/password/forgot")
+async def password_forgot(body: ForgotPasswordBody, request: Request):
+    """Trimite un cod de resetare DOAR pe un email verificat. Raspunsul e IDENTIC indiferent daca contul
+    exista (fara enumerare de conturi); trimiterea ruleaza in fundal ca sa nu se vada nici din timp."""
+    wait = _forgot_ip_limiter.hit(_client_ip(request))
+    if wait is not None:
+        raise _too_many(wait)
+    if not psec.email_is_configured():
+        raise HTTPException(status_code=503, detail="Email service is not configured")
+    email = body.email.strip().lower()
+    user = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}},
+                                   {"_id": 0, "user_id": 1, "email": 1, "email_verified": 1})
+    if user and user.get("email_verified"):
+        try:
+            code = await emailver.issue(db, user["user_id"], user["email"], collection=_PW_RESET_COLLECTION)
+        except emailver.VerificationError:
+            code = None   # cooldown: raspundem la fel, fara sa trimitem inca un cod
+        if code:
+            asyncio.create_task(_send_reset_email(user["email"], code))
+    return {"ok": True, "message": "If the account exists and its email is verified, a code was sent."}
+
+
+@api.post("/auth/password/reset")
+async def password_reset(body: ResetPasswordBody, request: Request):
+    wait = _forgot_ip_limiter.hit("reset:" + _client_ip(request))
+    if wait is not None:
+        raise _too_many(wait)
+    email = body.email.strip().lower()
+    user = await db.users.find_one({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}},
+                                   {"_id": 0, "user_id": 1, "email": 1, "email_verified": 1})
+    generic = HTTPException(status_code=400, detail="Invalid or expired code")
+    if not user or not user.get("email_verified"):
+        raise generic
+    try:
+        await emailver.verify(db, user["user_id"], user["email"], body.code, collection=_PW_RESET_COLLECTION)
+    except emailver.VerificationError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {
+        "password_hash": await hash_pw_async(body.new_password),
+        "sessions_valid_after": _credentials_reset_marker(),
+    }})
+    await db.user_sessions.delete_many({"user_id": user["user_id"]})   # toate sesiunile vechi cad
+    return {"ok": True}
+
+
+@api.post("/auth/password/change")
+async def password_change(body: ChangePasswordBody, request: Request, current=Depends(get_current_user)):
+    wait = _pw_change_limiter.hit(current["user_id"])
+    if wait is not None:
+        raise _too_many(wait)
+    doc = await db.users.find_one({"user_id": current["user_id"]}, {"_id": 0, "password_hash": 1})
+    if not doc or not doc.get("password_hash"):
+        raise HTTPException(status_code=409, detail="This account has no password; use password reset by email")
+    if not await verify_pw_async(body.current_password, doc["password_hash"]):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    marker = _credentials_reset_marker()
+    await db.users.update_one({"user_id": current["user_id"]}, {"$set": {
+        "password_hash": await hash_pw_async(body.new_password), "sessions_valid_after": marker}})
+    await db.user_sessions.delete_many({"user_id": current["user_id"]})
+    # token NOU, emis exact la marker: cel folosit pentru aceasta cerere (si orice altul vechi) nu mai e valid
+    token = make_jwt(current["user_id"], issued_at=int(marker.timestamp()))
+    return {"ok": True, "token": token, "session_token": token}
 
 
 @api.get("/auth/me")
@@ -772,7 +1058,7 @@ async def logout(authorization: Optional[str] = Header(None)):
         # Doar token-uri CU semnatura valida: altfel oricine ar putea umple colectia cu
         # siruri arbitrare. Un al doilea logout cu acelasi token nu mai da 500 (index unic).
         try:
-            jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+            jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG], leeway=JWT_IAT_LEEWAY)
         except jwt.PyJWTError:
             return {"ok": True}
         try:
@@ -817,8 +1103,8 @@ async def update_me(body: UpdateProfileBody, current=Depends(get_current_user)):
             raise HTTPException(status_code=400, detail="display_name must be 1-40 characters")
     if "language" in updates and not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?", updates["language"]):
         raise HTTPException(status_code=400, detail="Invalid language code")
-    if updates.get("avatar_url") and len(updates["avatar_url"]) > 500_000:
-        raise HTTPException(status_code=400, detail="avatar_url too large")
+    if updates.get("avatar_url"):
+        updates["avatar_url"] = _clean_image_or_400(updates["avatar_url"], https_hosts=_AVATAR_HTTPS_HOSTS)
     if updates:
         updates["updated_at"] = now_utc()
         await db.users.update_one({"user_id": current["user_id"]}, {"$set": updates})
@@ -831,6 +1117,9 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
     q = (q or "").strip()[:32]
     if len(q) < 2:
         return {"users": []}
+    wait = _user_search_limiter.hit(current["user_id"])   # 60 / minut: opreste enumerarea in masa a conturilor
+    if wait is not None:
+        raise _too_many(wait)
     # SECURITY: q e escapat (altfel e regex controlat de atacator = ReDoS) iar raspunsul contine
     # DOAR profilul public (fara email / sold / limba / rol - vezi _user_public_minimal).
     rx = {"$regex": re.escape(q), "$options": "i"}
@@ -877,8 +1166,6 @@ def _game_defaults(doc: dict) -> dict:
     doc["created_at"] = doc.get("published_created_at")
     doc["updated_at"] = doc.get("published_updated_at")
     return doc
-
-
 async def _attach_group_info(games: list[dict]) -> list[dict]:
     """GROUPS: adauga group_name/group_logo_url (niciodata tokenul) pe fiecare joc care
     are group_id - un singur query batch, nu N+1, indiferent cate jocuri sunt in lista."""
@@ -1341,7 +1628,7 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "description": body.description,
         "age_category": body.age_category,
         "is_public": body.is_public,
-        "thumbnail_url": body.thumbnail_url,
+        "thumbnail_url": _clean_image_or_400(body.thumbnail_url, any_https=True),
         "category": body.category,
         "subgenre": body.subgenre,
         "group_id": group_id,
@@ -1353,7 +1640,7 @@ async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
         "published_updated_at": published_ts,
         "status": "active",
         "allow_join_via_friends": body.allow_join_via_friends,
-        "scene": body.scene or {"objects": [], "sky": "#0F1012", "ground": "#1A1D21"},
+        "scene": _clean_scene_or_400(body.scene) if body.scene else {"objects": [], "sky": "#0F1012", "ground": "#1A1D21"},
         "script": body.script,
         "max_players": body.max_players,
         "player_character_model_id": pc_id,
@@ -1397,6 +1684,10 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
         ).items()
         if v is not None
     }
+    if "thumbnail_url" in updates:
+        updates["thumbnail_url"] = _clean_image_or_400(updates["thumbnail_url"], any_https=True)
+    if "scene" in updates:
+        updates["scene"] = _clean_scene_or_400(updates["scene"])
     # "" = acelasi lucru cu clear_player_character
     clear_character = bool(body.clear_player_character) or updates.get("player_character_model_id") == ""
     character_touched = clear_character or ("player_character_model_id" in updates)
@@ -1660,7 +1951,9 @@ async def reset_password_start(game_id: str, body: RecoveryStartBody, request: R
 
     user = await db.users.find_one({"user_id": current["user_id"]})
     await _reauth_account_password(user, body.account_password, game_id=game_id, purpose="password_reset", action="password_reset", ip=ip)
-    if not user.get("email"):
+    if not user.get("email") or not user.get("email_verified"):
+        # codul de recuperare merge pe email: daca adresa nu e dovedita (POST /auth/email/verify), cine a
+        # inregistrat contul cu un email strain ar primi codurile de recuperare ale proiectelor
         raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
 
     tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_password_reset")
@@ -1723,7 +2016,9 @@ async def recover_start(game_id: str, body: RecoveryStartBody, request: Request,
     await psec.ensure_rate_limit_or_raise(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
     user = await db.users.find_one({"user_id": current["user_id"]})
     await _reauth_account_password(user, body.account_password, game_id=game_id, purpose="project_recover", action="project_recover", ip=ip)
-    if not user.get("email"):
+    if not user.get("email") or not user.get("email_verified"):
+        # codul de recuperare merge pe email: daca adresa nu e dovedita (POST /auth/email/verify), cine a
+        # inregistrat contul cu un email strain ar primi codurile de recuperare ale proiectelor
         raise HTTPException(status_code=409, detail="Contul nu are un email verificat - recuperarea nu este posibila")
 
     tok = await psec.create_recovery_token(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover")
@@ -1849,8 +2144,7 @@ async def my_games(current=Depends(get_current_user)):
     cursor = db.games.find(
         {"owner_id": current["user_id"], "deleted": {"$ne": True}}, {"_id": 0, "script": 0}
     ).sort("created_at", -1)
-    games = await _attach_live_player_counts(
-        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
+    games = await _attach_live_player_counts(        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
     )
     return {"games": games}
 
@@ -2058,17 +2352,20 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
         {"$set": {"instance_id": instance["instance_id"], "user_id": current["user_id"], "last_seen": now_utc()}},
         upsert=True,
     )
-    if joined.upserted_id is not None:
-        await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1}})
-    elif not already:
+    if joined.upserted_id is None and not already:
         # Randul exista deja (cerere concurenta / dublu-tap): am incrementat player_count in plus.
         await db.game_instances.update_one(
             {"instance_id": instance["instance_id"], "player_count": {"$gt": 0}}, {"$inc": {"player_count": -1}})
-    await db.recently_played.update_one(
+    prev_play = await db.recently_played.find_one_and_update(
         {"user_id": current["user_id"], "game_id": game_id},
         {"$set": {"played_at": now_utc()}},
-        upsert=True,
+        upsert=True, return_document=ReturnDocument.BEFORE,
     )
+    # total_plays alimenteaza Discover / For You / Trending. Inainte, fiecare iesire + reintrare
+    # (leave -> play) il incrementa, deci un singur cont il umfla nelimitat. Acum un utilizator
+    # conteaza O DATA pe fereastra PLAY_COUNT_COOLDOWN pentru acelasi joc.
+    if joined.upserted_id is not None and _play_counts(prev_play, now_utc()):
+        await db.games.update_one({"game_id": game_id}, {"$inc": {"total_plays": 1}})
 
     return {
         "ok": True,
@@ -2163,9 +2460,20 @@ async def list_requests(current=Depends(get_current_user)):
 async def send_request(body: FriendRequestBody, current=Depends(get_current_user)):
     if body.target_user_id == current["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot friend yourself")
+    # Fara limite, un cont putea trimite cereri in masa (spam / abordare de minori gasiti prin /users/search).
+    wait = _friend_req_limiter.hit(current["user_id"])
+    if wait is not None:
+        raise _too_many(wait)
+    if await db.friend_requests.count_documents({"from_id": current["user_id"], "status": "pending"}) >= MAX_PENDING_FRIEND_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many pending friend requests")
     target = await db.users.find_one({"user_id": body.target_user_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    # Politica optionala (decizie de produs, implicit OFF): un adult nu poate TRIMITE cereri catre un cont
+    # sub 18 ani. Prietenia ramane posibila daca minorul trimite el primul cererea.
+    if _BLOCK_ADULT_TO_MINOR_REQUESTS and current.get("age_category") == "adult_18" \
+            and target.get("age_category") == "under_18":
+        raise HTTPException(status_code=403, detail="Adults cannot send friend requests to under-18 accounts")
     a, b = _pair(current["user_id"], body.target_user_id)
     if await db.friendships.find_one({"user_a": a, "user_b": b}):
         raise HTTPException(status_code=409, detail="Already friends")
@@ -2294,6 +2602,11 @@ async def transfer_preview(body: TransferBody, current=Depends(get_current_user)
 
 @api.post("/wallet/transfer")
 async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)):
+    # 30 transferuri / ora / utilizator: un transfer legitim e rar; un script care muta bonusuri
+    # sau "spala" Astrans prin multe conturi e oprit (limita e per proces, ca celelalte).
+    wait = _transfer_limiter.hit(current["user_id"])
+    if wait is not None:
+        raise _too_many(wait)
     if body.recipient_user_id == current["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot transfer to self")
     recipient = await db.users.find_one({"user_id": body.recipient_user_id})
@@ -2431,7 +2744,10 @@ class StripeProvider(PaymentProvider):
             return VerifyResult(False, detail="Invalid Stripe payment intent")
         async with httpx.AsyncClient(timeout=10.0) as h:
             try:
-                r = await h.get(f"https://api.stripe.com/v1/payment_intents/{token}", auth=(api_key, ""))
+                # expand latest_charge: PaymentIntent.status ramane "succeeded" si dupa un refund /
+                # dispute, deci rambursarea se vede DOAR pe charge (refunded / disputed).
+                r = await h.get(f"https://api.stripe.com/v1/payment_intents/{token}", auth=(api_key, ""),
+                                params={"expand[]": "latest_charge"})
             except Exception as e:  # noqa: BLE001
                 log.error("Stripe verify error: %s", e)
                 return VerifyResult(False, detail="Stripe verification failed", transient=True)
@@ -2447,6 +2763,11 @@ class StripeProvider(PaymentProvider):
         meta = data.get("metadata") or {}
         if meta.get("astran_user_id") != user.get("user_id") or meta.get("package_id") != package.get("package_id"):
             return VerifyResult(False, detail="This payment does not belong to this account/package")
+        charge = data.get("latest_charge")
+        if isinstance(charge, dict) and (charge.get("refunded") or charge.get("disputed")):
+            return VerifyResult(False, detail="This payment was refunded or disputed")
+        if await db.payment_reversed_refs.find_one({"ref": token}, {"_id": 1}):
+            return VerifyResult(False, detail="This payment was refunded or disputed")
         expected_cur = str(package.get("currency", "")).lower()
         cur_ok = (not expected_cur) or str(data.get("currency", "")).lower() == expected_cur
         ok = (data.get("status") == "succeeded" and cur_ok
@@ -2551,10 +2872,40 @@ class GooglePlayProvider(PaymentProvider):
         # purchaseState: 0 = achitata, 1 = anulata, 2 = in asteptare (ex: plata in numerar)
         if data.get("purchaseState") != 0:
             return VerifyResult(False, detail="Purchase not completed")
+        if await db.payment_reversed_refs.find_one({"ref": token}, {"_id": 1}):
+            return VerifyResult(False, detail="This purchase was refunded")
         return VerifyResult(True, external_id=token)
+
+    async def acknowledge(self, token: str, product_id: str) -> bool:
+        """Confirma achizitia la Google DIN SERVER dupa creditare. Fara confirmare, Google ramburseaza
+        automat dupa 3 zile; confirmarea facuta doar de client (finishTransaction) poate fi sarita de
+        un client modificat, care ar pastra Astransii si ar primi banii inapoi. Best-effort: o
+        achizitie deja confirmata/consumata de client intoarce 400, ceea ce e in regula."""
+        pkg_name = os.environ.get("GOOGLE_PLAY_PACKAGE_NAME")
+        access_token = await _google_access_token()
+        if not pkg_name or not access_token:
+            return False
+        from urllib.parse import quote
+        url = (f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+               f"{quote(pkg_name, safe='')}/purchases/products/{quote(product_id, safe='')}/tokens/"
+               f"{quote(token, safe='')}:acknowledge")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as h:
+                r = await h.post(url, headers={"Authorization": f"Bearer {access_token}"}, json={})
+        except Exception as e:  # noqa: BLE001
+            log.warning("Google acknowledge failed: %s", e)
+            return False
+        return r.status_code in (200, 204)
 
 
 # ---------- Apple: verificare REALA prin App Store receipt validation ----------
+def _apple_sandbox_allowed(user: dict) -> bool:
+    """True doar daca user_id-ul e in lista explicita ASTRAN_APPLE_SANDBOX_USER_IDS (separata prin virgula)."""
+    raw = os.environ.get("ASTRAN_APPLE_SANDBOX_USER_IDS", "")
+    allowed = {x.strip() for x in raw.split(",") if x.strip()}
+    return bool(user and user.get("user_id") in allowed)
+
+
 class AppleProvider(PaymentProvider):
     name = "apple"
 
@@ -2570,15 +2921,25 @@ class AppleProvider(PaymentProvider):
         data = await self._call(body, "https://buy.itunes.apple.com/verifyReceipt")
         if data is None:
             return VerifyResult(False, detail="Apple verification failed", transient=True)
-        # 21007: chitanta de test (sandbox) trimisa din greseala la serverul de productie -
-        # reincercam automat pe serverul de sandbox, exact cum recomanda documentatia Apple.
+        # 21007: chitanta de test (sandbox) trimisa la serverul de productie. SECURITY: o chitanta
+        # de sandbox se obtine GRATIS (TestFlight / tester sandbox), deci creditarea ei cu Astrans
+        # reali = Astrans gratis pentru oricine. Reincercarea pe sandbox si creditarea sunt permise
+        # DOAR pentru conturile din ASTRAN_APPLE_SANDBOX_USER_IDS (ex: contul de test folosit de
+        # App Review); pentru oricine altcineva chitanta de sandbox e respinsa.
+        sandbox_ok = _apple_sandbox_allowed(user)
         if data.get("status") == 21007:
+            if not sandbox_ok:
+                return VerifyResult(False, detail="Sandbox receipts are not accepted for this account")
             data = await self._call(body, "https://sandbox.itunes.apple.com/verifyReceipt")
             if data is None:
                 return VerifyResult(False, detail="Apple verification failed", transient=True)
 
         if data.get("status") != 0:
             return VerifyResult(False, detail=f"Apple rejected receipt (status {data.get('status')})")
+        # defensiv: chiar si pe raspunsul serverului de productie, un `environment` = Sandbox
+        # inseamna aceeasi chitanta gratuita - aceeasi regula.
+        if str(data.get("environment", "")).lower() == "sandbox" and not sandbox_ok:
+            return VerifyResult(False, detail="Sandbox receipts are not accepted for this account")
 
         # fail-closed: fara APPLE_BUNDLE_ID se foloseste bundle id-ul aplicatiei (app.json)
         bundle_id = os.environ.get("APPLE_BUNDLE_ID") or "com.emergent.astranforge.wnjr5i"
@@ -2684,6 +3045,8 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         log.exception("could not journal verified payment")
         raise HTTPException(status_code=503, detail="Could not record the purchase, try again - you will not be charged twice")
     await money.run(db, op_id)
+    if provider.name == "google_play" and result.external_id:
+        await provider.acknowledge(result.external_id, package["package_id"])
     return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
 
 
@@ -2730,6 +3093,91 @@ async def stripe_create_intent(body: StripeIntentBody, current=Depends(get_curre
     data = r.json()
     return {"payment_intent_id": data["id"], "client_secret": data.get("client_secret"),
             "amount": data.get("amount"), "currency": data.get("currency")}
+
+
+@api.post("/wallet/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Webhook Stripe (refund total / dispute): retrage Astransii cumparati cu plata respectiva.
+    Autentificat DOAR prin semnatura Stripe (STRIPE_WEBHOOK_SECRET), nu prin token de utilizator."""
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Stripe webhook is not configured")
+    payload = await request.body()
+    if len(payload) > 1_000_000:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    if not preversal.verify_stripe_signature(payload, request.headers.get("stripe-signature", ""), secret):
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    ref = preversal.stripe_reversal_ref(event)
+    if ref:
+        pi, reason = ref
+        # tombstone INAINTE: daca plata nu a fost inca creditata (userul nu a apelat inca /wallet/buy),
+        # verify() o va refuza ulterior.
+        try:
+            await db.payment_reversed_refs.insert_one({"ref": pi, "reason": reason, "at": now_utc()})
+        except DuplicateKeyError:
+            pass
+        outcome = await preversal.reverse_purchase(db, pi, reason)
+        log.warning("stripe %s for %s -> %s", reason, pi, outcome)
+    elif isinstance(event, dict) and event.get("type") == "charge.refunded":
+        # refund PARTIAL: nu se retrage automat; il lasam intr-o coada pentru verificare manuala
+        log.warning("stripe partial refund needs manual review: %s", str((event.get("data") or {}).get("object", {}).get("id")))
+        await db.payment_alerts.insert_one({"kind": "partial_refund", "event_id": event.get("id"), "at": now_utc()})
+    return {"received": True}
+
+
+_GOOGLE_VOIDED_INTERVAL = 900  # secunde
+
+
+async def _reconcile_google_voided() -> int:
+    """Citeste achizitiile ANULATE/RAMBURSATE de Google si retrage Astransii corespunzatori."""
+    pkg_name = os.environ.get("GOOGLE_PLAY_PACKAGE_NAME")
+    if not pkg_name or not os.environ.get("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"):
+        return 0
+    access_token = await _google_access_token()
+    if not access_token:
+        return 0
+    from urllib.parse import quote
+    cp = await db.platform_config.find_one({"key": "google_voided_checkpoint"}, {"_id": 0})
+    now_ms = int(now_utc().timestamp() * 1000)
+    # Google pastreaza ~30 zile; la prima rulare luam ultimele 7 zile, apoi cu 1h suprapunere
+    start_ms = max(now_ms - 7 * 86400_000, int(cp["at_ms"]) - 3600_000) if cp else now_ms - 7 * 86400_000
+    base = (f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+            f"{quote(pkg_name, safe='')}/purchases/voidedpurchases")
+    params: dict = {"startTime": str(start_ms), "type": "0", "maxResults": "100"}
+    reversed_n = 0
+    async with httpx.AsyncClient(timeout=15.0) as h:
+        for _ in range(10):  # plafon de pagini
+            r = await h.get(base, params=params, headers={"Authorization": f"Bearer {access_token}"})
+            if r.status_code != 200:
+                log.warning("Google voidedpurchases status %s", r.status_code)
+                return reversed_n  # NU avansam checkpoint-ul: reincercam la urmatoarea rulare
+            data = r.json()
+            for ref in preversal.google_voided_refs(data):
+                try:
+                    await db.payment_reversed_refs.insert_one({"ref": ref, "reason": "google_voided", "at": now_utc()})
+                except DuplicateKeyError:
+                    pass
+                if await preversal.reverse_purchase(db, ref, "google_voided") == "reversed":
+                    reversed_n += 1
+            nxt = ((data.get("tokenPagination") or {}).get("nextPageToken"))
+            if not nxt:
+                break
+            params["token"] = nxt
+    await db.platform_config.update_one({"key": "google_voided_checkpoint"}, {"$set": {"key": "google_voided_checkpoint", "at_ms": now_ms}}, upsert=True)
+    return reversed_n
+async def _google_voided_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(_GOOGLE_VOIDED_INTERVAL)
+            await _reconcile_google_voided()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("google voided reconcile failed")
 
 
 async def _report_target_exists(body: ReportBody, current: dict) -> bool:
