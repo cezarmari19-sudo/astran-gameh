@@ -15,7 +15,7 @@ import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import CodeStudio from "@/src/components/CodeStudio";
-import AssetPicker from "@/src/components/AssetPicker";
+import AssetPicker, { ShopModel, AddToGameResult } from "@/src/components/AssetPicker";
 import GameAccessManager from "@/src/components/GameAccessManager";
 import DeleteProjectFlow from "@/src/components/DeleteProjectFlow";
 import { useAuth } from "@/src/context/AuthContext";
@@ -23,9 +23,10 @@ import Inspector, { MultiSelectBar } from "@/src/studio/Inspector";
 import {
   ObjType, Scene, SceneObj, PALETTE, OBJ_TYPES, SPAWN_TYPE, SpawnKind,
   iconFor, iconForObj, isSolidDefault, buildMesh, applyTransform, spawnKindOf, spawnMarkerColor,
-  GROUND_MIN, GROUND_MAX, groundWidthOf, groundDepthOf, clampGroundSize, buildGroundGeometry,
+  MODEL_TYPE, GROUND_MIN, GROUND_MAX, groundWidthOf, groundDepthOf, clampGroundSize, buildGroundGeometry,
 } from "@/src/studio/sceneShared";
 import { ProjectState } from "@/src/studio/projectTree";
+import { registerModelAsset, hasModelAsset } from "@/src/studio/modelAssets";
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
@@ -399,6 +400,11 @@ export default function StudioEditor() {
   const [assetIds, setAssetIds] = useState<string[]>([]);
   const assetsDirty = useRef(false);
   const [showAssets, setShowAssets] = useState(false);
+  // Modele din Shop puse in scena cu "Add to Game": blocaj anti dublu-tap, versiune (redeseneaza meshurile cand
+  // geometria unui model s-a incarcat) si mesaj de eroare daca un model din scena nu s-a putut incarca.
+  const addingModel = useRef(false);
+  const [modelsVersion, setModelsVersion] = useState(0);
+  const [modelNotice, setModelNotice] = useState<string | null>(null);
 
   // Modelele publicate ale utilizatorului, pentru selectorul de Player Character
   const [myModels, setMyModels] = useState<ModelPick[]>([]);
@@ -505,6 +511,7 @@ export default function StudioEditor() {
           const ar = await api(`/sandbox/games/${editingId}/assets`);
           setAssetIds(Array.isArray(ar?.asset_ids) ? ar.asset_ids : []);
         } catch {}
+        await loadSceneModels(editingId, loadedScene);
       } catch (e: any) { setErr(e.message); }
       setLoading(false);
     })();
@@ -560,6 +567,86 @@ export default function StudioEditor() {
     });
     return () => sub.remove();
   }, []);
+
+  // Incarca geometria modelelor din Shop referite de scena (obiecte type="model"), prin acelasi resolver ca
+  // Assets.load (backend: resolve_assets). Un model care nu se poate incarca ramane ca o cutie rosie in scena
+  // (selectabila si stergabila) si primeste un mesaj clar.
+  async function loadSceneModels(gameId: string, sc: Scene) {
+    const wanted = sc.objects.filter(o => o.type === MODEL_TYPE && o.assetId);
+    if (wanted.length === 0) { setModelNotice(null); return; }
+    try {
+      const r = await api(`/sandbox/games/${gameId}/scene-models`);
+      const failed: string[] = [];
+      const byId = new Map<string, any>((Array.isArray(r?.models) ? r.models : []).map((m: any) => [m.id, m]));
+      for (const o of wanted) {
+        const m = byId.get(o.assetId as string);
+        if (!m || !registerModelAsset(m.id, m.parts, m.name)) failed.push(o.name || (o.assetId as string));
+      }
+      setModelNotice(failed.length ? `Could not load ${failed.length} model(s) in this scene: ${Array.from(new Set(failed)).join(", ")}. They are shown as red boxes - the model may have been deleted, made private or not owned anymore.` : null);
+    } catch (e: any) {
+      setModelNotice(`Could not load the models in this scene: ${e?.message || "network error"}.`);
+    }
+    setModelsVersion(v => v + 1);
+  }
+
+  // "Add to Game" din fereastra Shop Models: pune modelul REAL in scena, fara cod.
+  //  1) ataseaza id-ul jocului (acelasi mecanism ca Assets.load) si il salveaza,
+  //  2) il incarca prin resolver-ul Assets (GET .../assets?parts=true) - doar modele pe care userul le detine,
+  //  3) creeaza un obiect normal din scena (type "model", assetId real) - deci se selecteaza/muta/roteste/scaleaza/
+  //     sterge cu aceleasi unelte ca orice obiect,
+  //  4) salveaza scena imediat, ca modelul sa ramana dupa inchiderea si redeschiderea Studio.
+  // La orice eroare se anuleaza tot (atasarea id-ului inclusiv) si se intoarce un mesaj clar.
+  async function addModelToGame(item: ShopModel): Promise<AddToGameResult> {
+    if (addingModel.current) return { ok: false, error: "Another model is being added - wait a moment." };
+    const gameId = editingId || createdId.current;
+    if (!gameId) return { ok: false, error: "Save the game first (title + password), then you can add models to it." };
+    if (scene.objects.some(o => o.type === MODEL_TYPE && o.assetId === item.item_id)) {
+      return { ok: false, error: "This model is already in the scene. Select it and use Duplicate if you need more copies." };
+    }
+    addingModel.current = true;
+    const prevIds = assetIds;
+    const newlyAttached = !prevIds.includes(item.item_id);
+    const nextIds = newlyAttached ? [...prevIds, item.item_id] : prevIds;
+    let obj: SceneObj | null = null;
+    try {
+      if (newlyAttached) {
+        await api(`/sandbox/games/${gameId}/assets`, { method: "PUT", body: JSON.stringify({ asset_ids: nextIds }) });
+      }
+      const r = await api(`/sandbox/games/${gameId}/assets?parts=true`);
+      const entry = (Array.isArray(r?.assets) ? r.assets : []).find((a: any) => a?.id === item.item_id);
+      if (!entry) throw new Error("the server could not load it - you don't own it anymore, it was deleted or made private");
+      const geo = registerModelAsset(entry.id, entry.parts, entry.name);
+      if (!geo) throw new Error("the model has no visible shapes");
+
+      const fwd = forwardVector();
+      const horiz = new THREE.Vector2(fwd.x, fwd.z);
+      if (horiz.lengthSq() < 0.0001) horiz.set(0, 1);
+      horiz.normalize();
+      const dist = 4 + Math.max(geo.size[0], geo.size[2]) / 2;
+      const snap = (v: number) => Math.round(v * 2) / 2;
+      obj = {
+        id: uid(), type: MODEL_TYPE, assetId: entry.id, name: String(entry.name || item.name || "Model").slice(0, 64),
+        x: snap(cameraPos.current.x + horiz.x * dist), y: 0, z: snap(cameraPos.current.z + horiz.y * dist),
+        color: "#ffffff", scale: 1, visible: true, solid: true,
+        ex: Number(geo.size[0].toFixed(3)), ey: Number(geo.size[1].toFixed(3)), ez: Number(geo.size[2].toFixed(3)),
+      };
+      const nextScene: Scene = { ...scene, objects: [...scene.objects, obj] };
+      await api(`/games/${gameId}`, { method: "PATCH", body: JSON.stringify({ scene: nextScene }) });
+
+      setScene(nextScene);
+      setAssetIds(nextIds);
+      assetsDirty.current = false;
+      setModelsVersion(v => v + 1);
+      setBaseplateSelected(false);
+      setSelIds([obj.id]);
+      return { ok: true };
+    } catch (e: any) {
+      if (newlyAttached) { try { await api(`/sandbox/games/${gameId}/assets`, { method: "PUT", body: JSON.stringify({ asset_ids: prevIds }) }); } catch {} }
+      return { ok: false, error: `Could not add "${item.name}": ${e?.message || "unknown error"}` };
+    } finally {
+      addingModel.current = false;
+    }
+  }
 
   function addObject(type: ObjType) {
     // Obiectele noi apar în fața camerei (pe planul orizontal la care privește momentan),
@@ -797,20 +884,28 @@ export default function StudioEditor() {
 
     scene.objects.forEach(o => {
       let m = meshMap.current[o.id];
+      // model din Shop a carui geometrie tocmai s-a incarcat: inlocuim cutia rosie cu modelul real
+      if (m && o.type === MODEL_TYPE && !m.userData.modelReady && hasModelAsset(o.assetId)) {
+        s.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose();
+        delete meshMap.current[o.id];
+        m = undefined as any;
+      }
       if (!m) {        m = buildMesh(o);
         m.userData.objId = o.id;
         meshMap.current[o.id] = m;
         s.add(m);
       } else {
         applyTransform(m, o);
-        (m.material as THREE.MeshStandardMaterial).color.set(o.type === "spawn" ? spawnMarkerColor(o) : o.color);
+        if (!(o.type === MODEL_TYPE && !m.userData.modelReady)) {
+          (m.material as THREE.MeshStandardMaterial).color.set(o.type === "spawn" ? spawnMarkerColor(o) : o.color);
+        }
       }
+      const modelPending = o.type === MODEL_TYPE && !m.userData.modelReady;
       m.visible = o.visible !== false || true; // in Studio TOATE obiectele raman vizibile (semi-transparent daca visible=false), ca sa poata fi editate
       const isHidden = o.visible === false;
-      (m.material as THREE.MeshStandardMaterial).transparent = isHidden || o.type === "spawn";
-      (m.material as THREE.MeshStandardMaterial).opacity = isHidden ? 0.3 : (o.type === "spawn" ? 0.55 : 1);
+      (m.material as THREE.MeshStandardMaterial).transparent = isHidden || o.type === "spawn" || modelPending;
+      (m.material as THREE.MeshStandardMaterial).opacity = isHidden ? 0.3 : (o.type === "spawn" ? 0.55 : (modelPending ? 0.35 : 1));
     });
-
     if (groundRef.current) (groundRef.current.material as THREE.MeshStandardMaterial).color = new THREE.Color(scene.ground);
 
     selBoxes.current.forEach(b => { s.remove(b); b.geometry.dispose(); });
@@ -829,7 +924,7 @@ export default function StudioEditor() {
       s.add(gbox);
       selBoxes.current.push(gbox);
     }
-  }, [scene, selIds, baseplateSelected, glReady]);
+  }, [scene, selIds, baseplateSelected, glReady, modelsVersion]);
 
   // BASEPLATE: reconstruieste geometria reala a gridului de cate ori Width/Depth se schimba -
   // nu e un fundal static, grila chiar se extinde/micsoreaza (vezi buildGroundGeometry).
@@ -1265,11 +1360,12 @@ export default function StudioEditor() {
         </View>
       ) : (
         <View style={styles.objList}>
+          {modelNotice ? <Text testID="editor-model-notice" style={styles.modelNotice}>{modelNotice}</Text> : null}
           <Text style={styles.objListTitle}>{scene.objects.length} OBJECTS · tap to select, or use Box Select</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingHorizontal: 12, paddingBottom: 8 }}>
             {scene.objects.map(o => {
               const spawnLike = o.type === SPAWN_TYPE;
-              const label = spawnLike ? (spawnKindOf(o) === "checkpoint" ? "checkpoint" : "spawn") : o.type;
+              const label = spawnLike ? (spawnKindOf(o) === "checkpoint" ? "checkpoint" : "spawn") : (o.type === MODEL_TYPE ? (o.name || "model") : o.type);
               return (
                 <Pressable key={o.id} testID={`editor-obj-${o.id}`} onPress={() => { setBaseplateSelected(false); setSelIds([o.id]); }} style={[styles.objChip, { borderColor: spawnLike ? colors.brand : o.color }]}>
                   <MaterialCommunityIcons name={iconForObj(o) as any} size={14} color={spawnLike ? colors.brand : o.color} />
@@ -1312,6 +1408,8 @@ export default function StudioEditor() {
         assetIds={assetIds}
         onChange={ids => { assetsDirty.current = true; setSaved(false); setAssetIds(ids); }}
         onClose={() => setShowAssets(false)}
+        onAddToGame={addModelToGame}
+        placedAssetIds={scene.objects.filter(o => o.type === MODEL_TYPE && o.assetId).map(o => o.assetId as string)}
       />
 
       {editingId ? (
@@ -1506,6 +1604,7 @@ export default function StudioEditor() {
 }
 
 const styles = StyleSheet.create({
+  modelNotice: { color: colors.error, fontSize: 11, paddingHorizontal: 12, paddingTop: 6 },
   root: { flex: 1, backgroundColor: colors.surface },
   center: { flex: 1, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, gap: 10 },
