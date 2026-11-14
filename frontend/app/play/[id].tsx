@@ -109,6 +109,7 @@ function applyOp(scene: THREE.Scene, meshes: Map<string, THREE.Mesh>, physics: P
   if (physics.isAnchored(op.id)) placeMesh(m);
 }
 
+const MAX_SCENE_OBJECTS = 1000;
 const PLAYER_RADIUS = 0.35;
 const PLAYER_HALF_HEIGHT_DEFAULT = 0.9;
 // Valori implicite - pot fi suprascrise din scriptul jocului (main.lua) prin
@@ -604,7 +605,6 @@ export default function PlayScreen() {
       if (subscription) ScreenOrientation.removeOrientationChangeListener(subscription);
     };
   }, []);
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -814,7 +814,10 @@ const onContextCreate = async (gl: any) => {
 
     const boxes: AABB[] = [];
     const spawns: SpawnRuntime[] = [];
-    (game.scene?.objects || []).forEach((o: SceneObj) => {
+    // plafon defensiv: jocurile salvate inainte ca serverul sa valideze scena pot contine mii / milioane de
+    // obiecte; fiecare = mesh + material, iar un astfel de joc bloca aplicatia fiecarui jucator.
+    // Valoarea trebuie sa ramana egala cu MAX_SCENE_OBJECTS din backend (scene_validation.py).
+    (game.scene?.objects || []).slice(0, MAX_SCENE_OBJECTS).forEach((o: SceneObj) => {
       if (o.type === SPAWN_TYPE) {
         if (o.enabled !== false) {
           spawns.push({
@@ -854,7 +857,7 @@ const onContextCreate = async (gl: any) => {
       facingAngle.current = preserved.facingAngle;
       camAngle.current = preserved.camAngle;
       lastCamAngle.current = preserved.camAngle;
-      camPolar.current = preserved.camPolar;
+camPolar.current = preserved.camPolar;
       lastCamPolar.current = preserved.camPolar;
       camDist.current = preserved.camDist;
       preservedStateRef.current = null;
@@ -1113,255 +1116,3 @@ const onContextCreate = async (gl: any) => {
   }
   async function doLeave() {
     const inst = instanceRef.current;
-    if (inst) api(`/games/${id}/instance/leave`, { method: "POST", body: JSON.stringify({ instance_id: inst.instance_id }) }).catch(() => {});
-    router.replace({ pathname: "/game/[id]", params: { id } } as any);
-  }
-
-  function doRetryAfterCrash() {
-    setCrashError(null);
-    physicsRef.current?.dispose();
-    physicsRef.current = null;
-    disposeSceneResources();
-    setReady(false);
-    setGlMountKey(k => k + 1);
-  }
-
-  useEffect(() => {
-    try {
-      const r = rendererRef.current as any;
-      const cam = cameraRef.current;
-      if (!r) return;
-      r.setPixelRatio(quality === "low" ? 1 : quality === "medium" ? 1.4 : 2);
-      if (cam) {
-        const size = new THREE.Vector2();
-        r.getSize(size);
-        if (size.x > 0 && size.y > 0) {
-          cam.aspect = size.x / size.y;
-          cam.updateProjectionMatrix();
-        }
-      }
-    } catch (e: any) {
-      console.log("[play] quality effect crashed", e);
-      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
-    }
-  }, [quality]);
-  useEffect(() => {
-    try {
-      if (lightsRef.current) applyGraphicsLevel(lightsRef.current, graphicsLevel);
-    } catch (e: any) {
-      console.log("[play] graphicsLevel effect crashed", e);
-      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
-    }
-  }, [graphicsLevel]);
-  useEffect(() => {
-    try {
-      const cam = cameraRef.current;
-      if (cam) { cam.far = renderDistance; cam.updateProjectionMatrix(); }
-    } catch (e: any) {
-      console.log("[play] renderDistance effect crashed", e);
-      if (alive.current) setCrashError(e?.message ? String(e.message) : String(e));
-    }
-  }, [renderDistance]);
-
-  const isLandscape = screenW > screenH;
-  // Dimensiune adaptiva: proportionala cu latura mica a ecranului, limitata intre 60-84px,
-  // ca sa ramana usor de apasat cu degetul mare atat pe telefoane mici, cat si pe cele mari/tablete.
-  const jumpBtnSize = Math.max(60, Math.min(84, Math.round(Math.min(screenW, screenH) * 0.17)));
-
-  return (
-    <View style={styles.root}>
-      {Platform.OS === "web" || !canStartGL ? (
-        <View style={[StyleSheet.absoluteFillObject, styles.webFallback]}>
-          <MaterialCommunityIcons name="cube-outline" size={80} color={colors.brand} />
-          <Text style={styles.webText}>{loadError || game?.title || ""}</Text>
-        </View>
-      ) : (
-        <GLView key={glMountKey} style={StyleSheet.absoluteFillObject} onContextCreate={onContextCreate} />
-      )}
-
-      {/* Sandbox pentru scripturile target="client" - fara UI propriu (0x0), doar
-          executa logica. key={id}: la schimbarea jocului, React distruge complet
-          instanta veche si monteaza una noua - fara nicio stare ramasa de la jocul
-          anterior (vezi nota din ScriptSandboxWebView.tsx despre de ce e necesar). */}
-      <ScriptSandboxWebView key={id} gameId={String(id)} ref={sandboxRef} />
-
-      {ready && Platform.OS !== "web" ? (
-        <View
-          style={StyleSheet.absoluteFillObject}
-          onStartShouldSetResponder={() => true}
-          onMoveShouldSetResponder={() => true}
-          onResponderGrant={onRootResponderGrant}
-          onResponderMove={onRootResponderMove}
-          onResponderRelease={onRootResponderEnd}
-          onResponderTerminate={onRootResponderEnd}
-          onResponderTerminationRequest={() => false}
-        >
-          <View
-            style={styles.joystickZone}
-            pointerEvents="none"
-            onLayout={e => {
-              const { x, y, width, height } = e.nativeEvent.layout;
-              joyZoneLayout.current = { x, y, w: width, h: height };
-            }}
-          >
-            {joyVisible ? (
-              <View style={[styles.joyBase, { left: joyOrigin.x - 52, top: joyOrigin.y - 52 }]} pointerEvents="none">
-                <View style={[styles.joyKnob, { transform: [{ translateX: joyKnob.x }, { translateY: joyKnob.y }] }]} />
-              </View>
-            ) : (
-              <View style={styles.joyHint} pointerEvents="none">
-                <MaterialCommunityIcons name="gesture-tap" size={14} color="rgba(255,255,255,0.5)" />
-              </View>
-            )}
-          </View>
-        </View>
-      ) : null}
-
-      <SafeAreaView edges={["top", "left"]} style={styles.aBtnWrap} pointerEvents="box-none">
-        <Pressable testID="play-menu-btn" onPress={() => setShowMenu(true)} style={styles.aBtn}>
-          <Text style={styles.aBtnText}>A</Text>
-        </Pressable>
-      </SafeAreaView>
-
-      {ready && Platform.OS !== "web" ? (
-        <SafeAreaView edges={["bottom", "right"]} style={styles.jumpBtnWrap} pointerEvents="box-none">
-          <Pressable
-            testID="play-jump-btn"
-            onPressIn={doJump}
-            hitSlop={10}
-            style={({ pressed }) => [
-              styles.jumpBtn,
-              { width: jumpBtnSize, height: jumpBtnSize, borderRadius: jumpBtnSize / 2 },
-              pressed && styles.jumpBtnPressed,
-            ]}
-          >
-            <MaterialCommunityIcons name="arrow-up-bold" size={Math.round(jumpBtnSize * 0.46)} color={colors.brand} />
-          </Pressable>
-        </SafeAreaView>
-      ) : null}
-
-      {/* Chat: strat propriu, pointerEvents="box-none" - nu blocheaza joystick/camera/Jump.
-          188 = inaltimea zonei joystick-ului (180) + marja: panoul nu coboara peste ea. */}
-      <GameChat handle={chatHandle} reservedBottom={188} />
-
-      <Modal visible={!!crashError} transparent animationType="fade" onRequestClose={() => {}}>
-        <View style={styles.menuBackdrop}>
-          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
-            <MaterialCommunityIcons name="alert-circle-outline" size={28} color={colors.error} style={{ marginBottom: 10 }} />
-            <Text style={styles.menuTitle}>Jocul s-a oprit cu o eroare</Text>
-            <ScrollView style={{ maxHeight: 160 }}>
-              <Text style={styles.crashMessage}>{crashError}</Text>
-            </ScrollView>
-            <Pressable testID="play-crash-retry" onPress={doRetryAfterCrash} style={styles.menuCloseBtn}>
-              <Text style={styles.menuCloseBtnText}>Retry</Text>
-            </Pressable>
-            <Pressable testID="play-crash-leave" onPress={doLeave} style={[styles.menuRow, { justifyContent: "center", marginTop: 4 }]}>
-              <MaterialCommunityIcons name="exit-run" size={18} color={colors.error} />
-              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={showMenu} transparent animationType="fade" onRequestClose={() => setShowMenu(false)}>
-        <Pressable style={styles.menuBackdrop} onPress={() => setShowMenu(false)}>
-          <View style={[styles.menuBox, isLandscape && styles.menuBoxLandscape]}>
-            <Text style={styles.menuTitle}>{game?.title}</Text>
-            <Pressable testID="play-menu-respawn" onPress={doRespawn} style={styles.menuRow}>
-              <MaterialCommunityIcons name="restart" size={20} color={colors.brand} />
-              <Text style={styles.menuRowText}>Respawn</Text>
-            </Pressable>
-            <Pressable testID="play-menu-settings" onPress={() => { setShowMenu(false); setShowSettings(true); }} style={styles.menuRow}>
-              <MaterialCommunityIcons name="cog-outline" size={20} color={colors.brand} />
-              <Text style={styles.menuRowText}>Settings</Text>
-            </Pressable>
-            <Pressable testID="play-menu-leave" onPress={doLeave} style={styles.menuRow}>
-              <MaterialCommunityIcons name="exit-run" size={20} color={colors.error} />
-              <Text style={[styles.menuRowText, { color: colors.error }]}>Leave</Text>
-            </Pressable>
-          </View>
-        </Pressable>
-      </Modal>
-
-      <SettingsModalShell visible={showSettings} onClose={() => setShowSettings(false)}>
-            <Text style={styles.settingLabel}>Viziune</Text>
-            <View style={styles.qualityRow}>
-              {(["low", "medium", "high"] as GraphicsQuality[]).map(q => (
-                <Pressable key={q} testID={`play-quality-${q}`} onPress={() => updateSetting("graphics_quality", q)} style={[styles.qualityChip, quality === q && styles.qualityChipActive]}>
-                  <Text style={[styles.qualityChipText, quality === q && { color: colors.brand }]}>{QUALITY_LABELS[q]}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <Text style={styles.settingLabel}>Grafică: {graphicsLevel}/10</Text>
-            <LevelPicker value={graphicsLevel} onChange={v => updateSetting("graphics_level", v)} testIDPrefix="play-graphics" />
-
-            <Text style={styles.settingLabel}>Render: {renderLevel}/10 · {renderDistance}m</Text>
-            <LevelPicker value={renderLevel} onChange={v => updateSetting("render_level", v)} testIDPrefix="play-render" />
-
-            <Text style={styles.settingLabel}>Shift Lock</Text>
-            <Pressable
-              testID="play-shiftlock-toggle"
-              onPress={() => updateSetting("shift_lock", !shiftLock)}
-              style={styles.shiftLockRow}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={styles.shiftLockTitle}>{shiftLock ? "Pornit" : "Oprit"}</Text>
-                <Text style={styles.shiftLockDesc}>
-                  {shiftLock
-                    ? "Avatarul privește mereu spre cameră."
-                    : "Avatarul privește spre direcția de mers."}
-                </Text>
-              </View>
-              <View style={[styles.switchTrack, shiftLock && styles.switchTrackOn]}>
-                <View style={[styles.switchThumb, shiftLock && styles.switchThumbOn]} />
-              </View>
-            </Pressable>
-      </SettingsModalShell>
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.surface },
-  webFallback: { alignItems: "center", justifyContent: "center", gap: 12 },
-  webText: { color: colors.onSurface, fontWeight: "800", fontSize: 18 },
-  joystickZone: { position: "absolute", left: 0, bottom: 0, width: 180, height: 180 },
-  joyBase: { position: "absolute", width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(255,255,255,0.12)", borderWidth: 2, borderColor: "rgba(255,255,255,0.35)", alignItems: "center", justifyContent: "center" },
-  joyKnob: { width: 46, height: 46, borderRadius: 23, backgroundColor: "rgba(204,255,0,0.85)" },
-  joyHint: { position: "absolute", left: 24, bottom: 24, width: 44, height: 44, borderRadius: 22, borderWidth: 2, borderColor: "rgba(255,255,255,0.25)", alignItems: "center", justifyContent: "center" },
-  aBtnWrap: { position: "absolute", top: 0, left: 0, padding: spacing.md },
-  aBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(0,0,0,0.6)", borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
-  aBtnText: { color: colors.brand, fontWeight: "900", fontSize: 16 },
-  // Butonul Jump: coltul din dreapta-jos, deasupra zonei de camera/joystick, fara sa se suprapuna cu ele
-  // (joystick-ul e in coltul opus, stanga-jos). Stil asemanator cu Roblox mobil: cerc semitransparent.
-  jumpBtnWrap: { position: "absolute", bottom: 0, right: 0, padding: spacing.lg },
-  jumpBtn: { backgroundColor: "rgba(255,255,255,0.14)", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)", alignItems: "center", justifyContent: "center" },
-  jumpBtnPressed: { backgroundColor: "rgba(204,255,0,0.3)", borderColor: "rgba(204,255,0,0.85)" },
-  menuBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: spacing.xl },
-  menuBox: { width: "100%", maxWidth: 340, maxHeight: "85%", backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: spacing.lg },
-  menuBoxLandscape: { maxWidth: 420, maxHeight: "85%" },
-  menuTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "900", marginBottom: 14 },
-  crashMessage: { color: colors.onSurface2, fontSize: 12, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginBottom: 6 },
-  menuRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12 },
-  menuRowText: { color: colors.onSurface, fontSize: 14, fontWeight: "700" },
-  settingLabel: { color: colors.onSurface3, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 14, marginBottom: 8 },
-  qualityRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  levelRow: { flexDirection: "row", gap: 5 },
-  levelChip: { flex: 1, height: 34, borderRadius: 8, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
-  levelChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
-  levelChipCurrent: { backgroundColor: colors.brand },
-  levelChipText: { color: colors.onSurface2, fontWeight: "800", fontSize: 11 },
-  qualityChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radius.pill, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
-  qualityChipActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
-  qualityChipText: { color: colors.onSurface2, fontWeight: "700", fontSize: 12, textTransform: "capitalize" },
-  shiftLockRow: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
-  shiftLockTitle: { color: colors.onSurface, fontWeight: "800", fontSize: 13 },
-  shiftLockDesc: { color: colors.onSurface3, fontSize: 11, marginTop: 2 },
-  switchTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: "rgba(255,255,255,0.15)", padding: 3, justifyContent: "center" },
-  switchTrackOn: { backgroundColor: colors.brand },
-  switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: "#fff", transform: [{ translateX: 0 }] },
-  switchThumbOn: { transform: [{ translateX: 18 }] },
-  menuCloseBtn: { marginTop: 18, backgroundColor: colors.brand, borderRadius: radius.pill, paddingVertical: 12, alignItems: "center" },
-  menuCloseBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 13 },
-});
