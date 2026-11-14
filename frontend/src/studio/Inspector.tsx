@@ -115,7 +115,7 @@ export default function Inspector({ obj, onChange, onDelete, onDuplicate, onFocu
     <View style={styles.wrap}>
       <View style={styles.head}>
         <MaterialCommunityIcons name={iconFor(obj.type) as any} size={18} color={colors.brand} />
-        <Text style={styles.title}>{isSpawn ? "Spawn Point" : obj.type}</Text>
+        <Text style={styles.title} numberOfLines={1}>{isSpawn ? "Spawn Point" : obj.type === "model" ? (obj.name || "Model") : obj.type}</Text>
         <View style={{ flex: 1 }} />
         <Pressable testID="insp-focus" onPress={onFocus} hitSlop={8} style={styles.headBtn}>
           <MaterialCommunityIcons name="crosshairs-gps" size={20} color={colors.onSurface2} />
