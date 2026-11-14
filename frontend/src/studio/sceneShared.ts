@@ -1,6 +1,7 @@
 // frontend/src/studio/sceneShared.ts
 // Tipuri si functii folosite si de editor (studio/create.tsx), si de jocul propriu-zis (play/[id].tsx).
 import * as THREE from "three";
+import { getModelAsset } from "@/src/studio/modelAssets";
 
 export type ObjType = "cube" | "sphere" | "cylinder" | "cone" | "tree" | "spawn";
 
@@ -25,6 +26,15 @@ export type SceneObj = {
   sx?: number; // intindere pe axa (se inmulteste cu scale); implicit 1
   sy?: number;
   sz?: number;
+  name?: string;
+  // ---------- Modele din Shop (doar cand type === "model") ----------
+  // assetId = item_id-ul REAL din Shop (acelasi id ca la Assets.load("id")); geometria se incarca de la server
+  // prin acelasi resolver ca Assets.load - vezi studio/modelAssets.ts. ex/ey/ez = dimensiunea naturala a
+  // modelului (la scale 1), salvata ca sa putem calcula coliziunea in Play fara sa asteptam geometria.
+  assetId?: string;
+  ex?: number;
+  ey?: number;
+  ez?: number;
   visible?: boolean; // implicit true; daca false, nu se randeaza in Play (dar tot exista in Studio, semi-transparent)
   solid?: boolean;   // implicit true pentru obiecte normale, false pentru spawn; controleaza collision in Play
 
@@ -100,6 +110,7 @@ const OBJ_ICON: Record<string, string> = {
   cylinder: "cylinder",
   cone: "triangle-outline",
   tree: "pine-tree",
+  model: "package-variant-closed",
   spawn: "map-marker-radius-outline",
 };
 
@@ -162,7 +173,31 @@ export function applyTransform(m: THREE.Object3D, o: TransformLike) {
   m.rotation.set((o.rx ?? 0) * d, (o.ry ?? 0) * d, (o.rz ?? 0) * d);
 }
 
+export const MODEL_TYPE = "model";
+
+// Obiect de model din Shop a carui geometrie nu s-a incarcat (inca / deloc): in Studio ramane o cutie rosie
+// semi-transparenta, selectabila si stergabila, ca eroarea sa fie vizibila - niciodata un model "fals" care
+// pare ca a mers.
+function buildModelMesh(o: SceneObj): THREE.Mesh {
+  const asset = getModelAsset(o.assetId);
+  if (asset) {
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, color: new THREE.Color("#ffffff"), roughness: 0.6, metalness: 0.05 });
+    const m = new THREE.Mesh(asset.geometry.clone(), mat);
+    m.userData.modelReady = true;
+    applyTransform(m, o);
+    return m;
+  }
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#ff3355"), transparent: true, opacity: 0.35, roughness: 0.8 });
+  const box = new THREE.BoxGeometry(o.ex ?? 1, o.ey ?? 1, o.ez ?? 1);
+  box.translate(0, ((o.ey ?? 1) - 1) / 2, 0); // baza pe y = obj.y, ca la modelul real (vezi applyTransform)
+  const m = new THREE.Mesh(box, mat);
+  m.userData.modelReady = false;
+  applyTransform(m, o);
+  return m;
+}
+
 export function buildMesh(o: SceneObj): THREE.Mesh {
+  if (o.type === MODEL_TYPE) return buildModelMesh(o);
   const isSpawn = o.type === "spawn";
   const mat = new THREE.MeshStandardMaterial({
     // culoare invalida (ex. un string arbitrar dintr-o scena veche) cade pe gri, in loc sa arunce / sa umple consola
@@ -188,6 +223,12 @@ export function aabbFor(o: SceneObj): AABB {
   const sz = o.scale * (o.sz ?? 1);
   // dimensiunea de baza a formei (inainte de scalare) - aproximam toate formele ca o cutie
   // egala cu diametrul lor, e suficient de precis pentru collision de gameplay simplu
+  if (o.type === MODEL_TYPE) {
+    const hx = 0.5 * (o.ex ?? 1) * sx;
+    const hy = 0.5 * (o.ey ?? 1) * sy;
+    const hz = 0.5 * (o.ez ?? 1) * sz;
+    return { minX: o.x - hx, maxX: o.x + hx, minY: o.y, maxY: o.y + 2 * hy, minZ: o.z - hz, maxZ: o.z + hz };
+  }
   const baseHalf = o.type === "sphere" ? 0.6 : o.type === "cylinder" ? 0.5 : o.type === "cone" ? 0.6 : o.type === "tree" ? 0.7 : 0.5;
   const hx = baseHalf * sx;
   const hy = 0.5 * sy;
