@@ -37,5 +37,28 @@ class SceneValidationTests(unittest.TestCase):
         self.assertEqual(clean_scene({})["objects"], [])
 
 
+    def test_shop_model_object_keeps_real_asset_id(self):
+        c = clean_scene({"objects": [
+            {"id": "m1", "type": "model", "assetId": "itm_abc123", "x": 2, "y": 0, "z": -3, "ry": 90,
+             "scale": 1.5, "ex": 2, "ey": 3, "ez": 1, "color": "#ffffff", "evil": 1},
+        ]})
+        o = c["objects"][0]
+        self.assertEqual((o["type"], o["assetId"]), ("model", "itm_abc123"))
+        self.assertEqual((o["x"], o["z"], o["ry"], o["scale"]), (2.0, -3.0, 90.0, 1.5))
+        self.assertEqual((o["ex"], o["ey"], o["ez"]), (2.0, 3.0, 1.0))
+        self.assertNotIn("evil", o)
+
+    def test_shop_model_without_valid_asset_id_is_dropped(self):
+        c = clean_scene({"objects": [
+            {"id": "m1", "type": "model"},
+            {"id": "m2", "type": "model", "assetId": "bad id!"},
+            {"id": "m3", "type": "model", "assetId": 5},
+            {"id": "ok", "type": "cube"}]})
+        self.assertEqual([o["id"] for o in c["objects"]], ["ok"])
+
+    def test_asset_id_not_kept_on_other_types(self):
+        c = clean_scene({"objects": [{"id": "a", "type": "cube", "assetId": "itm_x"}]})
+        self.assertNotIn("assetId", c["objects"][0])
+
 if __name__ == "__main__":
     unittest.main()
