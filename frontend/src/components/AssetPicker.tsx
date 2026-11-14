@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -16,7 +16,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
 
-type ShopModel = {
+export type ShopModel = {
   item_id: string;
   name: string;
   owner_username: string;
@@ -25,11 +25,18 @@ type ShopModel = {
   preview: { type: string; color: string; scale: number };
 };
 
+export type AddToGameResult = { ok: boolean; error?: string };
+
 type Props = {
   visible: boolean;
   assetIds: string[];
   onChange: (ids: string[]) => void;
   onClose: () => void;
+  // "Add to Game": pune modelul direct in scena (fara cod). Parintele (Studio) face munca reala:
+  // ataseaza id-ul, il incarca prin acelasi resolver ca Assets.load, creeaza obiectul si salveaza.
+  onAddToGame?: (item: ShopModel) => Promise<AddToGameResult>;
+  // id-urile modelelor care exista deja ca obiect in scena (ca sa nu se adauge din greseala de doua ori)
+  placedAssetIds?: string[];
 };
 
 const SHAPE_ICON: Record<string, string> = {
@@ -40,7 +47,7 @@ const SHAPE_ICON: Record<string, string> = {
   pyramid: "triangle-outline",
 };
 
-export default function AssetPicker({ visible, assetIds, onChange, onClose }: Props) {
+export default function AssetPicker({ visible, assetIds, onChange, onClose, onAddToGame, placedAssetIds = [] }: Props) {
   const router = useRouter();
   const [tab, setTab] = useState<"attached" | "browse">("attached");
   const [attached, setAttached] = useState<ShopModel[]>([]);
@@ -49,6 +56,10 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
   const [results, setResults] = useState<ShopModel[]>([]);
   const [loadingResults, setLoadingResults] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // "Add to Game": un singur model se adauga la un moment dat (blocheaza dublu-tap), eroarea se arata pe randul lui
+  const [addingId, setAddingId] = useState<string | null>(null);
+  const addingRef = useRef(false);
+  const [rowErr, setRowErr] = useState<Record<string, string>>({});
 
   // incarca detalii pentru id-urile deja atasate (nume, pret) — separat de multimea de id-uri
   useEffect(() => {
@@ -100,6 +111,47 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
     setTab("attached");
   }
 
+  async function addToGame(item: ShopModel) {
+    if (!onAddToGame || addingRef.current) return;
+    addingRef.current = true;
+    setAddingId(item.item_id);
+    setRowErr(prev => { const n = { ...prev }; delete n[item.item_id]; return n; });
+    try {
+      const r = await onAddToGame(item);
+      if (r.ok) onClose();
+      else setRowErr(prev => ({ ...prev, [item.item_id]: r.error || "Could not add this model to the game." }));
+    } catch (e: any) {
+      setRowErr(prev => ({ ...prev, [item.item_id]: e?.message || "Could not add this model to the game." }));
+    } finally {
+      addingRef.current = false;
+      setAddingId(null);
+    }
+  }
+
+  // Butonul "Add to Game" - acelasi pentru randurile din "In this game" si din "Browse Shop"
+  function renderAddToGame(item: ShopModel) {
+    if (!onAddToGame) return null;
+    if (placedAssetIds.includes(item.item_id)) {
+      return (
+        <View testID={`assets-placed-${item.item_id}`} style={styles.placedPill}>
+          <MaterialCommunityIcons name="check" size={14} color={colors.brand} />
+          <Text style={styles.placedText}>In scene</Text>
+        </View>
+      );
+    }
+    const busy = addingId === item.item_id;
+    return (
+      <Pressable
+        testID={`assets-addgame-${item.item_id}`}
+        onPress={() => addToGame(item)}
+        disabled={addingId !== null}
+        style={[styles.addGameBtn, addingId !== null && !busy && { opacity: 0.5 }]}
+      >
+        {busy ? <ActivityIndicator size="small" color={colors.onBrand} /> : <Text style={styles.addBtnText}>Add to Game</Text>}
+      </Pressable>
+    );
+  }
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
@@ -137,6 +189,7 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
               keyExtractor={i => i.item_id}
               contentContainerStyle={{ padding: spacing.md, gap: spacing.sm }}
               renderItem={({ item }) => (
+                <View>
                 <View style={styles.row}>
                   <View style={[styles.swatch, { backgroundColor: item.preview?.color || "#666" }]}>
                     <MaterialCommunityIcons name={(SHAPE_ICON[item.preview?.type || ""] || "cube-outline") as any} size={18} color="rgba(0,0,0,0.35)" />
@@ -145,9 +198,12 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
                     <Text style={styles.rowName} numberOfLines={1}>{item.name}</Text>
                     <Text style={styles.rowId} numberOfLines={1} selectable>{item.item_id}</Text>
                   </View>
+                  {renderAddToGame(item)}
                   <Pressable testID={`assets-remove-${item.item_id}`} onPress={() => remove(item.item_id)} style={styles.removeBtn}>
                     <MaterialCommunityIcons name="close" size={16} color={colors.error} />
                   </Pressable>
+                </View>
+                {rowErr[item.item_id] ? <Text testID={`assets-error-${item.item_id}`} style={styles.rowErr}>{rowErr[item.item_id]}</Text> : null}
                 </View>
               )}
             />
@@ -178,6 +234,7 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
                 renderItem={({ item }) => {
                   const already = assetIds.includes(item.item_id);
                   return (
+                    <View>
                     <View style={styles.row}>
                       <View style={[styles.swatch, { backgroundColor: item.preview?.color || "#666" }]}>
                         <MaterialCommunityIcons name={(SHAPE_ICON[item.preview?.type || ""] || "cube-outline") as any} size={18} color="rgba(0,0,0,0.35)" />
@@ -188,11 +245,12 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
                           by {item.owner_username} · {item.price === 0 ? "Free" : `${item.price} Astrans`}
                         </Text>
                       </View>
+                      {item.owned ? renderAddToGame(item) : null}
                       {already ? (
                         <View style={styles.addedPill}><MaterialCommunityIcons name="check" size={14} color={colors.brand} /></View>
                       ) : item.owned ? (
                         <Pressable testID={`assets-add-${item.item_id}`} onPress={() => add(item)} style={styles.addBtn}>
-                          <Text style={styles.addBtnText}>Add</Text>
+                          <Text style={styles.addBtnText}>Attach</Text>
                         </Pressable>
                       ) : (
                         <Pressable
@@ -203,6 +261,8 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
                           <Text style={styles.buyBtnText}>{item.price === 0 ? "Get" : "Buy"}</Text>
                         </Pressable>
                       )}
+                    </View>
+                    {rowErr[item.item_id] ? <Text testID={`assets-error-${item.item_id}`} style={styles.rowErr}>{rowErr[item.item_id]}</Text> : null}
                     </View>
                   );
                 }}
@@ -217,7 +277,7 @@ export default function AssetPicker({ visible, assetIds, onChange, onClose }: Pr
         )}
 
         <Text style={styles.hint}>
-          Attached models can be used in scripts with Assets.load("id"). Buying an item happens in the Shop.
+          "Add to Game" places the model in your scene, no code needed. Attached models can still be loaded from scripts with Assets.load("id"). Buying an item happens in the Shop.
         </Text>
       </SafeAreaView>
     </Modal>
@@ -245,6 +305,10 @@ const styles = StyleSheet.create({
   removeBtn: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface3 },
   addBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.brand },
   addBtnText: { color: colors.onBrand, fontWeight: "900", fontSize: 12 },
+  addGameBtn: { minWidth: 88, alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, backgroundColor: colors.brand },
+  placedPill: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 7, borderRadius: radius.pill, backgroundColor: colors.surface3 },
+  placedText: { color: colors.brand, fontWeight: "800", fontSize: 11 },
+  rowErr: { color: colors.error, fontSize: 11, marginTop: 4, marginHorizontal: 4 },
   addedPill: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface3 },
   buyBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.brand },
   buyBtnText: { color: colors.brand, fontWeight: "800", fontSize: 12 },
