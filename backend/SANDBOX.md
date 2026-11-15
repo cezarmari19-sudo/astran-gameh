@@ -21,3 +21,14 @@ Ubuntu 24.04 ca gazda: daca `kernel.apparmor_restrict_unprivileged_userns=1`, co
 ## Platforme fara control asupra seccomp/userns (PaaS)
 Daca diagnoza arata ca user namespaces sunt blocate si nu poti schimba asta, jail-ul bwrap nu poate functiona
 acolo. Optiuni sigure: un VPS/VM cu kernel propriu, Fly.io Machines, sau un runtime cu sandbox de kernel (gVisor).
+
+## Runtime-ul de scripturi CLIENT (pe telefon)
+Fisierele `.lua/.luau` marcate **Client** nu ruleaza pe server: `GET /sandbox/games/{id}/client-bundle` le da
+aparatului, iar `frontend/src/components/ScriptSandboxWebView.tsx` le ruleaza intr-un WebView fara retea (CSP strict)
+-> Worker nou la fiecare rulare -> Luau compilat in WASM, cu ACELASI `prelude.luau` ca serverul. Rezultatul (ops)
+e validat/curatat in `frontend/src/sandbox/runtime.ts` (oglinda `runner.sanitize_ops`) si redat in scena.
+- Punct de intrare: `main` (daca e marcat Client) sau `client/main` (serverul ramane cu `main`).
+- Fara limite de gameplay impuse (viteza, saritura, gravitatie): doar plasa tehnica anti-overflow (1e9).
+- Limitare cunoscuta: modelul e "lot" (ceas virtual, ca pe server) - nu exista evenimente live (input, Touched,
+  bucla per cadru). Ar cere un host WASM reentrant (rebuild cu `build_wasm.sh`, Emscripten + sursa Luau).
+- Teste: `cd frontend && node --experimental-strip-types --import ./src/sandbox/register-alias.mjs --test src/sandbox/runtime.test.mts`
