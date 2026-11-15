@@ -8,9 +8,9 @@
 // (altfel un folder fara niciun fisier in el ar disparea din proiect).
 
 // "server" (implicit): fisierul se compileaza/ruleaza in sandbox-ul Luau de pe server
-// (vezi backend/astran_sandbox/routes.py luau_bundle) - singurul runtime care exista azi.
-// "client": fisierul e salvat si exclus EXPLICIT din executia de pe server, dar nu
-// exista inca un runtime pe telefon care sa-l ruleze - vezi nota din CodeStudio.tsx.
+// (vezi backend/astran_sandbox/routes.py luau_bundle).
+// "client": fisierul e exclus din executia de pe server si ruleaza pe telefonul jucatorului, in
+// sandbox-ul din WebView (src/sandbox/runtime.ts, ScriptSandboxWebView.tsx).
 export type FileTarget = "server" | "client";
 export type ProjectFile = { path: string; source: string; target?: FileTarget };
 export type ProjectState = { files: ProjectFile[]; folders: string[] };
