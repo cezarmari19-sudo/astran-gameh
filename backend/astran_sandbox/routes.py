@@ -1,3 +1,4 @@
+
 """Endpoint-uri FastAPI pentru sandbox-ul Luau si pentru Code Editor-ul jocului (proiect
 real de fisiere: foldere/subfoldere/fisiere, adancime nelimitata).
 
@@ -266,9 +267,10 @@ def luau_bundle(files: list[dict]) -> list[dict]:
     exact formatul pe care runner.py/validate_files/run_files il asteapta neschimbat.
 
     Fisierele .lua/.luau marcate explicit target="client" NU ajung niciodata aici: nu
-    se compileaza, nu se executa, nu influenteaza in niciun fel rularea de pe server -
-    sunt pastrate doar ca organizare/cod de proiect pentru un viitor runtime pe telefon
-    (nu exista inca), exact ca restul fisierelor cu alta extensie."""
+    se compileaza si nu se executa pe server. Ele ruleaza pe dispozitivul jucatorului, in
+    sandbox-ul din WebView (vezi luau_client_bundle si frontend/src/sandbox/).
+    NOTA: serverul cere un fisier `main` in bundle-ul lui; clientul accepta `main` (marcat
+    Client) SAU `client/main`, ca un joc sa poata avea intrare si pe server, si pe client."""
     return [
         {"name": luau_name_for(f["path"]), "source": f["source"]}
         for f in files
