@@ -12,6 +12,8 @@ type TrashedGame = {
   game_id: string;
   title: string;
   deleted_at: string | null;
+  purge_at?: string | null;
+  retention_days?: number;
   thumbnail_url: string | null;
   recovery_state: string;
 };
@@ -82,6 +84,9 @@ export default function TrashScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.rowTitle} numberOfLines={1}>{item.title}</Text>
                 <Text style={styles.rowMeta}>Șters la {formatDate(item.deleted_at)}</Text>
+                {item.purge_at ? (
+                  <Text style={styles.rowMeta}>Se șterge definitiv pe {new Date(item.purge_at).toLocaleDateString()}</Text>
+                ) : null}
               </View>
               <Pressable testID={`trash-recover-${item.game_id}`} onPress={() => setRecoverTarget(item)} style={styles.recoverBtn}>
                 <MaterialCommunityIcons name="backup-restore" size={16} color={colors.onBrand} />
