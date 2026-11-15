@@ -17,7 +17,7 @@ import { createObject, applyLocalTransform, applyMaterial } from "@/src/studio3d
 import SettingsModalShell from "@/src/components/SettingsModalShell";
 import { usePlayerSettings, GraphicsQuality } from "@/src/hooks/usePlayerSettings";
 import ScriptSandboxWebView, { ScriptSandboxHandle } from "@/src/components/ScriptSandboxWebView";
-import { PRELUDE_SOURCE } from "@/src/sandbox/preludeSource";
+import { mergeScriptOps, runClientBundle } from "@/src/sandbox/clientRun";
 
 type ScriptOp = {
   t: number; op: "create" | "set" | "destroy" | "world" | "material"; id: string;
@@ -571,23 +571,10 @@ export default function PlayScreen() {
       try {
         const bundle = await api(`/sandbox/games/${id}/client-bundle`);
         if (cancelled) return;
-        const files = Array.isArray(bundle?.files) ? bundle.files : [];
-        if (files.length > 0 && sandboxRef.current) {
-          const result = await sandboxRef.current.run({
-            files,
-            preludeSource: PRELUDE_SOURCE,
-            assets: Array.isArray(bundle?.assets) ? bundle.assets : [],
-            scene: bundle?.scene ?? null,
-            capabilities: Array.isArray(bundle?.assets) && bundle.assets.length > 0 ? ["assets"] : [],
-          });
-          if (cancelled) return;
-          if (result.ops.length > 0) {
-            scriptOpsRef.current = [...scriptOpsRef.current, ...(result.ops as ScriptOp[])];
-          }
-          if (result.errors.length > 0) {
-            console.log("[play] client script errors", result.errors);
-          }
-        }
+        const result = await runClientBundle(sandboxRef.current, bundle);
+        if (cancelled || !result) return;
+        // Merge pe timp, nu simpla concatenare - vezi mergeScriptOps (cursorul nextOp e ordonat dupa t).
+        scriptOpsRef.current = mergeScriptOps(scriptOpsRef.current, result.ops as ScriptOp[], nextOpRef.current);
       } catch (e) { console.log("[play] client script run failed", e); }
     })();
     return () => { cancelled = true; };
