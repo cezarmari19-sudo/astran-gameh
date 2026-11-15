@@ -48,6 +48,11 @@ export type SandboxResult = {
 // ---------------- constante (oglinda runner.py) ----------------
 
 export const ENTRY_NAME = "main";
+// Punctul de intrare al scripturilor CLIENT. Serverul cere si el un fisier `main`, iar un proiect
+// are un singur `main` (calea e unica): un joc nu putea avea simultan intrare pe server si pe
+// client. De aceea clientul accepta si `client/main`. Precedenta: `main` (daca e marcat Client),
+// apoi `client/main`. Host-ul WASM primeste numele intrarii ca parametru (verificat in teste).
+export const CLIENT_ENTRY_CANDIDATES = [ENTRY_NAME, "client/main"] as const;
 const MAX_FILES = 32;
 const MAX_NAME_CHARS = 64;
 const MAX_SOURCE_CHARS = 20000;
@@ -225,6 +230,13 @@ export function buildBundle(files: SandboxFile[], assets?: unknown, scene?: unkn
   return out;
 }
 
+export function pickEntry(files: { name: string }[]): string | null {
+  for (const cand of CLIENT_ENTRY_CANDIDATES) {
+    if (files.some((f) => f.name === cand)) return cand;
+  }
+  return null;
+}
+
 export function buildRunMessage(opts: SandboxRunOptions) {
   if (!opts || typeof opts.preludeSource !== "string" || opts.preludeSource.length === 0) {
     throw new Error("Missing prelude");
@@ -232,8 +244,11 @@ export function buildRunMessage(opts: SandboxRunOptions) {
   if (opts.preludeSource.length > MAX_PRELUDE_CHARS) throw new Error("Prelude too large");
 
   const clean = validateFiles(opts.files);
-  if (!clean.some((f) => f.name === ENTRY_NAME)) {
-    throw new Error(`Missing the '${ENTRY_NAME}' script (it runs first)`);
+  const entry = pickEntry(clean);
+  if (!entry) {
+    throw new Error(
+      `Missing the entry script: mark '${ENTRY_NAME}' as Client, or add 'client/${ENTRY_NAME}' (it runs first)`
+    );
   }
 
   const rawTimeout = isNum(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
@@ -250,7 +265,7 @@ export function buildRunMessage(opts: SandboxRunOptions) {
     timeoutMs,
     memMB,
     caps,
-    entry: ENTRY_NAME,
+    entry,
   };
 }
 
@@ -509,6 +524,10 @@ const PAGE_SCRIPT = `
   }
   window.addEventListener("message", onMsg);
   document.addEventListener("message", onMsg); // Android RN WebView posteaza pe document
+  // Handshake: un mesaj trimis de RN INAINTE ca pagina sa fi inregistrat listener-ele se pierde
+  // fara urma (pagina are ~1 MB de WASM inline si pe telefoane lente se incarca mai tarziu decat
+  // apelurile de retea ale ecranului de joc). Componenta asteapta acest semnal inainte sa trimita.
+  send({ type: "ready" });
 })();
 `;
 
