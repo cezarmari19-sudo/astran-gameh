@@ -321,6 +321,8 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
         membership = await db.instance_players.find_one({"instance_id": instance_id, "user_id": user_id})
         if membership is None:
             return False
+        if await db.games.find_one({"game_id": game_id, "deleted": True}, {"_id": 1}) is not None:
+            return False  # jocul e in Cosul de gunoi: fara conexiuni in timp real
         inst = await db.game_instances.find_one({"instance_id": instance_id, "game_id": game_id})
         return inst is not None
 
