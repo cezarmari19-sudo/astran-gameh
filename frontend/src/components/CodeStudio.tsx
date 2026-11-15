@@ -7,11 +7,15 @@
 // (create/rename/move/delete/duplicate) direct pe aceasta structura - FileExplorer doar
 // afiseaza si cere operatii, nu tine el insusi vreo copie a datelor.
 import React, { useMemo, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, Modal, ScrollView, ActivityIndicator, Platform, KeyboardAvoidingView } from "react-native";
+import { View, Text, StyleSheet, Pressable, Modal, ScrollView, Platform, KeyboardAvoidingView } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { colors, radius, spacing } from "@/src/theme";
 import { api } from "@/src/api/client";
 import FileExplorer from "./FileExplorer";
+import ScriptSandboxWebView, { ScriptSandboxHandle } from "./ScriptSandboxWebView";
+import { clientFilesFromProject } from "@/src/sandbox/clientRun";
+import { PRELUDE_SOURCE } from "@/src/sandbox/preludeSource";
+import type { SandboxResult } from "@/src/sandbox/runtime";
 import CodeEditor from "./CodeEditor";
 import {
   ProjectState, ProjectFile, FileTarget, nameOf, parentPath, joinPath, rewritePrefix,
@@ -49,6 +53,11 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
   const [running, setRunning] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [runLines, setRunLines] = useState<RunLine[]>([]);
+  // Sandbox-ul local (WebView -> Worker -> Luau WASM) pentru fisierele marcate Client: aceleasi
+  // limite si acelasi preludiu ca la jocul real (vezi src/sandbox/runtime.ts).
+  const sandboxRef = useRef<ScriptSandboxHandle>(null);
+  // Numar de rulare: o rulare oprita/inlocuita nu mai are voie sa scrie in consola.
+  const runSeq = useRef(0);
   const [closeConfirm, setCloseConfirm] = useState<{ path: string } | null>(null);
 
   // Continut "de referinta" per path la momentul ultimului load in editor - folosit doar
@@ -180,32 +189,69 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
     setDirtyPaths(prev => new Set(prev).add(path));
   }
 
-  // ---------- Run: testeaza doar subsetul .lua/.luau din proiectul curent ----------
+  // ---------- Run: fisierele Server pe server, fisierele Client local pe telefon ----------
+
+  function resultLines(r: { output?: any[]; errors?: string[]; truncated?: boolean }, tag: string): RunLine[] {
+    const lines: RunLine[] = [];
+    // r.output e un array de {level, msg} (vezi runner.py), nu de string-uri brute -
+    // trebuia extras l.msg, altfel aparea "[object Object]" in consola in loc de textul real.
+    (r?.output ?? []).forEach((l: { level?: string; msg?: string }) =>
+      lines.push({ kind: l?.level === "warn" ? "error" : "log", text: tag + String(l?.msg ?? "") })
+    );
+    (r?.errors ?? []).forEach((l: string) => lines.push({ kind: "error", text: tag + l }));
+    if (r?.truncated) lines.push({ kind: "log", text: tag + "(output truncated)" });
+    return lines;
+  }
 
   async function runProject() {
+    const seq = ++runSeq.current;
+    const alive = () => runSeq.current === seq;
     setRunning(true);
     setShowConsole(true);
     setRunLines([{ kind: "log", text: "Running..." }]);
     try {
-      const r = await api("/sandbox/run", {
-        method: "POST",
-        body: JSON.stringify({ files: project.files.map(f => ({ path: f.path, source: f.source, target: targetOf(f) })) }),
-      });
+      const hasServer = project.files.some(f => isRunnable(f.path) && targetOf(f) === "server");
+      const clientFiles = clientFilesFromProject(project.files);
+      // Etichetele apar doar cand ruleaza ambele parti, ca sa se vada de unde vine fiecare linie.
+      const both = hasServer && clientFiles.length > 0;
       const lines: RunLine[] = [];
-      // r.output e un array de {level, msg} (vezi runner.py), nu de string-uri brute -
-      // trebuia extras l.msg, altfel aparea "[object Object]" in consola in loc de textul real.
-      (r?.output ?? []).forEach((l: { level?: string; msg?: string }) =>
-        lines.push({ kind: l?.level === "warn" ? "error" : "log", text: String(l?.msg ?? "") })
-      );
-      (r?.errors ?? []).forEach((l: string) => lines.push({ kind: "error", text: l }));
-      if (lines.length === 0) lines.push({ kind: "log", text: r?.ok ? "No output (no runnable .lua/.luau files, or nothing printed)." : "Failed." });
-      if (r?.truncated) lines.push({ kind: "log", text: "(output truncated)" });
+
+      if (hasServer) {
+        const r = await api("/sandbox/run", {
+          method: "POST",
+          body: JSON.stringify({ files: project.files.map(f => ({ path: f.path, source: f.source, target: targetOf(f) })) }),
+        });
+        if (!alive()) return;
+        lines.push(...resultLines(r, both ? "[server] " : ""));
+      }
+
+      if (clientFiles.length > 0) {
+        setRunLines([...lines, { kind: "log", text: "Running client scripts..." }]);
+        const r: SandboxResult | undefined = await sandboxRef.current?.run({
+          files: clientFiles,
+          preludeSource: PRELUDE_SOURCE,
+        });
+        if (!alive()) return;
+        if (r) lines.push(...resultLines(r, both ? "[client] " : ""));
+        else lines.push({ kind: "error", text: "Client sandbox is not available" });
+      }
+
+      if (lines.length === 0) lines.push({ kind: "log", text: "No output (no runnable .lua/.luau files, or nothing printed)." });
       setRunLines(lines);
     } catch (e: any) {
-      setRunLines([{ kind: "error", text: e.message || "Run failed" }]);
+      if (alive()) setRunLines([{ kind: "error", text: e.message || "Run failed" }]);
     } finally {
-      setRunning(false);
+      if (alive()) setRunning(false);
     }
+  }
+
+  // Stop: scripturile client se opresc garantat (WebView recreat => Worker distrus); cererea
+  // catre server nu mai poate fi anulata, dar rezultatul ei e ignorat.
+  function stopProject() {
+    runSeq.current++;
+    sandboxRef.current?.stop();
+    setRunning(false);
+    setRunLines(prev => [...prev, { kind: "log", text: "Stopped." }]);
   }
 
   function saveAll() {
@@ -220,13 +266,16 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.root}>
+        {/* Sandbox pentru Run-ul fisierelor Client: fara UI (0x0). Se monteaza doar cat Modal-ul e
+            deschis, deci inchiderea editorului il distruge (si opreste orice script). */}
+        <ScriptSandboxWebView gameId="code-studio" ref={sandboxRef} />
         <View style={styles.topBar}>
           <Pressable testID="cs-toggle-explorer" onPress={() => setShowExplorer(v => !v)} hitSlop={8} style={styles.topBtn}>
             <MaterialCommunityIcons name="file-tree-outline" size={20} color={showExplorer ? colors.brand : colors.onSurface2} />
           </Pressable>
           <Text style={styles.topTitle}>Code {saved ? "· Saved ✓" : anyDirty ? "· Unsaved changes" : ""}</Text>
-          <Pressable testID="cs-run" onPress={runProject} hitSlop={8} style={styles.topBtn} disabled={running}>
-            {running ? <ActivityIndicator size="small" color={colors.brand} /> : <MaterialCommunityIcons name="play-circle-outline" size={22} color={colors.brand} />}
+          <Pressable testID="cs-run" onPress={running ? stopProject : runProject} hitSlop={8} style={styles.topBtn}>
+            {running ? <MaterialCommunityIcons name="stop-circle-outline" size={22} color={colors.error} /> : <MaterialCommunityIcons name="play-circle-outline" size={22} color={colors.brand} />}
           </Pressable>
           <Pressable testID="cs-find" onPress={() => setFindSignal(s => s + 1)} hitSlop={8} style={styles.topBtn} disabled={!activePath}>
             <MaterialCommunityIcons name="magnify" size={20} color={activePath ? colors.onSurface2 : colors.onSurface3} />
@@ -316,7 +365,7 @@ export default function CodeStudio({ visible, project, onChange, onClose, onSave
               <View style={styles.targetHint}>
                 <MaterialCommunityIcons name="information-outline" size={13} color={colors.onSurface3} />
                 <Text style={styles.targetHintText}>
-                  Marcat Client: exclus din rularea de pe server. Nu ruleaza inca pe telefon (runtime-ul de client nu exista inca) - e salvat ca pregatire pentru el.
+                  Marcat Client: ruleaza pe telefonul jucatorului, in sandbox (nu pe server). Punctul de intrare e main (daca e marcat Client) sau client/main; Run il porneste aici, local.
                 </Text>
               </View>
             ) : null}
