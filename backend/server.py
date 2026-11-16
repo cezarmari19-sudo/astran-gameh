@@ -244,6 +244,7 @@ import astran_sandbox.project_security as psec
 # Mutari de Astrans sigure la cadere (jurnal + pasi idempotenti) - vezi astran_sandbox/money.py.
 # NU e optional: fara el, platile/transferurile ar reveni la varianta cu pasi neatomici.
 from astran_sandbox import money
+from astran_sandbox import trash_purge
 from astran_sandbox import payment_reversal as preversal
 from astran_sandbox import email_verification as emailver
 from astran_sandbox.media_validation import clean_image_ref
@@ -596,6 +597,9 @@ async def startup():
     # (cadere de proces intre debit si credit/ledger) - vezi astran_sandbox/money.py.
     await money.ensure_indexes(db)
     app.state.money_recovery_task = asyncio.create_task(money.recovery_loop(db))
+    # Cosul de gunoi: stergere definitiva automata dupa TRASH_RETENTION_DAYS (30) - vezi astran_sandbox/trash_purge.py.
+    await trash_purge.ensure_indexes(db)
+    app.state.trash_purge_task = asyncio.create_task(trash_purge.purge_loop(db))
     await db.payment_reversed_refs.create_index("ref", unique=True)
     await db.email_verifications.create_index("user_id", unique=True)
     await db.password_resets.create_index("user_id", unique=True)
@@ -661,6 +665,7 @@ async def startup():
         await db.users.update_one({"user_id": demo_owner_id}, {"$set": {"password_hash": None}})
         # (inainte stergerea rula la FIECARE pornire, inclusiv cand contul demo era creat
         # intentionat cu ASTRAN_SEED_DEMO_USER=1 - jocurile lui dispareau la fiecare restart)
+        await trash_purge.purge_owner_games_data(db, demo_owner_id)  # fara date orfane
         await db.games.delete_many({"owner_id": demo_owner_id})
     # Ledger: campurile sparse-unique nu trebuie sa existe cu valoarea null (null SE indexeaza).
     await db.astran_ledger.update_many({"idempotency_key": {"$type": "null"}}, {"$unset": {"idempotency_key": ""}})
@@ -683,6 +688,9 @@ async def shutdown():
     gtask = getattr(app.state, "google_voided_task", None)
     if gtask is not None:
         gtask.cancel()
+    ptask = getattr(app.state, "trash_purge_task", None)
+    if ptask is not None:
+        ptask.cancel()
     client.close()
 
 
@@ -1139,8 +1147,6 @@ async def get_user_public(user_id: str, current=Depends(get_current_user)):
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     return {"user": _user_public_minimal(u)}
-
-
 def _game_defaults(doc: dict) -> dict:
     """Completeaza campurile noi (max_players, player_character, group, subgenre) pentru
     jocurile salvate inainte de ele, si expune created_at/updated_at cu semantica ceruta:
@@ -1877,6 +1883,8 @@ async def delete_game(game_id: str, body: DeleteGameBody, request: Request, curr
     await psec.log_security_event(
         db, action="project_delete", result="success", user_id=current["user_id"], game_id=game_id, ip=ip,
     )
+    # Instantele deschise nu mai pot primi jucatori (jocul e in Cos); WebSocket-ul verifica si el `deleted`.
+    await db.game_instances.update_many({"game_id": game_id, "status": "open"}, {"$set": {"status": "closed"}})
     # Datele (fisiere, scene, setari, colaboratori) NU sunt sterse - raman intacte in
     # game_scripts / game_collaborators / game_testers pentru recuperare (vezi item 2).
     return {"ok": True, "trashed": True}
@@ -1895,6 +1903,8 @@ async def list_trash(current=Depends(get_current_user)):
             "game_id": g["game_id"],
             "title": g.get("title"),
             "deleted_at": g.get("deleted_at"),
+            "purge_at": trash_purge.purge_at(g.get("deleted_at")),  # data stergerii definitive automate
+            "retention_days": trash_purge.retention_days(),
             "thumbnail_url": g.get("thumbnail_url"),
             "recovery_state": "pending",
         })
@@ -2055,10 +2065,15 @@ async def recover_confirm(game_id: str, body: RecoveryConfirmBody, request: Requ
     if has_biometric and tok["stage"] != "biometric_verified":
         raise HTTPException(status_code=400, detail="Verificarea biometrica este obligatorie pentru acest cont")
 
-    await db.games.update_one(
-        {"game_id": game_id},
-        {"$set": {"deleted": False, "deleted_at": None, "deleted_by": None, "status": "active"}},
+    # Conditionat: daca jobul de purge a revendicat deja proiectul (purging_at setat), restaurarea e refuzata
+    # in loc sa "invie" un joc pe jumatate sters. Operatiile sunt atomice pe document: castiga una singura.
+    _restored = await db.games.update_one(
+        {"game_id": game_id, "deleted": True, "purging_at": None},
+        {"$set": {"deleted": False, "deleted_at": None, "deleted_by": None, "status": "active"},
+         "$unset": {"purging_at": "", "purging_token": ""}},
     )
+    if not _restored.matched_count:
+        raise HTTPException(status_code=409, detail="Proiectul este in curs de stergere definitiva si nu mai poate fi recuperat")
     await psec.consume_token(db, token_id=body.token_id)
     await psec.invalidate_other_tokens(db, user_id=current["user_id"], game_id=game_id, purpose="project_recover", keep_token_id=body.token_id)
     await psec.reset_attempts(db, user_id=current["user_id"], scope_id=game_id, purpose="project_recover")
@@ -2087,8 +2102,6 @@ async def webauthn_register_verify(body: WebAuthnVerifyBody, current=Depends(get
 async def webauthn_auth_options(current=Depends(get_current_user)):
     challenge_id, options_json = await psec.webauthn_authentication_options(db, user_id=current["user_id"])
     return {"challenge_id": challenge_id, "options": options_json}
-
-
 @api.post("/games/{game_id}/security/webauthn/verify")
 async def webauthn_verify_for_recovery(game_id: str, body: WebAuthnVerifyBody, current=Depends(get_current_user), token_id: str = ""):
     """Verifica asertiunea WebAuthn si marcheaza token-ul de recuperare/reset drept
@@ -3093,8 +3106,6 @@ async def stripe_create_intent(body: StripeIntentBody, current=Depends(get_curre
     data = r.json()
     return {"payment_intent_id": data["id"], "client_secret": data.get("client_secret"),
             "amount": data.get("amount"), "currency": data.get("currency")}
-
-
 @api.post("/wallet/stripe/webhook")
 async def stripe_webhook(request: Request):
     """Webhook Stripe (refund total / dispute): retrage Astransii cumparati cu plata respectiva.
