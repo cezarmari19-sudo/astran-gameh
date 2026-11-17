@@ -230,6 +230,18 @@ class RealtimeHub:
             if self.redis is not None:
                 await self.redis.unsubscribe_if_unused(instance_id)
 
+    async def disconnect_user(self, user_id: str) -> None:
+        """GDPR (stergere cont): inchide conexiunile live ale utilizatorului din ACEST proces (cod 4401 = token
+        invalid). Conexiunile aflate pe alte procese se opresc la urmatoarea reconectare, cand
+        resolve_user_from_token respinge contul."""
+        for room in list(self.rooms.values()):
+            m = room.members.get(user_id)
+            if m is not None:
+                try:
+                    await m.ws.close(code=4401)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def connect_redis(self, redis_url: str) -> None:
         bridge = RedisBridge(redis_url)
         bridge.on_remote_message = self.relay_remote
@@ -256,6 +268,11 @@ class RealtimeHub:
 
 
 hub = RealtimeHub()
+try:
+    from astran_sandbox import privacy as _privacy
+    _privacy.register_disconnector(hub.disconnect_user)
+except Exception:  # noqa: BLE001 - GDPR e optional pentru realtime; stergerea contului ramane valida fara el
+    pass
 
 
 def _clean_state(msg: dict) -> dict:
