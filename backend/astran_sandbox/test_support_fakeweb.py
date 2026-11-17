@@ -23,7 +23,7 @@ def install():
             if n in ("get","post","put","patch","delete"): return self._reg(n.upper())
             raise AttributeError(n)
     fa.HTTPException=HTTPException; fa.APIRouter=APIRouter; fa.Depends=lambda x=None: x
-    fa.Request=object; fa.WebSocket=object; fa.Query=lambda *a,**k: None
+    fa.Request=object; fa.WebSocket=object; fa.Query=lambda *a,**k: None; fa.Header=lambda *a,**k: None
     sys.modules["fastapi"]=fa
     pd=types.ModuleType("pydantic")
     class BaseModel:
@@ -32,3 +32,11 @@ def install():
     pd.BaseModel=BaseModel; pd.Field=lambda *a,default=None,**k: default
     pd.EmailStr=str; pd.validator=lambda *a,**k:(lambda f:f); pd.field_validator=pd.validator; pd.ConfigDict=dict
     sys.modules["pydantic"]=pd
+    # fastapi.responses (folosit de privacy_routes.py): Response / JSONResponse minimale, cu status_code/body/headers
+    fr=types.ModuleType("fastapi.responses")
+    class Response:
+        def __init__(self,content=None,status_code=200,headers=None,media_type=None):
+            self.content=content; self.status_code=status_code; self.headers=headers or {}; self.media_type=media_type
+    class JSONResponse(Response): pass
+    fr.Response=Response; fr.JSONResponse=JSONResponse
+    sys.modules["fastapi.responses"]=fr; fa.responses=fr
