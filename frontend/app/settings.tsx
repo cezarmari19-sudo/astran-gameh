@@ -7,6 +7,7 @@ import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
+import PrivacyDataSection from "@/src/components/PrivacyDataSection";
 import { colors, radius, spacing } from "@/src/theme";
 
 export default function SettingsScreen() {
@@ -79,6 +80,8 @@ export default function SettingsScreen() {
         {graphics >= 3 && distance >= 3 ? (
           <Text style={styles.warn}>⚠ High graphics + high view distance can reduce performance on older devices.</Text>
         ) : null}
+
+        <PrivacyDataSection />
       </ScrollView>
     </SafeAreaView>
   );
