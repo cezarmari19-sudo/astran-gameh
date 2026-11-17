@@ -117,6 +117,11 @@ def make_dm_routers(
             await rt_hub.redis.publish("dm_" + uid, payload)
 
     hub = DmHub()
+    try:
+        from astran_sandbox import privacy as _privacy
+        _privacy.register_disconnector(hub.disconnect_user)   # GDPR: stergerea contului inchide si /ws/dm
+    except Exception:  # noqa: BLE001
+        pass
     service = DmService(
         store=MongoDmStore(db), hub=hub,
         rules_provider=shared_store(db).get_compiled,   # ACELEASI reguli ca la chatul din joc
