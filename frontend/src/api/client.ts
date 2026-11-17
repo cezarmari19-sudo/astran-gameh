@@ -95,6 +95,18 @@ export async function api<T = any>(
   return data as T;
 }
 
+// Pentru descarcari binare (ZIP-ul GDPR): api() citeste raspunsul ca text/JSON, deci nu merge pentru fisiere.
+// Intoarce URL-ul absolut + antetul Authorization. Tokenul NU intra niciodata in URL.
+export async function authedRequestInfo(path: string): Promise<{ url: string; headers: Record<string, string> }> {
+  if (!BASE_VALID) {
+    const err = new Error("Configurare lipsa: adresa serverului (EXPO_PUBLIC_BACKEND_URL) nu e setata in aceasta versiune a aplicatiei.");
+    (err as any).status = 0;
+    throw err;
+  }
+  const token = await getToken();
+  return { url: `${BASE}/api${path}`, headers: token ? { Authorization: `Bearer ${token}` } : {} };
+}
+
 // Construieste link-ul catre WebSocket-ul de multiplayer live (vezi backend/realtime.py).
 // Montat direct pe `app` (NU sub /api, vezi server.py) - de-aia `path` aici e absolut
 // ("/ws/games/...") , nu trece prin acelasi prefix ca restul lui `api()` de mai sus.
