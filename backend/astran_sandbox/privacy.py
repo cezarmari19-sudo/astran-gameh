@@ -46,7 +46,6 @@ STALL_SWEEP_INTERVAL_SECONDS = 60
 MAX_DELETION_ATTEMPTS = 20
 
 FINANCIAL_LEDGER_TYPES = ("purchase", "purchase_reversal")
-EXPORT_ROW_LIMIT = 10000
 EXPORT_FORMAT_VERSION = 1
 
 _DELETED_USERNAME = "[deleted]"
@@ -58,6 +57,11 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(os.environ.get(name, default)))
     except (TypeError, ValueError):
         return default
+
+
+# Plafon de siguranta (memorie) pentru UN set de randuri din export. Exportul trebuie sa fie COMPLET: daca un set ar atinge
+# plafonul, privacy_export.py esueaza explicit (TOO_LARGE) in loc sa trunchieze in tacere. Valoarea veche era 10000.
+EXPORT_ROW_LIMIT = _env_int("PRIVACY_EXPORT_ROW_CAP", 1_000_000)
 
 
 def financial_retention_days() -> int:
@@ -308,6 +312,8 @@ async def _step_revoke_access(db, uid: str, pseud: str) -> None:
     await db.email_verifications.delete_many({"user_id": uid})
     await db[REAUTH_CODE_COLLECTION].delete_many({"user_id": uid})
     await db[EXPORT_COLLECTION].delete_many({"user_id": uid})
+    from . import privacy_export        # import tardiv: privacy_export importa privacy
+    await privacy_export.purge_user(db, uid)    # arhivele ZIP de export (fisiere + metadate) dispar odata cu contul
     await db.recovery_tokens.delete_many({"user_id": uid})
     await db.webauthn_credentials.delete_many({"user_id": uid})
     await db.webauthn_challenges.delete_many({"user_id": uid})
