@@ -170,6 +170,14 @@ class DmHub:
                 except Exception:  # noqa: BLE001
                     pass
 
+    async def disconnect_user(self, uid: str) -> None:
+        """GDPR (stergere cont): inchide toate conexiunile /ws/dm ale utilizatorului (cod 4401 = token invalid)."""
+        for ws in list(self._conns.get(uid, ())):
+            try:
+                await ws.close(code=4401)
+            except Exception:  # noqa: BLE001
+                pass
+
     async def send(self, uid: str, payload: dict) -> None:
         text = json.dumps(payload, ensure_ascii=False)
         for ws in list(self._conns.get(uid, ())):
