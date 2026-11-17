@@ -150,3 +150,18 @@ export const projectSecurityApi = {
     }),
   webauthnAuthOptions: () => api("/auth/webauthn/authenticate/options", { method: "POST" }),
 };
+
+// GDPR: export date (Art. 15/20) si stergere cont (Art. 17). Oglindeste backend/astran_sandbox/privacy_routes.py.
+// Re-autentificarea (parola / cod pe email), confirmarea si apartenenta contului se verifica pe server.
+export const privacyApi = {
+  status: () => api("/privacy/status"),
+  sendReauthCode: () => api("/privacy/reauth/code", { method: "POST" }),
+  requestExport: (creds: { password?: string; code?: string }) =>
+    api("/privacy/export/request", { method: "POST", body: JSON.stringify(creds) }),
+  // tichetul e de unica folosinta si expira; cere si sesiunea utilizatorului
+  downloadExport: (ticket: string) =>
+    api("/privacy/export/download", { method: "POST", body: JSON.stringify({ ticket }) }),
+  deleteAccount: (body: { password?: string; code?: string; confirm: boolean; confirmation_text: string }) =>
+    api("/privacy/delete-account", { method: "POST", body: JSON.stringify(body) }),
+  deletionStatus: (deletionId: string) => api(`/privacy/deletion/${encodeURIComponent(deletionId)}`),
+};
