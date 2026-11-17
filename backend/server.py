@@ -245,6 +245,8 @@ import astran_sandbox.project_security as psec
 # NU e optional: fara el, platile/transferurile ar reveni la varianta cu pasi neatomici.
 from astran_sandbox import money
 from astran_sandbox import trash_purge
+from astran_sandbox import privacy            # GDPR: stergere cont + export date (vezi PRIVACY_GDPR.md)
+from astran_sandbox.privacy_routes import make_privacy_router
 from astran_sandbox import payment_reversal as preversal
 from astran_sandbox import email_verification as emailver
 from astran_sandbox.media_validation import clean_image_ref
@@ -532,11 +534,16 @@ async def resolve_user_from_token(token: str) -> Optional[dict]:
             exp = exp.replace(tzinfo=timezone.utc)
         if exp and exp < now_utc():
             return None
-        return _strip_secret(await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0}))
+        su = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+        if su is not None and su.get("deletion_state"):
+            return None   # GDPR: cont in curs de stergere - nicio sesiune/token nu mai este valid
+        return _strip_secret(su)
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG], leeway=JWT_IAT_LEEWAY)
         u = await db.users.find_one({"user_id": payload["sub"]}, {"_id": 0})
+        if u is not None and u.get("deletion_state"):
+            return None   # GDPR: cont in curs de stergere
         if _jwt_predates_reset(payload, u):
             return None
         return _strip_secret(u)
@@ -600,6 +607,9 @@ async def startup():
     # Cosul de gunoi: stergere definitiva automata dupa TRASH_RETENTION_DAYS (30) - vezi astran_sandbox/trash_purge.py.
     await trash_purge.ensure_indexes(db)
     app.state.trash_purge_task = asyncio.create_task(trash_purge.purge_loop(db))
+    # GDPR: indexuri + worker care reia stergerile de conturi ramase la jumatate si elimina datele pseudonimizate expirate.
+    await privacy.ensure_indexes(db)
+    app.state.privacy_task = asyncio.create_task(privacy.deletion_worker(db))
     await db.payment_reversed_refs.create_index("ref", unique=True)
     await db.email_verifications.create_index("user_id", unique=True)
     await db.password_resets.create_index("user_id", unique=True)
@@ -691,6 +701,9 @@ async def shutdown():
     ptask = getattr(app.state, "trash_purge_task", None)
     if ptask is not None:
         ptask.cancel()
+    gdpr_task = getattr(app.state, "privacy_task", None)
+    if gdpr_task is not None:
+        gdpr_task.cancel()
     client.close()
 
 
@@ -813,6 +826,8 @@ async def login(body: LoginBody, request: Request):
         await psec.record_failed_attempt(db, user_id="login", scope_id=scope, purpose="login")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     await psec.reset_attempts(db, user_id="login", scope_id=scope, purpose="login")
+    if user.get("deletion_state"):
+        raise HTTPException(status_code=403, detail="Account deletion is in progress")
     token = make_jwt(user["user_id"])
     return {"token": token, "session_token": token, "user": _user_public(user)}
 
@@ -847,6 +862,8 @@ async def google_session(body: SessionBody):
     # "User@Gmail.com" de la Google nu gasea contul "user@gmail.com" si crea un cont duplicat.
     existing = await db.users.find_one({"email": {"$regex": f"^{re.escape(email.strip())}$", "$options": "i"}})
     password_login_reset = False
+    if existing and existing.get("deletion_state"):
+        raise HTTPException(status_code=403, detail="Account deletion is in progress")
     if existing:
         user_id = existing["user_id"]
         patch = {"display_name": existing.get("display_name") or name}
@@ -3302,6 +3319,10 @@ if make_dm_routers is not None:
 if make_game_permissions_router is not None:
     # SECURITY: ownerul vede doar profilul public al colaboratorilor (fara email/sold)
     api.include_router(make_game_permissions_router(get_current_user, db, _user_public_minimal))
+
+# GDPR: /api/privacy/* (export date, stergere cont) - vezi astran_sandbox/privacy_routes.py
+api.include_router(make_privacy_router(get_current_user, db, verify_pw=verify_pw_async, client_ip=_client_ip,
+                                       psec=psec, emailver=emailver))
 
 app.include_router(api)
 
