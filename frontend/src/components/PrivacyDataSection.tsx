@@ -184,7 +184,7 @@ export default function PrivacyDataSection() {
     try {
       const how = await downloadArchive(exportInfo?.info.archive_name || "astran_game_data_export.zip",
         t("dx_download_unavailable"), t("dx_download_failed"));
-      setDlMsg({ ok: true, text: how === "saved" ? t("dx_downloaded_saved") : t("dx_downloaded_shared") });
+      if (how !== "cancelled") setDlMsg({ ok: true, text: how === "saved" ? t("dx_downloaded_saved") : t("dx_downloaded_shared") });
     } catch (e: any) {
       setDlMsg({ ok: false, text: errText(e, t("dx_download_failed")) });
     } finally {
