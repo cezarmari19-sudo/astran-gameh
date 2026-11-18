@@ -23,8 +23,8 @@ Sistem **separat** de chatul din joc (nu folosește `chat_core.ChatDispatcher`, 
   (`GET/POST /api/account/data-export`, `GET /api/account/data-export/download`). Colectarea datelor reutilizează
   `privacy.build_export`. Vechiul `/api/privacy/export/*` (JSON direct) a rămas neschimbat.
 - **Frontend:** `src/components/PrivacyDataSection.tsx` (Setări → Confidențialitate și securitate → Datele tale → *Download Your Data*),
-  `src/api/dataExport.ts`. Pe Android/iOS folosește `expo-file-system` + `expo-sharing` (rulează `npx expo install expo-file-system expo-sharing`
-  ca să actualizezi `yarn.lock` — CI folosește `--frozen-lockfile`).
+  `src/api/dataExport.ts`. Pe Android salvează în folderul ales de utilizator, pe iOS deschide foaia de partajare, folosind doar `expo-file-system@~19.0.24`
+  (deja în `yarn.lock` prin `expo`; nu s-au adăugat alte pachete, deci `--frozen-lockfile` din CI rămâne valid).
 - **Variabile de mediu:** `PRIVACY_EXPORT_DIR` (director privat; implicit `<tmp>/astran_privacy_exports`),
   `PRIVACY_EXPORT_ARCHIVE_TTL_SECONDS` (24 h), `PRIVACY_EXPORT_MAX_BYTES` (200 MB), `PRIVACY_EXPORT_ROW_CAP` (1.000.000),
   `PRIVACY_CONTROLLER_NAME`, `PRIVACY_CONTACT_EMAIL` (apar în `processing_information.json` și în UI).
