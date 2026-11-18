@@ -247,6 +247,8 @@ from astran_sandbox import money
 from astran_sandbox import trash_purge
 from astran_sandbox import privacy            # GDPR: stergere cont + export date (vezi PRIVACY_GDPR.md)
 from astran_sandbox.privacy_routes import make_privacy_router
+from astran_sandbox import privacy_export            # GDPR: export ZIP asincron (Art. 15/20)
+from astran_sandbox.account_export_routes import make_account_export_router
 from astran_sandbox import payment_reversal as preversal
 from astran_sandbox import email_verification as emailver
 from astran_sandbox.media_validation import clean_image_ref
@@ -610,6 +612,8 @@ async def startup():
     # GDPR: indexuri + worker care reia stergerile de conturi ramase la jumatate si elimina datele pseudonimizate expirate.
     await privacy.ensure_indexes(db)
     app.state.privacy_task = asyncio.create_task(privacy.deletion_worker(db))
+    await privacy_export.ensure_indexes(db)
+    app.state.privacy_export_task = asyncio.create_task(privacy_export.export_worker(db))
     await db.payment_reversed_refs.create_index("ref", unique=True)
     await db.email_verifications.create_index("user_id", unique=True)
     await db.password_resets.create_index("user_id", unique=True)
@@ -704,6 +708,9 @@ async def shutdown():
     gdpr_task = getattr(app.state, "privacy_task", None)
     if gdpr_task is not None:
         gdpr_task.cancel()
+    gdpr_export_task = getattr(app.state, "privacy_export_task", None)
+    if gdpr_export_task is not None:
+        gdpr_export_task.cancel()
     client.close()
 
 
@@ -3323,6 +3330,9 @@ if make_game_permissions_router is not None:
 # GDPR: /api/privacy/* (export date, stergere cont) - vezi astran_sandbox/privacy_routes.py
 api.include_router(make_privacy_router(get_current_user, db, verify_pw=verify_pw_async, client_ip=_client_ip,
                                        psec=psec, emailver=emailver))
+# GDPR: /api/account/data-export (export ZIP asincron, Art. 15/20) - vezi astran_sandbox/account_export_routes.py
+api.include_router(make_account_export_router(get_current_user, db, verify_pw=verify_pw_async, client_ip=_client_ip,
+                                              psec=psec, emailver=emailver))
 
 app.include_router(api)
 
