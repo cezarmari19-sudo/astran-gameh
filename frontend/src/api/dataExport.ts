@@ -1,4 +1,4 @@
-import { Platform } from "react-native";
+import { Platform, Share } from "react-native";
 import { api, authedRequestInfo } from "@/src/api/client";
 
 // GDPR Art. 15 / 20: export ZIP asincron. Oglindeste backend/astran_sandbox/account_export_routes.py.
@@ -47,9 +47,15 @@ function fail(status: number, message: string): never {
   throw err;
 }
 
-/** Descarca arhiva ZIP REALA a utilizatorului curent. Web: fisier prin <a download>. Nativ (Android/iOS): se salveaza in
- *  cache si se deschide foaia de partajare/salvare. Intoarce "saved" (web) sau "shared" (nativ). */
-export async function downloadArchive(filename: string, unavailableMsg: string, saveFailedMsg: string): Promise<"saved" | "shared"> {
+/** Descarca arhiva ZIP REALA a utilizatorului curent.
+ *  - Web: fisier prin <a download>  -> "saved".
+ *  - Android: utilizatorul alege un folder (Storage Access Framework), ZIP-ul se scrie acolo -> "saved"; daca anuleaza
+ *    selectul de folder, NU se cere nimic de la server -> "cancelled" (nu se consuma o descarcare).
+ *  - iOS: foaia de partajare / "Save to Files" -> "shared".
+ *  Nu are nevoie de pachete native noi: expo-file-system e deja dependenta lui `expo` (SDK 54, in yarn.lock). */
+export async function downloadArchive(
+  filename: string, unavailableMsg: string, saveFailedMsg: string,
+): Promise<"saved" | "shared" | "cancelled"> {
   const { url, headers } = await authedRequestInfo("/account/data-export/download");
   const g: any = globalThis as any;
 
@@ -68,25 +74,39 @@ export async function downloadArchive(filename: string, unavailableMsg: string, 
     return "saved";
   }
 
-  // Nativ: dependente incarcate la nevoie (pachetele sunt in package.json; modulul lipseste doar intr-un build vechi)
-  let FS: any, Sharing: any;
+  let FS: any;
   try {
     FS = require("expo-file-system/legacy");
-    Sharing = require("expo-sharing");
   } catch {
     fail(0, saveFailedMsg);
   }
   const dir: string | null = FS.cacheDirectory;
   if (!dir) fail(0, saveFailedMsg);
-  const target = `${dir}${filename}`;
-  const res = await FS.downloadAsync(url, target, { headers });
-  if (res.status !== 200) {
-    try { await FS.deleteAsync(target, { idempotent: true }); } catch {}
-    fail(res.status, res.status === 404 ? unavailableMsg : saveFailedMsg);
+
+  // Android: intai alegem folderul (daca anuleaza, nu atingem serverul)
+  let safDir: string | null = null;
+  if (Platform.OS === "android") {
+    const perm = await FS.StorageAccessFramework.requestDirectoryPermissionsAsync();
+    if (!perm?.granted) return "cancelled";
+    safDir = perm.directoryUri;
   }
-  if (!(await Sharing.isAvailableAsync())) fail(0, saveFailedMsg);
-  await Sharing.shareAsync(res.uri, { mimeType: "application/zip", UTI: "public.zip-archive", dialogTitle: filename });
-  // arhiva contine date personale: nu ramane in cache dupa ce utilizatorul a ales unde o salveaza
-  try { await FS.deleteAsync(res.uri, { idempotent: true }); } catch {}
-  return "shared";
+
+  const target = `${dir}${filename}`;
+  const cleanup = async () => { try { await FS.deleteAsync(target, { idempotent: true }); } catch {} };
+  try {
+    const res = await FS.downloadAsync(url, target, { headers });
+    if (res.status !== 200) fail(res.status, res.status === 404 ? unavailableMsg : saveFailedMsg);
+
+    if (safDir) {
+      const b64: string = await FS.readAsStringAsync(res.uri, { encoding: FS.EncodingType.Base64 });
+      const dest: string = await FS.StorageAccessFramework.createFileAsync(safDir, filename.replace(/\.zip$/i, ""), "application/zip");
+      await FS.writeAsStringAsync(dest, b64, { encoding: FS.EncodingType.Base64 });
+      return "saved";
+    }
+    // iOS: foaia de partajare accepta un URL de fisier local
+    await Share.share({ url: res.uri });
+    return "shared";
+  } finally {
+    await cleanup();     // arhiva contine date personale: nu ramane in cache
+  }
 }
