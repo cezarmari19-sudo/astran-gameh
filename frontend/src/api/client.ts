@@ -122,7 +122,8 @@ export async function wsUrl(path: string): Promise<string> {
 export const authApi = {
   register: (body: any) => api("/auth/register", { method: "POST", body: JSON.stringify(body) }),
   login: (body: any) => api("/auth/login", { method: "POST", body: JSON.stringify(body) }),
-  session: (session_id: string) => api("/auth/session", { method: "POST", body: JSON.stringify({ session_id }) }),
+  session: (session_id: string, consent?: Record<string, unknown> | null) =>
+    api("/auth/session", { method: "POST", body: JSON.stringify({ session_id, ...(consent || {}) }) }),
   me: () => api("/auth/me"),
   logout: () => api("/auth/logout", { method: "POST" }),
 };
