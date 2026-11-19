@@ -8,6 +8,7 @@ import { privacyApi } from "@/src/api/client";
 import { accountExportApi, downloadArchive, type ExportInfo, type ExportView } from "@/src/api/dataExport";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
+import ConsentManagement from "@/src/components/ConsentManagement";
 
 // GDPR: "Privacy & Security > Your Data" - Download Your Data (Art. 15/20, export ZIP asincron) + Delete My Account (Art. 17).
 // Toate verificarile reale (re-autentificare, confirmare, apartenenta contului, expirarea link-ului) se fac pe
@@ -284,6 +285,8 @@ export default function PrivacyDataSection() {
   return (
     <View>
       <Text style={styles.section}>{t("privacy_title").toUpperCase()}</Text>
+
+      <ConsentManagement />
 
       <Text style={styles.subSection}>{t("privacy_your_data").toUpperCase()}</Text>
       <View style={styles.exportCard} testID="settings-export-data">
