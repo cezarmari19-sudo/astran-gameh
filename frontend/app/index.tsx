@@ -38,7 +38,11 @@ export default function Index() {
               window.history.replaceState(window.history.state, "", url.toString());
             } catch {}
           })
-          .catch(() => processedSessionIds.delete(sid));
+          .catch((e: any) => {
+            processedSessionIds.delete(sid);
+            // cont Google nou fara acceptare: nu s-a creat nimic; cerem acceptarea pe ecranul de login
+            if (e?.code === "consent_required") router.replace("/(auth)/login?google_consent=1");
+          });
       }
       return;
     }
@@ -47,18 +51,24 @@ export default function Index() {
       const sid = extractSessionId(initial);
       if (sid && !processedSessionIds.has(sid)) {
         processedSessionIds.add(sid);
-        loginWithSessionId(sid).catch(() => processedSessionIds.delete(sid));
+        loginWithSessionId(sid).catch((e: any) => {
+          processedSessionIds.delete(sid);
+          if (e?.code === "consent_required") router.replace("/(auth)/login?google_consent=1");
+        });
       }
     })();
     const sub = Linking.addEventListener("url", ({ url }) => {
       const sid = extractSessionId(url);
       if (sid && !processedSessionIds.has(sid)) {
         processedSessionIds.add(sid);
-        loginWithSessionId(sid).catch(() => processedSessionIds.delete(sid));
+        loginWithSessionId(sid).catch((e: any) => {
+          processedSessionIds.delete(sid);
+          if (e?.code === "consent_required") router.replace("/(auth)/login?google_consent=1");
+        });
       }
     });
     return () => sub.remove();
-  }, [loginWithSessionId]);
+  }, [loginWithSessionId, router]);
 
   if (loading) {
     return (
