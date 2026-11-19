@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "documents": {
+    "privacy_policy": {
+      "legal_basis": "information_notice",
+      "current": "1.0",
+      "versions": [
+        {
+          "version": "1.0",
+          "effective_date": null,
+          "requires_reacceptance": true,
+          "summary": {
+            "ro": "Prima versiune.",
+            "en": "First version."
+          },
+          "files": {
+            "ro": {
+              "path": "privacy_policy/1.0.ro.txt",
+              "sha256": "245249054ff69700d1c597049c287a6f398785ae7eba002ee184346cd05d1a95"
+            },
+            "en": {
+              "path": "privacy_policy/1.0.en.txt",
+              "sha256": "8fa5445700add70cdd53efea24cd13746cb6ae9cd4ee2af8eb7014ba8898bc84"
+            }
+          }
+        }
+      ]
+    },
+    "terms_of_service": {
+      "legal_basis": "contract",
+      "current": "1.0",
+      "versions": [
+        {
+          "version": "1.0",
+          "effective_date": null,
+          "requires_reacceptance": true,
+          "summary": {
+            "ro": "Prima versiune (ciornă).",
+            "en": "First version (draft)."
+          },
+          "files": {
+            "ro": {
+              "path": "terms_of_service/1.0.ro.txt",
+              "sha256": "d9976e36fefbbdf7b9ba2aa91786cc133b79057aeb745c0b09173a81e3b9fe4b"
+            },
+            "en": {
+              "path": "terms_of_service/1.0.en.txt",
+              "sha256": "510e456ef9fc9bac61235f2b2a8c20a64ae53a4e2ddc68f330d5f189cf444e8b"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
