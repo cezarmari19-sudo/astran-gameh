@@ -76,6 +76,12 @@ def audit_retention_days() -> int:
     return _env_int("PRIVACY_AUDIT_RETENTION_DAYS", 365)
 
 
+def consent_proof_retention_days() -> int:
+    # dovada consimtamantului se pastreaza (pseudonimizata) dupa stergerea contului ca sa poata fi demonstrata /
+    # apararea unor pretentii; implicit 3 ani (termenul general de prescriptie). A se valida cu un jurist.
+    return _env_int("PRIVACY_CONSENT_PROOF_RETENTION_DAYS", 1095)
+
+
 def export_ttl_seconds() -> int:
     return _env_int("PRIVACY_EXPORT_TTL_SECONDS", 600, minimum=30)
 
@@ -139,7 +145,7 @@ async def ensure_indexes(db) -> None:
     await db[EXPORT_COLLECTION].create_index([("user_id", 1), ("created_at", -1)])
     await db[REAUTH_CODE_COLLECTION].create_index("user_id", unique=True)
     await db[REAUTH_CODE_COLLECTION].create_index("expires_at", expireAfterSeconds=0)
-    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages"):
+    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events"):
         await db[coll].create_index([("account_deleted", 1), ("retain_until", 1)])
 
 
@@ -465,6 +471,9 @@ async def _step_records(db, uid: str, pseud: str) -> None:
     await db.reports.update_many({"context.sender_id": uid},
                                  {"$set": {"context.sender_id": pseud, "context.sender_username": _DELETED_USERNAME,
                                            "account_deleted": True, "retain_until": mod}})
+    # Dovada consimtamantului: NU se sterge; se pseudonimizeaza si primeste termen de pastrare
+    from . import consent as _consent
+    await _consent.pseudonymize_for_deletion(db, uid, pseud, now + timedelta(days=consent_proof_retention_days()))
     # Jurnal de securitate: fara IP, cu user pseudonimizat
     await db.security_audit_log.update_many(
         {"user_id": uid}, {"$set": {"user_id": pseud, "ip": None, "account_deleted": True, "retain_until": aud}})
@@ -474,7 +483,7 @@ async def sweep_retention(db, now: Optional[datetime] = None) -> int:
     """Elimina definitiv datele pseudonimizate al caror termen de pastrare a expirat."""
     now = now or _now()
     total = 0
-    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages"):
+    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events"):
         res = await db[coll].delete_many({"account_deleted": True, "retain_until": {"$lte": now}})
         total += getattr(res, "deleted_count", 0) or 0
     res = await db[DELETION_COLLECTION].delete_many({"status": "completed", "expires_at": {"$lte": now}})
@@ -557,6 +566,8 @@ async def build_export(db, user_id: str) -> dict:
         "as_tester": [{**r, "game_title": titles.get(r.get("game_id"))} for r in testers],
     }
     out["recently_played"] = await _rows(db, "recently_played", {"user_id": user_id})
+    from . import consent as _consent
+    out["consent_history"] = await _consent.export_rows(db, user_id)
 
     out["studio_models"] = await _rows(db, "studio_models", {"owner_id": user_id})
     out["shop_items_published"] = await _rows(db, "shop_items", {"owner_id": user_id})
