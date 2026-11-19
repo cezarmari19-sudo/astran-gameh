@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { authApi, setToken } from "../api/client";
+import { loadGoogleConsent, clearGoogleConsent } from "../auth/googleConsent";
 
 export type User = {
   user_id: string;
@@ -27,7 +28,7 @@ type Ctx = {
   connectionError: boolean;
   refresh: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { email: string; password: string; username: string; age_category: "under_18" | "adult_18"; language: string }) => Promise<void>;
+  register: (data: { email: string; password: string; username: string; age_category: "under_18" | "adult_18"; language: string; accept_terms: boolean; accept_privacy: boolean; optional_consents?: Record<string, boolean>; presented_versions?: Record<string, string> | null }) => Promise<void>;
   loginWithSessionId: (session_id: string) => Promise<void>;
   logout: () => Promise<void>;
   setUser: (u: User | null) => void;
@@ -113,7 +114,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const loginWithSessionId = useCallback(async (session_id: string) => {
-    const res = await authApi.session(session_id);
+    // acceptare colectata inainte (doar relevanta pentru cont NOU; serverul decide si o valideaza)
+    const consent = await loadGoogleConsent();
+    let res: any;
+    try {
+      res = await authApi.session(session_id, consent);
+    } finally {
+      if (consent) await clearGoogleConsent();
+    }
     await setToken(res.session_token);
     setUser(res.user);
   }, []);
