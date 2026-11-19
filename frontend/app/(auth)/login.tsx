@@ -3,7 +3,7 @@ import {
   View, Text, TextInput, StyleSheet, Pressable, KeyboardAvoidingView, Platform,
   ScrollView, ActivityIndicator,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -12,12 +12,19 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing, type } from "@/src/theme";
-import { PrimaryButton } from "@/src/components/ui";
+import { PrimaryButton, SecondaryButton } from "@/src/components/ui";
+import ConsentCheckboxes from "@/src/components/ConsentCheckboxes";
+import { saveGoogleConsent } from "@/src/auth/googleConsent";
+import { cs } from "@/src/i18n/consentStrings";
 
 export default function LoginScreen() {
   const router = useRouter();
   const { login, loginWithSessionId } = useAuth();
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
+  const params = useLocalSearchParams<{ google_consent?: string }>();
+  const [needConsent, setNeedConsent] = useState(params.google_consent === "1");
+  const [gTerms, setGTerms] = useState(false);
+  const [gPrivacy, setGPrivacy] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -55,8 +62,17 @@ export default function LoginScreen() {
         router.replace("/(tabs)");
       }
     } catch (e: any) {
-      setErr(e.message || "Google login failed");
+      if (e?.code === "consent_required") setNeedConsent(true);   // cont nou: nu s-a creat nimic
+      else setErr(e.message || "Google login failed");
     }
+  }
+
+  async function confirmGoogleConsent() {
+    try {
+      await saveGoogleConsent(lang);
+      setNeedConsent(false);
+      await doGoogle();
+    } catch (e: any) { setErr(e?.message || cs(lang, "docs_load_failed")); }
   }
 
   return (
@@ -81,6 +97,18 @@ export default function LoginScreen() {
             <Text style={styles.brand}>ASTRAN</Text>
           </View>
           <Text style={styles.tagline}>{t("tagline")}</Text>
+
+          {needConsent ? (
+            <View style={styles.card} testID="google-consent-card">
+              <Text style={styles.label}>{cs(lang, "google_consent_title")}</Text>
+              <Text style={{ color: colors.onSurface2, fontSize: 12, lineHeight: 17 }}>{cs(lang, "google_consent_intro")}</Text>
+              <ConsentCheckboxes lang={lang} testPrefix="google" terms={gTerms} privacy={gPrivacy} onTerms={setGTerms} onPrivacy={setGPrivacy} />
+              <View style={{ marginTop: 16, gap: 8 }}>
+                <PrimaryButton testID="google-consent-continue" label={cs(lang, "continue")} disabled={!gTerms || !gPrivacy} onPress={confirmGoogleConsent} />
+                <SecondaryButton label={cs(lang, "cancel")} onPress={() => setNeedConsent(false)} />
+              </View>
+            </View>
+          ) : null}
 
           <View style={styles.card}>
             <Text style={styles.label}>{t("email")}</Text>
