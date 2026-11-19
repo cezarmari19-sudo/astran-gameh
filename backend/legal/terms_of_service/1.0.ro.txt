@@ -1,0 +1,44 @@
+ASTRAN GAME — TERMENI ȘI CONDIȚII
+
+Versiune: 1.0
+Data intrării în vigoare: [DATA — ÎNLOCUIEȘTE CÂND ESTE DISPONIBILĂ]
+Operator: [NUMELE LEGAL AL COMPANIEI — ÎNLOCUIEȘTE CÂND ÎL AI]
+
+*** CIORNĂ — NEREVIZUITĂ JURIDIC ***
+Acest text este un schelet. Înainte de lansare trebuie redactat sau revizuit de un jurist
+și publicat ca versiune nouă (vezi backend/legal/README.md). Până atunci, nu îl prezenta
+ca document juridic final.
+
+1. OBIECTUL ACESTUI ACORD
+
+Astran Game („Astran”, „noi” sau „platforma”) este o platformă pentru crearea, publicarea și jucarea de jocuri și de alt conținut creat de utilizatori. Prin crearea unui cont și utilizarea platformei, utilizatorul încheie cu Astran un contract privind furnizarea serviciilor platformei, în condițiile de mai jos.
+
+2. CONTUL
+
+Utilizatorul furnizează informații corecte la crearea contului, își păstrează parola în siguranță și răspunde de activitatea desfășurată prin contul său.
+
+3. CONȚINUTUL ȘI COMPORTAMENTUL
+
+[REGULI DE CONDUITĂ ȘI CONȚINUT — DE REDACTAT]
+
+4. MONEDA VIRTUALĂ ȘI PLĂȚI
+
+[CONDIȚII PRIVIND ASTRANS, ACHIZIȚII ȘI RAMBURSĂRI — DE REDACTAT]
+
+5. SUSPENDARE ȘI ÎNCHIDEREA CONTULUI
+
+Utilizatorul poate șterge oricând contul din Setări. Astran poate suspenda sau închide conturi în caz de încălcare a acestor termeni. [PROCEDURA ȘI TERMENELE — DE REDACTAT]
+
+6. DATE PERSONALE
+
+Modul în care sunt prelucrate datele personale este descris în Politica de Confidențialitate, care este un document separat. Acceptarea acestor termeni nu reprezintă consimțământ pentru prelucrări care necesită consimțământ distinct (de exemplu comunicări de marketing); acestea se solicită separat și pot fi refuzate sau retrase fără a afecta contul.
+
+7. MODIFICAREA TERMENILOR
+
+Putem publica versiuni noi ale acestor termeni. Pentru modificările care schimbă drepturile sau obligațiile utilizatorului vom cere o nouă acceptare; celelalte modificări vor fi aduse la cunoștința utilizatorului.
+
+8. CONTACT
+
+[EMAIL / ADRESĂ — ÎNLOCUIEȘTE CÂND ÎL AI]
+
+SFÂRȘITUL TERMENILOR ȘI CONDIȚIILOR
