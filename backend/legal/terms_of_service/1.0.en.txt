@@ -1,0 +1,44 @@
+ASTRAN GAME — TERMS OF SERVICE
+
+Version: 1.0
+Effective date: [DATE — REPLACE WHEN AVAILABLE]
+Operator: [LEGAL NAME OF THE COMPANY — REPLACE WHEN AVAILABLE]
+
+*** DRAFT — NOT LEGALLY REVIEWED ***
+This text is a skeleton. Before launch it must be written or reviewed by a lawyer and
+published as a new version (see backend/legal/README.md). Until then, do not present it as
+a final legal document.
+
+1. SUBJECT OF THIS AGREEMENT
+
+Astran Game ("Astran", "we" or the "platform") is a platform for creating, publishing and playing games and other user-generated content. By creating an account and using the platform, the user enters into a contract with Astran for the provision of the platform's services, under the terms below.
+
+2. THE ACCOUNT
+
+The user provides accurate information when creating the account, keeps the password safe and is responsible for activity carried out through the account.
+
+3. CONTENT AND CONDUCT
+
+[CONDUCT AND CONTENT RULES — TO BE WRITTEN]
+
+4. VIRTUAL CURRENCY AND PAYMENTS
+
+[TERMS ON ASTRANS, PURCHASES AND REFUNDS — TO BE WRITTEN]
+
+5. SUSPENSION AND ACCOUNT CLOSURE
+
+The user can delete the account at any time from Settings. Astran may suspend or close accounts that breach these terms. [PROCEDURE AND DEADLINES — TO BE WRITTEN]
+
+6. PERSONAL DATA
+
+How personal data is processed is described in the Privacy Policy, which is a separate document. Accepting these terms is not consent to processing that requires separate consent (for example marketing communications); such consent is requested separately and may be refused or withdrawn without affecting the account.
+
+7. CHANGES TO THE TERMS
+
+We may publish new versions of these terms. For changes that alter the user's rights or obligations we will ask for a new acceptance; other changes will be brought to the user's attention.
+
+8. CONTACT
+
+[EMAIL / ADDRESS — REPLACE WHEN AVAILABLE]
+
+END OF TERMS OF SERVICE
