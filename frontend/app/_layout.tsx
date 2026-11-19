@@ -10,6 +10,7 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider } from "@/src/context/AuthContext";
 import { I18nProvider } from "@/src/i18n";
 import { DmProvider } from "@/src/dm/DmContext";
+import ConsentGate from "@/src/components/ConsentGate";
 
 LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
@@ -39,6 +40,7 @@ export default function RootLayout() {
             <DmProvider>
               <StatusBar barStyle="light-content" />
               <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0F1012" } }} />
+              <ConsentGate />
             </DmProvider>
           </AuthProvider>
         </I18nProvider>
