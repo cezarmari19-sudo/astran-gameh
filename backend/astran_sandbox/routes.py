@@ -1,4 +1,3 @@
-
 """Endpoint-uri FastAPI pentru sandbox-ul Luau si pentru Code Editor-ul jocului (proiect
 real de fisiere: foldere/subfoldere/fisiere, adancime nelimitata).
 
@@ -419,7 +418,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         to_check = [i for i in ids if i in by_id and by_id[i]["owner_id"] != user_id and by_id[i]["price"] > 0]
         if to_check:
             purchases = await db.shop_purchases.find(
-                {"user_id": user_id, "item_id": {"$in": to_check}}, {"_id": 0}
+                {"user_id": user_id, "item_id": {"$in": to_check}, "pending": {"$ne": True}}, {"_id": 0}
             ).to_list(len(to_check))
             purchased_ids = {p["item_id"] for p in purchases}
 
