@@ -203,9 +203,9 @@ def make_game_permissions_router(get_current_user, db, user_public) -> APIRouter
             await db.game_collaborators.create_index("user_id")
             await db.game_testers.create_index([("game_id", 1), ("user_id", 1)], unique=True)
             await db.game_testers.create_index("user_id")
+            indexes_ready = True
         except Exception:  # noqa: BLE001
             log.warning("could not create game_collaborators/game_testers indexes", exc_info=True)
-        indexes_ready = True
 
     async def get_owned_game(game_id: str, current: dict) -> dict:
         g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
