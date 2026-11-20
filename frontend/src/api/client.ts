@@ -57,6 +57,7 @@ export async function api<T = any>(
   try {
     res = await fetch(`${BASE}/api${path}`, { ...init, headers, ...(controller ? { signal: controller.signal } : {}) });
   } catch (e: any) {
+    if (timer) clearTimeout(timer);
     // Retea cazuta / server oprit / DNS: mesaj clar in loc de "Network request failed" brut.
     const err = new Error("Serverul nu este disponibil. Verifica conexiunea la internet si incearca din nou.");
     (err as any).status = 0;
