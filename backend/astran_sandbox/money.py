@@ -63,8 +63,12 @@ async def ensure_indexes(db) -> None:
 async def debit(db, user_id: str, amount: int, op_id: str) -> str:
     """'ok' | 'already' (deja aplicat pentru acest op_id) | 'insufficient'."""
     marker = _m(op_id, "d")
+    flt: dict = {"user_id": user_id, MARKER: {"$ne": marker}}
+    if amount > 0:
+        # amount == 0 (ex. cumparare de Astrans) nu trebuie blocat de un sold negativ lasat de un refund
+        flt["astrans_balance"] = {"$gte": amount}
     res = await db.users.update_one(
-        {"user_id": user_id, "astrans_balance": {"$gte": amount}, MARKER: {"$ne": marker}},
+        flt,
         {"$inc": {"astrans_balance": -amount},
          "$push": {MARKER: {"$each": [marker], "$slice": -MARKER_KEEP}}},
     )
@@ -118,12 +122,14 @@ async def begin(
     credits: Optional[list[dict]] = None,
     inserts: Optional[list[dict]] = None,
     reservations: Optional[list[dict]] = None,
+    updates: Optional[list[dict]] = None,
 ) -> dict:
     """Scrie intentia in jurnal (INAINTE de orice mutare de bani). DuplicateKeyError daca op_id exista.
 
     credits:      [{"user_id", "amount"}]            - cine primeste bani dupa debit
     inserts:      [{"collection", "doc"}]            - de inserat la final (ledger etc.); duplicatele se ignora
     reservations: [{"collection", "filter"}]         - sterse daca operatia esueaza / e abandonata
+    updates:      [{"collection", "filter", "update"}] - aplicate (idempotent) dupa credite, la finalizare
     """
     now = _now()
     doc = {
@@ -131,6 +137,7 @@ async def begin(
         "credits": [{"user_id": c["user_id"], "amount": int(c["amount"])} for c in (credits or [])],
         "inserts": [{"collection": i["collection"], "doc": dict(i["doc"])} for i in (inserts or [])],
         "reservations": list(reservations or []),
+        "updates": list(updates or []),
         "state": "pending", "created_at": now, "updated_at": now,
     }
     await db[JOURNAL].insert_one(dict(doc))
@@ -161,6 +168,8 @@ async def settle(db, op_id: str) -> None:
             await db[ins["collection"]].insert_one(dict(ins["doc"]))
         except DuplicateKeyError:
             pass  # deja inserat (retry / recuperare)
+    for upd in op.get("updates", []):
+        await db[upd["collection"]].update_one(upd["filter"], upd["update"])
     await _set_state(db, op_id, "done")
 
 
