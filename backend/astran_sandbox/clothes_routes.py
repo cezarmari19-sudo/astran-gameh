@@ -93,7 +93,10 @@ def new_id(prefix: str) -> str:
 
 
 def split_price(price: int) -> tuple[int, int]:
-    fee = (price * PLATFORM_FEE_PERCENT) // 100
+    """(comision, venit_autor). Rotunjire IN SUS, ca in shop_routes: cu `//` taxa era 0 sub 20 de Astrans."""
+    if price <= 1:
+        return 0, max(price, 0)
+    fee = min(-(-price * PLATFORM_FEE_PERCENT // 100), price - 1)
     return fee, price - fee
 
 
@@ -212,9 +215,9 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             await db.clothes_items.create_index([("owner_id", 1), ("created_at", -1)])
             await db.clothes_items.create_index([("name", "text"), ("description", "text")])
             await db.clothes_purchases.create_index([("user_id", 1), ("item_id", 1)], unique=True)
+            indexes_ready = True
         except Exception:  # noqa: BLE001
             log.warning("could not create clothes indexes", exc_info=True)
-        indexes_ready = True
 
     async def get_item(item_id: str) -> dict:
         it = await db.clothes_items.find_one({"item_id": item_id}, {"_id": 0})
@@ -224,6 +227,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
 
     async def get_own_item(item_id: str, current: dict) -> dict:
         it = await get_item(item_id)
+        if it.get("delisted"):
+            raise HTTPException(status_code=404, detail="Item not found")
         if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
             raise HTTPException(status_code=403, detail="Not the owner")
         return it
@@ -233,7 +238,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             return True
         if item["price"] == 0 and item["is_public"]:
             return True
-        return await db.clothes_purchases.find_one({"user_id": user_id, "item_id": item["item_id"]}, {"_id": 0}) is not None
+        return await db.clothes_purchases.find_one({"user_id": user_id, "item_id": item["item_id"], "pending": {"$ne": True}}, {"_id": 0}) is not None
 
     async def owned_set(user_id: str, docs: list[dict]) -> set:
         """Itemele din `docs` detinute de user - o singura interogare (inainte: N+1 prin owns())."""
@@ -243,7 +248,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         bought: set = set()
         if candidates:
             rows = await db.clothes_purchases.find(
-                {"user_id": user_id, "item_id": {"$in": candidates}}, {"_id": 0, "item_id": 1}
+                {"user_id": user_id, "item_id": {"$in": candidates}, "pending": {"$ne": True}}, {"_id": 0, "item_id": 1}
             ).to_list(len(candidates))
             bought = {r["item_id"] for r in rows}
         return {d["item_id"] for d in docs if free_or_mine(d) or d["item_id"] in bought}
@@ -264,7 +269,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
     @router.get("/items")
     async def list_items(q: Optional[str] = None, mine: bool = False, slot: Optional[str] = None, current=Depends(get_current_user)):
         await ensure_indexes()
-        query: dict = {}
+        query: dict = {"delisted": {"$ne": True}}
         if mine:
             query["owner_id"] = current["user_id"]
         else:
@@ -389,6 +394,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         it = await get_item(item_id)
         # owns() INAINTE de visible(): cine a platit pastreaza accesul si dupa ce itemul devine privat
         is_owned = await owns(current["user_id"], it)
+        if it.get("delisted") and not (is_owned and it["owner_id"] != current["user_id"]):
+            raise HTTPException(status_code=404, detail="Item not found")   # retras: doar cumparatorii il mai vad
         if not is_owned and not visible(it, current):
             raise HTTPException(status_code=403, detail="This item is private")
         result = _public_item(it, is_owned)
@@ -399,23 +406,37 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
     @router.delete("/items/{item_id}")
     async def delete_item(item_id: str, current=Depends(get_current_user)):
         await get_own_item(item_id, current)
+        # RUG-PULL: un item deja vandut nu se sterge (cumparatorii ar pierde ce au platit, fara rambursare);
+        # e doar retras din Shop. Fara cumparari: stergere reala.
+        if await db.clothes_purchases.find_one({"item_id": item_id}, {"_id": 1}):
+            await db.clothes_items.update_one(
+                {"item_id": item_id},
+                {"$set": {"delisted": True, "is_public": False, "delisted_at": now_utc(), "updated_at": now_utc()}})
+            return {"ok": True, "delisted": True}
         await db.clothes_items.delete_one({"item_id": item_id})
         return {"ok": True}
 
     @router.post("/items/{item_id}/buy")
     async def buy_item(item_id: str, current=Depends(get_current_user)):
+        await ensure_indexes()
         it = await get_item(item_id)
+        if it.get("delisted"):
+            raise HTTPException(status_code=404, detail="Item not found")
         if it["owner_id"] == current["user_id"]:
             raise HTTPException(status_code=400, detail="You already own this item")
         # Cine a PLATIT deja pastreaza accesul chiar daca autorul a facut itemul privat intre timp
         # (inainte, visible() rula primul si il respingea cu 403).
-        if await db.clothes_purchases.find_one({"user_id": current["user_id"], "item_id": item_id}, {"_id": 1}):
+        if await db.clothes_purchases.find_one({"user_id": current["user_id"], "item_id": item_id, "pending": {"$ne": True}}, {"_id": 1}):
             return {"ok": True, "already_owned": True}
         if not visible(it, current):
             raise HTTPException(status_code=403, detail="This item is private")
 
         price = it["price"]
         purchase_row = {"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()}
+        # autorul trebuie sa existe si sa nu fie in curs de stergere: altfel creditul s-ar pierde
+        author = await db.users.find_one({"user_id": it["owner_id"]}, {"_id": 0, "deletion_state": 1})
+        if price > 0 and (not author or author.get("deletion_state")):
+            raise HTTPException(status_code=409, detail="This item is no longer available")
 
         if price <= 0:
             try:
@@ -449,10 +470,13 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             credits=[{"user_id": it["owner_id"], "amount": author_share}],
             inserts=[{"collection": "astran_ledger", "doc": tx_buyer}, {"collection": "astran_ledger", "doc": tx_seller}],
             reservations=[{"collection": "clothes_purchases", "filter": {"user_id": current["user_id"], "item_id": item_id, "op_id": op_id}}],
+            updates=[{"collection": "clothes_purchases", "filter": {"user_id": current["user_id"], "item_id": item_id, "op_id": op_id},
+                      "update": {"$unset": {"pending": ""}}}],
         )
         # randul poarta op_id: rollback/recuperarea sterg DOAR randul acestei operatii, niciodata
         # randul altei cereri concurente (care ar fi castigat indexul unic)
         purchase_row["op_id"] = op_id
+        purchase_row["pending"] = True   # invizibil pentru owns() pana cand plata e finalizata
         try:
             await db.clothes_purchases.insert_one(purchase_row)
         except DuplicateKeyError:
@@ -464,7 +488,11 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             await money.rollback(db, op_id, "could not reserve purchase")
             raise
 
-        if await money.run(db, op_id) == "insufficient":
+        try:
+            outcome = await money.run(db, op_id)
+        except money.MoneyOpFailed:
+            raise HTTPException(status_code=503, detail="Purchase could not be completed, try again")
+        if outcome == "insufficient":
             # run() a anulat deja totul si a sters rezervarea: userul poate reincerca dupa ce adauga Astrans
             raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
 
@@ -474,7 +502,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
     @router.get("/mine/purchases")
     async def my_purchases(current=Depends(get_current_user)):
         await ensure_indexes()
-        cursor = db.clothes_purchases.find({"user_id": current["user_id"]}, {"_id": 0}).sort("purchased_at", -1).limit(200)
+        cursor = db.clothes_purchases.find({"user_id": current["user_id"], "pending": {"$ne": True}}, {"_id": 0}).sort("purchased_at", -1).limit(200)
         purchases = await cursor.to_list(200)
         item_ids = [p["item_id"] for p in purchases]
         if not item_ids:
@@ -487,7 +515,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
     async def my_drafts(current=Depends(get_current_user)):
         """Itemele proprii, publicate sau nu - pentru ecranul 'itemele mele' din Create."""
         await ensure_indexes()
-        cursor = db.clothes_items.find({"owner_id": current["user_id"]}, {"_id": 0}).sort("updated_at", -1).limit(200)
+        cursor = db.clothes_items.find({"owner_id": current["user_id"], "delisted": {"$ne": True}}, {"_id": 0}).sort("updated_at", -1).limit(200)
         docs = await cursor.to_list(200)
         return {"items": [_public_item(d, True) for d in docs]}
 
