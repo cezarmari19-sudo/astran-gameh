@@ -14,7 +14,7 @@ import { PrimaryButton } from "@/src/components/ui";
 // Tipurile de tranzactii in care utilizatorul CHELTUIE Astrans. Inainte doar `transfer_out` era
 // tratat ca iesire; shop_purchase / clothes_purchase / group_create apareau ca "+" verde (incasari).
 // `net < 0` e plasa de siguranta pentru tipuri viitoare scrise cu net negativ (ex. group_create).
-const DEBIT_TYPES = new Set(["transfer_out", "shop_purchase", "clothes_purchase", "group_create"]);
+const DEBIT_TYPES = new Set(["transfer_out", "shop_purchase", "clothes_purchase", "group_create", "purchase_reversal"]);
 function isDebitTx(tx: { type?: string; net?: number }): boolean {
   return DEBIT_TYPES.has(tx.type || "") || (typeof tx.net === "number" && tx.net < 0);
 }
