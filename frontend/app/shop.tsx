@@ -612,7 +612,8 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
   }
 
   const priceNum = Math.max(0, Math.floor(Number(price) || 0));
-  const fee = Math.floor((priceNum * FEE_PERCENT) / 100);
+  // la fel ca backend (split_price): rotunjire IN SUS, autorul pastreaza minim 1
+  const fee = priceNum <= 1 ? 0 : Math.min(Math.ceil((priceNum * FEE_PERCENT) / 100), priceNum - 1);
   const mainFile = files.find(f => f.name === "main");
   const codePreview = (mainFile?.source || "").split("\n").slice(0, 6).join("\n");
   const shownThumb = thumbnail === undefined ? editItem?.thumbnail_url ?? null : thumbnail;
