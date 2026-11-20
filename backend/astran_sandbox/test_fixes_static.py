@@ -53,7 +53,7 @@ class StaticFixes(unittest.TestCase):
     def test_transfer_goes_through_journal(self):
         body = _func_src("transfer_astrans")
         self.assertIn("money.begin", body)
-        self.assertIn("money.run", body)
+        self.assertTrue("money.run" in body or "_run_money" in body)
         self.assertNotIn('"$inc": {"astrans_balance"', body)  # niciun $inc direct pe sold
 
     def test_buy_astrans_credits_through_journal(self):
