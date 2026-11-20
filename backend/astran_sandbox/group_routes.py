@@ -48,6 +48,7 @@ from pymongo.errors import DuplicateKeyError
 from . import money
 from .chat_core import _INVISIBLE
 from .chat_filter import filter_text, shared_store
+from .media_validation import clean_image_ref
 
 log = logging.getLogger("astran.groups")
 
@@ -103,6 +104,14 @@ class ChatMessageBody(BaseModel):
 
 # ---------- response shaping ----------
 
+def _clean_logo(value):
+    """Logo de grup: doar data URL imagine (limitat) sau https (aceeasi regula ca la thumbnail-urile de joc)."""
+    try:
+        return clean_image_ref(value, any_https=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _group_public(g: dict, member_count: int) -> dict:
     """Niciodata nu include 'token' aici - vezi /groups/{id}/token (doar owner)."""
     return {
@@ -134,9 +143,9 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
             await db.group_members.create_index([("group_id", 1), ("user_id", 1)], unique=True)
             await db.group_members.create_index("user_id")
             await db.group_chat_messages.create_index([("group_id", 1), ("created_at", -1)])
+            indexes_ready = True
         except Exception:  # noqa: BLE001
             log.warning("could not create group indexes", exc_info=True)
-        indexes_ready = True
 
     async def get_group_or_404(group_id: str) -> dict:
         g = await db.groups.find_one({"group_id": group_id}, {"_id": 0})
@@ -178,7 +187,7 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
             "owner_id": current["user_id"],
             "name": body.name,
             "description": body.description,
-            "logo_url": body.logo_url,
+            "logo_url": _clean_logo(body.logo_url),
             "token": token,
             "chat_mode": "everyone",
             "created_at": now,
@@ -269,8 +278,8 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         # logo_url: null / "" trimis explicit = STERGE logo-ul (inainte None era ignorat, deci nu se putea elimina)
         if "logo_url" in provided and not provided["logo_url"]:
             updates["logo_url"] = None
-        if updates.get("logo_url") and len(updates["logo_url"]) > 500_000:
-            raise HTTPException(status_code=400, detail="logo_url too large")
+        if updates.get("logo_url"):
+            updates["logo_url"] = _clean_logo(updates["logo_url"])
         if updates:
             updates["updated_at"] = now_utc()
             await db.groups.update_one({"group_id": group_id}, {"$set": updates})
