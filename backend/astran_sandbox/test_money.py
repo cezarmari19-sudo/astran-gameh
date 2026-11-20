@@ -297,6 +297,32 @@ class MoneyTests(unittest.TestCase):
 
 
 
+class NegativeBalanceTests(unittest.TestCase):
+    def test_purchase_credit_works_with_negative_balance(self):
+        """Regresie: /wallet/buy (amount=0) esua cu 'insufficient' cand un refund lasase soldul negativ."""
+        async def go():
+            db = await _mkdb(buyer=-50)
+            await money.begin(db, op_id="buy_x", kind="purchase", payer_id="A", amount=0,
+                              credits=[{"user_id": "A", "amount": 60}],
+                              inserts=[_ledger("buy_x", "A", "purchase", 60)])
+            self.assertEqual(await money.run(db, "buy_x"), "done")
+            self.assertEqual(_bal(db, "A"), 10)
+        run(go())
+
+    def test_updates_applied_on_settle(self):
+        async def go():
+            db = await _mkdb()
+            await db.shop_purchases.insert_one({"user_id": "A", "item_id": "i", "op_id": "o", "pending": True})
+            await money.begin(db, op_id="o", kind="shop_purchase", payer_id="A", amount=10,
+                              credits=[{"user_id": "B", "amount": 9}],
+                              updates=[{"collection": "shop_purchases", "filter": {"op_id": "o"},
+                                        "update": {"$set": {"pending": False}}}])
+            await money.run(db, "o")
+            row = next(d for d in db.shop_purchases.docs if d["op_id"] == "o")
+            self.assertFalse(row["pending"])
+        run(go())
+
+
 class RunFailedStateTests(unittest.TestCase):
     def test_run_on_rolled_back_op_raises_instead_of_pretending_ok(self):
         async def go():
