@@ -117,7 +117,7 @@ def make_avatar_router(get_current_user, db) -> APIRouter:
 
     async def owned_clothes_items(user_id: str) -> list[dict]:
         """Toate hainele/accesoriile PUBLICATE pe care userul le poate echipa: proprii + cumparate + gratis-publice."""
-        purchases = await db.clothes_purchases.find({"user_id": user_id}, {"_id": 0, "item_id": 1}).to_list(1000)
+        purchases = await db.clothes_purchases.find({"user_id": user_id, "pending": {"$ne": True}}, {"_id": 0, "item_id": 1}).to_list(1000)
         purchased_ids = [p["item_id"] for p in purchases]
         cursor = db.clothes_items.find(
             {
