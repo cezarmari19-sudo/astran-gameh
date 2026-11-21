@@ -373,8 +373,8 @@ class UserPublic(BaseModel):
 class RegisterBody(BaseModel):
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
-    username: str = Field(min_length=3, max_length=24)
-    display_name: Optional[str] = None
+    username: str = Field(min_length=3, max_length=24, pattern=r"^[A-Za-z0-9_.-]+$")
+    display_name: Optional[str] = Field(default=None, max_length=40)
     age_category: AgeCategory = "under_18"
     language: str = "ro"
     # GDPR: acceptarea e VALIDATA de server (nu doar checkbox in UI). Fara ambele `true` contul nu se creeaza.
@@ -800,7 +800,7 @@ async def register(body: RegisterBody, request: Request):
         "user_id": user_id,
         "email": email,
         "username": body.username,
-        "display_name": body.display_name or body.username,
+        "display_name": (body.display_name or "").strip() or body.username,
         "password_hash": await hash_pw_async(body.password),
         "avatar_url": None,
         "age_category": body.age_category,
@@ -939,9 +939,9 @@ async def google_session(body: SessionBody):
         base_username = "".join(c for c in name if c.isalnum())[:20] or f"player{user_id[-6:]}"
         username = base_username
         i = 0
-        while await db.users.find_one({"username": username}):
+        while await db.users.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}}):
             i += 1
-            username = f"{base_username}{i}"
+            username = f"{base_username}{i}"[:24]
         user = {
             "user_id": user_id,
             "email": email,
@@ -957,7 +957,10 @@ async def google_session(body: SessionBody):
             "is_platform_admin": False,
             "created_at": now_utc(),
         }
-        await db.users.insert_one(user)
+        try:
+            await db.users.insert_one(user)
+        except DuplicateKeyError:
+            raise HTTPException(status_code=409, detail="Username already taken, please try again")
         try:
             await consent_svc.record_registration_consents(
                 db, user_id, google_consent, age_category="under_18", lang=body.consent_language or "en", source="google_signup")
@@ -971,12 +974,20 @@ async def google_session(body: SessionBody):
             "status": "completed", "timestamp": now_utc(), "reference": "signup_google",
         })
 
-    await db.user_sessions.insert_one({
-        "session_token": session_token,
-        "user_id": user_id,
-        "created_at": now_utc(),
-        "expires_at": now_utc() + timedelta(days=7),
-    })
+    try:
+        await db.user_sessions.insert_one({
+            "session_token": session_token,
+            "user_id": user_id,
+            "created_at": now_utc(),
+            "expires_at": now_utc() + timedelta(days=7),
+        })
+    except DuplicateKeyError:
+        # tokenul broker-ului a mai fost folosit: emitem unul nou in loc de 500
+        session_token = secrets.token_urlsafe(32)
+        await db.user_sessions.insert_one({
+            "session_token": session_token, "user_id": user_id,
+            "created_at": now_utc(), "expires_at": now_utc() + timedelta(days=7),
+        })
     resp_body = {"session_token": session_token, "token": session_token, "user": _user_public(user)}
     if password_login_reset:
         # clientul poate informa utilizatorul: parola veche nu mai e valida (autentificare doar Google)
@@ -1043,8 +1054,6 @@ class ResetPasswordBody(BaseModel):
 class ChangePasswordBody(BaseModel):
     current_password: str = Field(max_length=128)
     new_password: str = Field(min_length=6, max_length=128)
-
-
 _PW_RESET_COLLECTION = "password_resets"
 _forgot_ip_limiter = SlidingWindowLimiter(5, 3600)        # cereri "am uitat parola" / ora / IP
 _pw_change_limiter = SlidingWindowLimiter(10, 3600)       # incercari schimbare parola / ora / utilizator
@@ -1202,7 +1211,7 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
     # DOAR profilul public (fara email / sold / limba / rol - vezi _user_public_minimal).
     rx = {"$regex": re.escape(q), "$options": "i"}
     cursor = db.users.find(
-        {"$or": [{"username": rx}, {"display_name": rx}]},
+        {"$and": [{"$or": [{"username": rx}, {"display_name": rx}]}, {"deletion_state": {"$exists": False}}]},
         {"_id": 0, "password_hash": 0},
     ).limit(20)
     users = [_user_public_minimal(u) for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
@@ -1623,9 +1632,10 @@ def _validate_scripts_or_400(files: list[dict], folders: Optional[list] = None) 
     return clean
 
 
-async def _prepare_main_script(game_id: str, g: dict, source: str) -> tuple[list[dict], list]:
+async def _prepare_main_script(game_id: str, g: dict, source: str) -> tuple[list[dict], list, int]:
     """Proiectul curent al jocului cu main.lua inlocuit de `source` (validat). Nu scrie nimic."""
     doc = await db.game_scripts.find_one({"game_id": game_id}, {"_id": 0})
+    base_rev = int((doc or {}).get("rev") or 0)
     files: list[dict] = []
     folders: list = []
     if doc is not None and isinstance(doc.get("files"), list):
@@ -1637,7 +1647,7 @@ async def _prepare_main_script(game_id: str, g: dict, source: str) -> tuple[list
             files = [dict(f) for f in raw if isinstance(f, dict)]
         if isinstance(doc.get("folders"), list):
             folders = [f for f in doc["folders"] if isinstance(f, str)]
-    return _validate_scripts_or_400(_with_main_script(files, source), folders), folders
+    return _validate_scripts_or_400(_with_main_script(files, source), folders), folders, base_rev
 
 
 async def _resolve_player_character(model_id: str, source: Optional[str], owner_id: str, actor: dict) -> tuple[str, str]:
@@ -1807,7 +1817,7 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
 
     # Scriptul trimis la PATCH merge in proiect (main.lua), nu doar in games.script (vezi create_game).
     # Un script gol NU sterge main.lua (ar fi usor sa pierzi codul din greseala).
-    new_project: Optional[tuple[list[dict], list]] = None
+    new_project: Optional[tuple[list[dict], list, int]] = None
     if updates.get("script", "").strip():
         new_project = await _prepare_main_script(game_id, g, updates["script"])
 
@@ -1836,12 +1846,13 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     if updates:
         await db.games.update_one({"game_id": game_id}, {"$set": updates})
     if new_project is not None:
-        files, folders = new_project
-        await db.game_scripts.update_one(
-            {"game_id": game_id},
-            {"$set": {"game_id": game_id, "files": files, "folders": folders, "updated_at": now_utc()}},
-            upsert=True,
-        )
+        files, folders, base_rev = new_project
+        from astran_sandbox.project_rev import ProjectConflict, save_project_doc
+        try:
+            # creste `rev`, ca editorii cu o revizie veche sa primeasca 409 in loc sa suprascrie tacit
+            await save_project_doc(db, game_id, files, folders, base_rev)
+        except ProjectConflict:
+            raise HTTPException(status_code=409, detail="The project was changed elsewhere. Reload it before saving.")
     g2 = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     out_list = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g2)]))
     return {"game": out_list[0]}
@@ -1904,7 +1915,7 @@ async def delete_game(game_id: str, body: DeleteGameBody, request: Request, curr
     Regula "owner-only" e verificata AICI, pe server, din campul owner_id salvat in baza de
     date la creare - rolul trimis de client (daca exista undeva in payload) nu e niciodata
     folosit ca dovada de autorizare."""
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
@@ -1977,15 +1988,13 @@ async def list_trash(current=Depends(get_current_user)):
             "recovery_state": "pending",
         })
     return {"games": out}
-
-
 @api.post("/games/{game_id}/security/password/setup")
 async def setup_project_password(game_id: str, body: SetupProjectPasswordBody, request: Request, current=Depends(get_current_user)):
     """Flux pentru proiecte create INAINTE de acest sistem - seteaza parola de securitate
     lipsa, la urmatoarea actiune sensibila. Cere reautentificare cu parola CONTULUI (nu a
     proiectului, care inca nu exista) si functioneaza o singura data per proiect: odata
     setata, schimbarea ei trece doar prin fluxul de reset (vezi mai jos)."""
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
@@ -2019,7 +2028,7 @@ async def setup_project_password(game_id: str, body: SetupProjectPasswordBody, r
     return {"ok": True}
 @api.post("/games/{game_id}/security/password/reset/start")
 async def reset_password_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
@@ -2056,7 +2065,7 @@ async def reset_password_verify_email(game_id: str, body: RecoveryVerifyEmailBod
 
 @api.post("/games/{game_id}/security/password/reset/confirm")
 async def reset_password_confirm(game_id: str, body: PasswordResetConfirmBody, request: Request, current=Depends(get_current_user)):
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -2081,7 +2090,7 @@ async def reset_password_confirm(game_id: str, body: PasswordResetConfirmBody, r
 
 @api.post("/games/{game_id}/security/recover/start")
 async def recover_start(game_id: str, body: RecoveryStartBody, request: Request, current=Depends(get_current_user)):
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or not g.get("deleted"):
         raise HTTPException(status_code=404, detail="No deleted project with this id")
@@ -2119,7 +2128,7 @@ async def recover_verify_email(game_id: str, body: RecoveryVerifyEmailBody, curr
 
 @api.post("/games/{game_id}/security/recover/confirm")
 async def recover_confirm(game_id: str, body: RecoveryConfirmBody, request: Request, current=Depends(get_current_user)):
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or not g.get("deleted"):
         raise HTTPException(status_code=404, detail="No deleted project with this id")
@@ -2546,7 +2555,7 @@ async def send_request(body: FriendRequestBody, current=Depends(get_current_user
     if await db.friend_requests.count_documents({"from_id": current["user_id"], "status": "pending"}) >= MAX_PENDING_FRIEND_REQUESTS:
         raise HTTPException(status_code=429, detail="Too many pending friend requests")
     target = await db.users.find_one({"user_id": body.target_user_id}, {"_id": 0})
-    if not target:
+    if not target or target.get("deletion_state"):
         raise HTTPException(status_code=404, detail="User not found")
     # Politica optionala (decizie de produs, implicit OFF): un adult nu poate TRIMITE cereri catre un cont
     # sub 18 ani. Prietenia ramane posibila daca minorul trimite el primul cererea.
@@ -2579,7 +2588,7 @@ async def send_request(body: FriendRequestBody, current=Depends(get_current_user
             "from_id": current["user_id"], "to_id": body.target_user_id,
             "status": "pending", "created_at": now_utc(),
         })
-    except Exception:
+    except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Request already exists")
     return {"ok": True}
 
@@ -2669,6 +2678,14 @@ def _calc_fee(amount: int, tiers: list[dict]) -> tuple[int, int]:
     return 0, amount
 
 
+async def _run_money(op_id: str) -> str:
+    """money.run, dar o operatie anulata de recuperare devine 503 (reincercabil), nu 500."""
+    try:
+        return await money.run(db, op_id)
+    except money.MoneyOpFailed:
+        raise HTTPException(status_code=503, detail="The operation could not be completed, please try again")
+
+
 MIN_NET_TRANSFER = 1  # destinatarul trebuie sa primeasca cel putin 1 Astran dupa taxa
 
 
@@ -2689,7 +2706,7 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
     if body.recipient_user_id == current["user_id"]:
         raise HTTPException(status_code=400, detail="Cannot transfer to self")
     recipient = await db.users.find_one({"user_id": body.recipient_user_id})
-    if not recipient:
+    if not recipient or recipient.get("deletion_state"):
         raise HTTPException(status_code=404, detail="Recipient not found")
 
     # Cheia se STOCHEAZA prefixata cu user_id: indexul unic e global, deci fara prefix un user
@@ -2758,7 +2775,7 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
             if prev["state"] in ("failed", "refunded"):
                 continue  # incercarea precedenta a esuat (ex. sold insuficient): reluam cu un op nou
             if prev["state"] == "pending":
-                if await money.run(db, cand) == "insufficient":
+                if await _run_money(cand) == "insufficient":
                     raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
             existing = await db.astran_ledger.find_one(
                 {"idempotency_key": idem, "user_id": current["user_id"]}, {"_id": 0})
@@ -2768,7 +2785,7 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
     if op_id is None:
         raise HTTPException(status_code=409, detail="Transfer already in progress, try again")
 
-    if await money.run(db, op_id) == "insufficient":
+    if await _run_money(op_id) == "insufficient":
         raise HTTPException(status_code=402, detail="Insufficient Astrans balance")
     return {"ok": True, "transaction": {k: v for k, v in tx.items() if k != "_id"}}
 
@@ -2809,8 +2826,6 @@ class MockProvider(PaymentProvider):
 
     async def verify(self, token: str, package: dict, user: dict) -> VerifyResult:
         return VerifyResult(True, external_id=f"mock:{new_id()}")
-
-
 class StripeProvider(PaymentProvider):
     name = "stripe"
 
@@ -3117,13 +3132,13 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         if prev and prev["payer_id"] != current["user_id"]:
             raise HTTPException(status_code=409, detail="This payment was already used")
         if prev and prev["state"] == "pending":
-            await money.run(db, op_id)  # o incercare anterioara a ramas la jumatate: o ducem la capat
+            await _run_money(op_id)  # o incercare anterioara a ramas la jumatate: o ducem la capat
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
         return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
     except Exception:  # noqa: BLE001
         log.exception("could not journal verified payment")
         raise HTTPException(status_code=503, detail="Could not record the purchase, try again - you will not be charged twice")
-    await money.run(db, op_id)
+    await _run_money(op_id)
     if provider.name == "google_play" and result.external_id:
         await provider.acknowledge(result.external_id, package["package_id"])
     return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
