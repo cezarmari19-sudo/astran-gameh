@@ -1,0 +1,107 @@
+ASTRAN GAME — TERMENI ȘI CONDIȚII
+
+Versiunea: 1.1
+Data intrării în vigoare: [DATA — DE COMPLETAT]
+Operator: [DENUMIREA LEGALĂ A COMPANIEI — DE COMPLETAT]
+
+*** CIORNĂ — NEVERIFICATĂ JURIDIC ***
+Acest text este o ciornă de lucru pregătită de echipa de dezvoltare. Nu a fost verificat de un avocat și nimic din el nu
+trebuie înțeles ca o afirmație că platforma respectă o lege. Elementele din [PARANTEZE] trebuie completate sau confirmate de
+companie înainte de publicare. Documentul nu trebuie prezentat ca final până nu este verificat.
+
+1. OBIECTUL ACORDULUI
+
+Astran Game („Astran”, „noi” sau „platforma”) este o platformă pentru crearea, publicarea și jucarea de jocuri și alt conținut
+generat de utilizatori. Prin crearea unui cont și folosirea platformei, utilizatorul încheie cu Astran un contract pentru
+furnizarea serviciilor platformei, în condițiile de mai jos.
+
+2. CONTUL
+
+Utilizatorul furnizează informații corecte la crearea contului, își păstrează parola în siguranță și răspunde pentru
+activitatea desfășurată prin cont.
+
+3. CONȚINUT ȘI CONDUITĂ
+
+3.1 Utilizatorul răspunde pentru conținutul pe care îl publică (jocuri, scripturi, modele, nume, descrieri, mesaje de chat,
+mesaje directe și orice altceva încarcă sau trimite).
+3.2 Pe platformă nu sunt permise: (a) conținutul ilegal potrivit legii aplicabile; (b) conținutul sexual care implică minori
+sau care sexualizează ori pune în pericol copiii; (c) hărțuirea, amenințările, bullying-ul sau incitarea la violență;
+(d) discursul de ură sau discriminarea; (e) înșelăciunile, frauda, phishing-ul sau uzurparea identității; (f) conținutul care
+încalcă proprietatea intelectuală a altcuiva; (g) codul rău intenționat sau încercările de a ataca platforma ori alți
+utilizatori; (h) conținutul nepotrivit pentru categoria de vârstă sub care este publicat; (i) spamul. [LISTA DE REGULI — DE
+COMPLETAT ȘI CONFIRMAT DE COMPANIE]
+3.3 Fiecare punct din secțiunea 3.2 este o „regulă a platformei” în sensul secțiunilor 5–9.
+
+4. MONEDA VIRTUALĂ ȘI PLĂȚI
+
+[TERMENI PRIVIND ASTRANS, ACHIZIȚII ȘI RAMBURSĂRI — DE REDACTAT]
+
+5. CUM MODERĂM CONȚINUTUL
+
+5.1 Putem verifica conținutul și conturile în urma unui raport, a unei notificări sau din proprie inițiativă.
+5.2 Deciziile sunt luate de persoane din echipa de moderare. [PROCEDURI OPERAȚIONALE, INSTRUIRE ȘI TERMENE DE RĂSPUNS — DE
+DEFINIT DE COMPANIE]
+5.3 Instrumente automate: platforma folosește un filtru automat de cuvinte în chat, care maschează sau blochează anumite
+cuvinte în funcție de categoria de vârstă a destinatarului. Filtrul nu decide asupra conturilor. Nu luăm decizii de suspendare
+sau închidere a unui cont ori de eliminare a unui joc exclusiv prin mijloace automate. [CONFIRMAȚI CU COMPANIA DACĂ SE FOLOSESC ȘI
+ALTE INSTRUMENTE AUTOMATE]
+5.4 Măsuri posibile: avertisment; eliminarea sau ascunderea conținutului; restricționarea accesului la un conținut anume;
+restricționarea temporară a chatului sau a contului; suspendarea permanentă a contului. Alegem măsura în funcție de regula
+încălcată, gravitate și circumstanțe. [CRITERII DE PROPORȚIONALITATE — DE CONFIRMAT]
+
+6. CUM RAPORTEZI CONȚINUT
+
+6.1 Raportări privind încălcarea regulilor platformei: folosește opțiunea „Raportează” disponibilă pe jocuri, profiluri și
+mesaje.
+6.2 Notificări privind conținut presupus ilegal: folosește formularul de notificare din aplicație. El cere o explicație a
+motivului pentru care conținutul este presupus ilegal, locația conținutului, numele și emailul persoanei care notifică (cu
+excepția cazurilor în care legea nu le cere) și o declarație de bună-credință. O notificare insuficient de precisă sau
+fundamentată poate să nu ne permită evaluarea conținutului; consemnăm motivul.
+6.3 Confirmăm electronic primirea unei notificări și comunicăm persoanei care a notificat ce am decis și cum poate contesta
+decizia.
+6.4 Raportările false sau abuzive în mod deliberat pot duce la măsuri împotriva contului care raportează. [DE CONFIRMAT CU
+COMPANIA]
+
+7. EXPUNEREA DE MOTIVE
+
+Când eliminăm sau restricționăm conținut ori suspendăm sau închidem un cont, utilizatorul afectat primește în aplicație o
+expunere de motive (Setări › Decizii de moderare) care explică: decizia, conținutul vizat, faptele, dacă se bazează pe
+ilegalitate sau pe acești termeni și pe ce prevedere, dacă s-au folosit mijloace automate și cum poate fi contestată decizia.
+[DACĂ ȘI CUM SE TRIMIT EXPUNERILE ȘI PE EMAIL — DE DEFINIT]
+
+8. PLÂNGERI (CONTESTAȚII)
+
+8.1 Utilizatorul (și persoana a cărei notificare a fost respinsă) poate depune o plângere împotriva unei decizii de moderare
+în termen de șase luni de la decizie, din același ecran. Plângerea explică de ce persoana nu este de acord și poate include
+dovezi suplimentare.
+8.2 Plângerile sunt analizate de un membru al echipei de moderare diferit de cel care a luat decizia inițială. Rezultatul și
+motivarea sunt afișate în aplicație. Decizia poate fi menținută sau anulată.
+8.3 Pe lângă plângerea internă, persoana poate avea dreptul de a se adresa unui organism de soluționare extrajudiciară a
+litigiilor și instanțelor. [ORGANISMELE EXTRAJUDICIARE, DACĂ EXISTĂ — DE LISTAT DE COMPANIE]
+
+9. SUSPENDAREA ȘI ÎNCHIDEREA CONTULUI
+
+9.1 Utilizatorul poate șterge contul oricând din Setări.
+9.2 Astran poate restricționa temporar sau suspenda permanent un cont care încalcă acești termeni. [CONDIȚII, AVERTISMENTE
+ÎNAINTE DE SUSPENDARE, TERMENE ȘI TRATAREA ARTICOLELOR CUMPĂRATE — DE DEFINIT DE COMPANIE ȘI VERIFICAT DE UN AVOCAT]
+9.3 Un utilizator suspendat își poate vedea în continuare deciziile de moderare, poate depune plângeri și își poate exercita
+drepturile asupra datelor.
+
+10. DATE PERSONALE
+
+Modul de prelucrare a datelor personale este descris în Politica de Confidențialitate, document separat. Acceptarea acestor
+termeni nu reprezintă consimțământ pentru prelucrări care cer consimțământ separat (de exemplu comunicări de marketing);
+acesta se cere separat și poate fi refuzat sau retras fără a afecta contul. Evidențele de moderare se păstrează conform
+Politicii de Confidențialitate. [TERMENE DE PĂSTRARE — DE DEFINIT]
+
+11. MODIFICAREA TERMENILOR
+
+Putem publica versiuni noi ale acestor termeni. Pentru modificările care schimbă drepturile sau obligațiile utilizatorului
+vom cere o nouă acceptare; celelalte modificări vor fi aduse la cunoștința utilizatorului. Versiunea acceptată de fiecare
+utilizator este înregistrată.
+
+12. CONTACT
+
+Datele de contact sunt disponibile în aplicație (Setări › Contact). [ENTITATE LEGALĂ, ADRESĂ ȘI EMAIL — DE COMPLETAT]
+
+SFÂRȘITUL TERMENILOR ȘI CONDIȚIILOR

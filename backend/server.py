@@ -260,6 +260,8 @@ from astran_sandbox import age_guard                   # poarta de acces 18+ pen
 from astran_sandbox import age_audit as age_audit      # jurnal de audit adauga-doar, inlantuit
 from astran_sandbox import parental_consent as parental_consent
 from astran_sandbox.age_routes import make_age_router
+from astran_sandbox import moderation_service as MOD    # DSA: moderare, Art. 16/17/20 (vezi moderation_service.py)
+from astran_sandbox.moderation_routes import make_moderation_router, make_contact_router
 from astran_sandbox.media_validation import clean_image_ref
 from astran_sandbox.scene_validation import clean_scene
 
@@ -525,6 +527,7 @@ class ReportBody(BaseModel):
     target_id: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=REPORT_REASON_MAX)
     details: Optional[str] = Field(default=None, max_length=REPORT_DETAILS_MAX)
+    category: Optional[Literal[tuple(MOD.CATEGORIES)]] = None   # DSA: optional; vechii clienti nu il trimit
 
 
 class JoinInstanceBody(BaseModel):
@@ -581,6 +584,20 @@ async def resolve_user_from_token(token: str) -> Optional[dict]:
         return None
 
 
+MOD_ALLOWED_WHEN_SUSPENDED = ("/api/auth/me", "/api/auth/logout", "/api/moderation/me/", "/api/moderation/notices", "/api/legal/",
+                              "/api/contact/", "/api/consent/", "/api/privacy/", "/api/account/data-export")
+
+
+def MOD_PATH_ALLOWED(path: str) -> bool:
+    return any(path == p.rstrip("/") or path.startswith(p) for p in MOD_ALLOWED_WHEN_SUSPENDED)
+
+
+async def resolve_active_user_from_token(token: str) -> Optional[dict]:
+    """Pentru WebSocket-uri: un cont suspendat de moderare nu mai poate sta conectat in timp real."""
+    u = await resolve_user_from_token(token)
+    return None if (u and MOD.account_block(u)) else u
+
+
 async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
@@ -590,6 +607,11 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
         raise HTTPException(status_code=401, detail="Invalid token")
     # Poarta CENTRALA (toate rutele autentificate trec pe aici): un cont sub 16 ani fara acord parental aprobat
     # (sau un cont fara varsta dupa termenul configurat) poate folosi doar rutele de varsta/parental/privacy.
+    blk = MOD.account_block(user)
+    if blk and not MOD_PATH_ALLOWED(request.url.path):
+        # cont suspendat de moderare: ramane accesibil doar ce permite DSA (decizii/plangeri), date personale, documente legale
+        raise HTTPException(status_code=403, detail={"code": "account_suspended", "permanent": blk["permanent"],
+                                                     "until": blk["until"].isoformat() if blk["until"] else None})
     info = AP.evaluate_access(user)
     if info.restricted and not AP.path_allowed_when_restricted(request.url.path):
         raise HTTPException(status_code=403, detail={"code": "account_restricted", "account_state": info.account_state,
@@ -659,6 +681,7 @@ async def startup():
     await db.email_verifications.create_index("expires_at", expireAfterSeconds=0)
     app.state.google_voided_task = asyncio.create_task(_google_voided_loop())
     await db.reports.create_index("report_id", unique=True)
+    await MOD.ensure_indexes(db)   # DSA: colectii de moderare (aditiv, nu schimba datele existente)
     await db.recently_played.create_index([("user_id", 1), ("played_at", -1)])
     # Server instances: mai multe "camere" pentru acelasi joc, fiecare cu propriul plafon de jucatori.
     await db.game_instances.create_index("instance_id", unique=True)
@@ -1888,6 +1911,9 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
     # Created/Updated (afisate) NU sunt editabile manual - nu exista camp pentru ele in body.
     # "Updated" se schimba doar cand jocul (re)devine public prin acest request; "Created"
     # se seteaza o singura data, la prima publicare publica, si ramane neschimbat dupa.
+    if g.get("moderation_state") in ("removed", "restricted") and updates.get("is_public"):
+        # DSA: continutul restrictionat/eliminat de moderare nu poate fi republicat de owner; calea e plangerea (Art. 20)
+        raise HTTPException(status_code=403, detail={"code": "content_moderated", "message": "This game was restricted by moderation"})
     resulting_public = updates.get("is_public", g.get("is_public", False))
     if updates and resulting_public:
         now = now_utc()
@@ -3371,8 +3397,18 @@ async def create_report(body: ReportBody, current=Depends(get_current_user)):
         "status": "open",
         "created_at": now_utc(),
     }
-    await db.reports.insert_one(doc)
-    return {"report_id": rid}
+    # DSA: raport obisnuit (incalcare a regulilor) - NU e notificare Art. 16 (aceea are ruta /moderation/notices).
+    # Raspunsul pastreaza `report_id` (compatibil) si adauga confirmarea de primire.
+    receipt = await MOD.register_report(db, doc, kind=MOD.KIND_RULE, category=body.category)
+    return {"report_id": rid, "receipt": receipt}
+
+
+async def _moderation_target_exists(target_type: str, target_id: str, current: dict) -> bool:
+    class _B:  # adaptor: refoloseste _report_target_exists neschimbat
+        pass
+    b = _B()
+    b.target_type, b.target_id = target_type, target_id
+    return await _report_target_exists(b, current)  # type: ignore[arg-type]
 
 
 @api.get("/config/languages")
@@ -3404,7 +3440,7 @@ if make_sandbox_router is not None:
 # Montat direct pe `app`, NU pe `api` (fara prefixul /api) - WebSocket-urile sunt oricum o
 # ruta separata de REST, nu are rost sa poarte acelasi prefix ca restul API-ului HTTP.
 if make_realtime_router is not None:
-    app.include_router(make_realtime_router(resolve_user_from_token, db))
+    app.include_router(make_realtime_router(resolve_active_user_from_token, db))
 
 # Shop de obiecte de joc (Modele + Scripturi): /api/shop/models, /api/shop/scripts, /api/shop/items/{id}...
 if make_shop_router is not None:
@@ -3433,7 +3469,7 @@ if make_chat_admin_router is not None:
 # MESAGERIE PRIVATA: /api/dm/open, /api/dm/conversations, /api/dm/unread,
 # /api/dm/conversations/{id}/messages|read, /api/dm/messages/{id}/report  +  WebSocket /ws/dm
 if make_dm_routers is not None:
-    _dm_api_router, _dm_ws_router = make_dm_routers(get_current_user, resolve_user_from_token, db, _friend_public)
+    _dm_api_router, _dm_ws_router = make_dm_routers(get_current_user, resolve_active_user_from_token, db, _friend_public)
     api.include_router(_dm_api_router)
     app.include_router(_dm_ws_router)  # pe `app`, fara prefixul /api (ca WebSocket-ul din realtime.py)
 
@@ -3473,6 +3509,10 @@ api.include_router(make_age_router(
     on_withdrawn=privacy.disconnect_user_sockets,
     erase_child=_erase_child,
 ))
+
+# DSA: /api/moderation/* (rapoarte, notificari Art. 16, decizii Art. 17, plangeri Art. 20, panou staff) si /api/contact/*
+api.include_router(make_moderation_router(get_current_user, db, target_exists=_moderation_target_exists))
+api.include_router(make_contact_router(db, client_ip=_client_ip))
 
 app.include_router(api)
 

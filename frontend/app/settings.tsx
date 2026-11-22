@@ -9,6 +9,8 @@ import { as } from "@/src/i18n/ageStrings";
 import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import PrivacyDataSection from "@/src/components/PrivacyDataSection";
+import LegalDocModal from "@/src/components/LegalDocModal";
+import { ms } from "@/src/i18n/modStrings";
 import { colors, radius, spacing } from "@/src/theme";
 
 export default function SettingsScreen() {
@@ -17,6 +19,7 @@ export default function SettingsScreen() {
   const { t } = useI18n();
   const [graphics, setGraphics] = useState(2);
   const [distance, setDistance] = useState(2);
+  const [terms, setTerms] = useState(false);
   // Categoria de varsta NU mai e editabila din aplicatie: e calculata de server din data nasterii, iar 18+ cere
   // verificare a varstei (age assurance). Aici doar o afisam si oferim caile corecte.
   const { lang } = useI18n();
@@ -65,6 +68,24 @@ export default function SettingsScreen() {
         {graphics >= 3 && distance >= 3 ? (
           <Text style={styles.warn}>⚠ High graphics + high view distance can reduce performance on older devices.</Text>
         ) : null}
+
+        <Text style={styles.section}>{ms(lang, "mod_title").toUpperCase()}</Text>
+        <Pressable onPress={() => setTerms(true)} style={styles.row} testID="settings-terms">
+          <MaterialCommunityIcons name="file-document-outline" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{ms(lang, "mod_terms")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
+        <Pressable onPress={() => router.push("/moderation")} style={[styles.row, { marginTop: 8 }]} testID="settings-moderation">
+          <MaterialCommunityIcons name="gavel" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{ms(lang, "mod_decisions")} · {ms(lang, "mod_my_reports")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
+        <Pressable onPress={() => router.push("/moderation/contact")} style={[styles.row, { marginTop: 8 }]} testID="settings-contact">
+          <MaterialCommunityIcons name="email-outline" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{ms(lang, "mod_contact")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
+        {terms ? <LegalDocModal visible docType="terms_of_service" lang={lang} onClose={() => setTerms(false)} /> : null}
 
         <PrivacyDataSection />
       </ScrollView>

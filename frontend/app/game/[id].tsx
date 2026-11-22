@@ -7,6 +7,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
 import { as } from "@/src/i18n/ageStrings";
+import ReportSheet from "@/src/components/ReportSheet";
 import { colors, radius, spacing } from "@/src/theme";
 
 function formatDate(iso: string | null | undefined): string | null {
@@ -27,6 +28,7 @@ export default function GameDetail() {
   const [game, setGame] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
   const [errCode, setErrCode] = useState<string | null>(null);
+  const [reporting, setReporting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -179,6 +181,13 @@ export default function GameDetail() {
           </Section>
         ) : null}
       </ScrollView>
+
+      {/* DSA: raportare joc (regula incalcata SAU notificare de continut ilegal) */}
+      <Pressable testID="game-report-btn" onPress={() => setReporting(true)} style={{ position: "absolute", right: 16, bottom: 96, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 }}>
+        <MaterialCommunityIcons name="flag-outline" size={16} color={colors.onSurface2} />
+        <Text style={{ color: colors.onSurface2, fontSize: 12, fontWeight: "700" }}>{lang === "ro" ? "Raportează" : "Report"}</Text>
+      </Pressable>
+      {reporting ? <ReportSheet visible targetType="game" targetId={game.game_id} onClose={() => setReporting(false)} /> : null}
 
       {/* ---------- 3. BUTON JOACĂ, STICKY ---------- */}
       <SafeAreaView edges={["bottom"]} style={styles.playBar}>

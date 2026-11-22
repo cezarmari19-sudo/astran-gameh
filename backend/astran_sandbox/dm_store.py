@@ -77,7 +77,7 @@ class MongoDmStore:
         await self.db.dm_conversations.update_one({"conversation_id": cid}, {"$set": {"unread_" + slot: 0}})
 
     async def page_messages(self, cid: str, before: Optional[tuple], limit: int) -> list[dict]:
-        q: dict = {"conversation_id": cid}
+        q: dict = {"conversation_id": cid, "moderation_hidden": {"$ne": True}}   # DSA: mesaj ascuns de moderare
         if before is not None:
             ts, mid = before
             q["$or"] = [{"ts": {"$lt": ts}}, {"ts": ts, "message_id": {"$lt": mid}}]

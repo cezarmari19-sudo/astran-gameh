@@ -28,7 +28,7 @@
     },
     "terms_of_service": {
       "legal_basis": "contract",
-      "current": "1.0",
+      "current": "1.1",
       "versions": [
         {
           "version": "1.0",
@@ -46,6 +46,25 @@
             "en": {
               "path": "terms_of_service/1.0.en.txt",
               "sha256": "510e456ef9fc9bac61235f2b2a8c20a64ae53a4e2ddc68f330d5f189cf444e8b"
+            }
+          }
+        },
+        {
+          "version": "1.1",
+          "effective_date": null,
+          "requires_reacceptance": true,
+          "summary": {
+            "ro": "Adaugă regulile de moderare, raportare, expunere de motive și plângeri (ciornă, neverificată juridic).",
+            "en": "Adds moderation rules, reporting, statement of reasons and complaints (draft, not legally reviewed)."
+          },
+          "files": {
+            "ro": {
+              "path": "terms_of_service/1.1.ro.txt",
+              "sha256": "ecd63a7df4ff65331d9a3352159affab04fc51ab27aff0ce8de88a6489e8dfe1"
+            },
+            "en": {
+              "path": "terms_of_service/1.1.en.txt",
+              "sha256": "95b3a16c427723cdf30b477c9b7cc73facda1326ed6f37a9b0f46272c9670e18"
             }
           }
         }

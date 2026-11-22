@@ -22,7 +22,7 @@ const CATEGORIES = [
 export default function DiscoverScreen() {
   const router = useRouter();
   const { user } = useAuth();
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [friends, setFriends] = useState<any[]>([]);
   const [forYou, setForYou] = useState<any[]>([]);
   const [trending, setTrending] = useState<any[]>([]);
@@ -188,6 +188,11 @@ export default function DiscoverScreen() {
             />
           </>
         )}
+        {/* Footer informativ: Termeni + Contact + moderare (DSA) */}
+        <View style={{ flexDirection: "row", justifyContent: "center", gap: 18, paddingVertical: 24, flexWrap: "wrap" }} testID="app-footer">
+          <Text style={{ color: colors.onSurface3, fontSize: 12 }} onPress={() => router.push("/moderation")} testID="footer-terms">{lang === "ro" ? "Termeni și moderare" : "Terms & moderation"}</Text>
+          <Text style={{ color: colors.onSurface3, fontSize: 12 }} onPress={() => router.push("/moderation/contact")} testID="footer-contact">{lang === "ro" ? "Contact" : "Contact"}</Text>
+        </View>
       </ScrollView>
     </SafeAreaView>
   );

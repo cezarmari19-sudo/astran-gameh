@@ -470,7 +470,7 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
     async def list_chat(group_id: str, current=Depends(get_current_user)):
         await get_group_or_404(group_id)
         await require_membership(group_id, current["user_id"])
-        cursor = db.group_chat_messages.find({"group_id": group_id}, {"_id": 0}).sort("created_at", -1).limit(CHAT_PAGE_SIZE)
+        cursor = db.group_chat_messages.find({"group_id": group_id, "moderation_hidden": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).limit(CHAT_PAGE_SIZE)
         msgs = await cursor.to_list(CHAT_PAGE_SIZE)
         msgs.reverse()
         try:
