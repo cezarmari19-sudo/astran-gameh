@@ -131,7 +131,7 @@ class _DB:
         ])
         self.shop_purchases = _Coll([{"user_id": "u1", "item_id": "itm_bought"}])
         self.game_assets = _Coll()
-        self.games = _Coll([{"game_id": "g1", "owner_id": "u1", "title": "My game", "scene": {"objects": []}}])
+        self.games = _Coll([{"game_id": "g1", "owner_id": "u1", "title": "My game", "age_category": "under_18", "scene": {"objects": []}}])
         self.game_scripts = _Coll()
 
 

@@ -1,86 +1,64 @@
 import React, { useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView } from "react-native";
-import { useRouter } from "expo-router";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { View, Text, ScrollView, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
+import { colors, spacing, type } from "@/src/theme";
+import { PrimaryButton, SecondaryButton } from "@/src/components/ui";
+import DateOfBirthPicker, { Dob, EMPTY_DOB, dobToIso, dobClientError, previewBand } from "@/src/components/DateOfBirthPicker";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
-import { api } from "@/src/api/client";
-import { colors, radius, spacing } from "@/src/theme";
-import { PrimaryButton } from "@/src/components/ui";
+import { as, errText } from "@/src/i18n/ageStrings";
+import { ageApi } from "@/src/api/age";
 
-export default function AgeOnboardingScreen() {
+// Conturi FARA data nasterii (create inainte de aceasta functie, sau prin Google): data se introduce O SINGURA DATA.
+// Nu mai exista alegerea "Sub 18 / 18+": categoria o calculeaza serverul, iar 18+ se obtine doar prin age assurance.
+export default function AgeInfoScreen() {
+  const { lang } = useI18n();
   const router = useRouter();
-  const { user, refresh } = useAuth();
-  const { t } = useI18n();
-  const [choice, setChoice] = useState<"under_18" | "adult_18">(user?.age_category || "under_18");
+  const { refresh, logout } = useAuth();
+  const [dob, setDob] = useState<Dob>(EMPTY_DOB);
   const [busy, setBusy] = useState(false);
-
-  const [saveErr, setSaveErr] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const band = previewBand(dob);
 
   async function save() {
-    setBusy(true); setSaveErr(null);
+    const ce = dobClientError(dob, lang);
+    if (ce) { setErr(ce); return; }
+    setBusy(true); setErr(null);
     try {
-      await api("/users/me", { method: "PATCH", body: JSON.stringify({ age_category: choice }) });
+      await ageApi.setDateOfBirth(dobToIso(dob)!);
       await refresh();
-      router.replace("/(tabs)");
+      const st = await ageApi.me();
+      router.replace(st.restricted ? "/(onboarding)/parental-wait" : "/(tabs)");
     } catch (e: any) {
-      setSaveErr(e?.message || "Error");
-    } finally {
-      setBusy(false);
-    }
+      setErr(errText(lang, e));
+    } finally { setBusy(false); }
   }
 
   return (
     <SafeAreaView style={styles.root}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>{t("age_select_title")}</Text>
-        <Text style={styles.sub}>{t("age_select_subtitle")}</Text>
-
-        <Pressable
-          testID="onboarding-age-under-18"
-          onPress={() => setChoice("under_18")}
-          style={[styles.card, choice === "under_18" && styles.cardActive]}
-        >
-          <View style={styles.cardHead}>
-            <MaterialCommunityIcons name="shield-check" size={26} color={choice === "under_18" ? colors.brand : colors.onSurface2} />
-            <Text style={[styles.cardTitle, choice === "under_18" && { color: colors.brand }]}>{t("age_under_18")}</Text>
-          </View>
-          <Text style={styles.cardDesc}>{t("age_under_desc")}</Text>
-        </Pressable>
-
-        <Pressable
-          testID="onboarding-age-18-plus"
-          onPress={() => setChoice("adult_18")}
-          style={[styles.card, choice === "adult_18" && styles.cardActive]}
-        >
-          <View style={styles.cardHead}>
-            <MaterialCommunityIcons name="fire" size={26} color={choice === "adult_18" ? colors.brand : colors.onSurface2} />
-            <Text style={[styles.cardTitle, choice === "adult_18" && { color: colors.brand }]}>{t("age_18_plus")}</Text>
-          </View>
-          <Text style={styles.cardDesc}>{t("age_18_desc")}</Text>
-        </Pressable>
+      <ScrollView contentContainerStyle={styles.pad}>
+        <Text style={styles.h1}>{as(lang, "legacy_title")}</Text>
+        <Text style={styles.p}>{as(lang, "legacy_intro")}</Text>
+        <Text style={styles.label}>{as(lang, "dob_title")}</Text>
+        <DateOfBirthPicker value={dob} onChange={setDob} lang={lang} testPrefix="age-dob" />
+        <Text style={styles.hint}>{as(lang, "dob_why")}</Text>
+        {band ? <Text style={styles.explain} testID="age-explain">{band === "under_16" ? as(lang, "band_under16") : band === "16_17" ? as(lang, "band_16_17") : as(lang, "band_adult")}</Text> : null}
+        {err ? <Text style={styles.err} testID="age-error">{err}</Text> : null}
+        <View style={{ marginTop: spacing.xl }}>
+          <PrimaryButton testID="age-save" label={busy ? as(lang, "saving") : as(lang, "save")} onPress={save} disabled={busy} />
+        </View>
+        <View style={{ marginTop: spacing.md }}>
+          <SecondaryButton testID="age-logout" label={as(lang, "logout")} onPress={async () => { await logout(); router.replace("/"); }} />
+        </View>
       </ScrollView>
-      <View style={styles.footer}>
-        {saveErr ? <Text style={{ color: colors.error, fontSize: 12, marginBottom: 8 }}>{saveErr}</Text> : null}
-        <PrimaryButton testID="onboarding-continue" label={busy ? "..." : t("continue")} onPress={save} disabled={busy} />
-      </View>
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.surface },
-  content: { padding: spacing.lg, paddingTop: 40, gap: 16 },
-  title: { color: colors.onSurface, fontSize: 26, fontWeight: "900", letterSpacing: -0.3 },
-  sub: { color: colors.onSurface3, fontSize: 13, marginBottom: 12 },
-  card: {
-    padding: spacing.lg, borderRadius: radius.lg, backgroundColor: colors.surface2,
-    borderWidth: 1.5, borderColor: colors.border, gap: 10,
-  },
-  cardActive: { borderColor: colors.brand, backgroundColor: colors.brandTint },
-  cardHead: { flexDirection: "row", alignItems: "center", gap: 12 },
-  cardTitle: { color: colors.onSurface, fontSize: 22, fontWeight: "900", letterSpacing: -0.3 },
-  cardDesc: { color: colors.onSurface2, fontSize: 13 },
-  footer: { padding: spacing.lg, borderTopWidth: 1, borderTopColor: colors.border },
+  root: { flex: 1, backgroundColor: colors.surface }, pad: { padding: spacing.xl },
+  h1: { ...type.h1, color: colors.onSurface }, p: { ...type.body, color: colors.onSurface2, marginTop: spacing.md, lineHeight: 20 },
+  label: { ...type.micro, color: colors.onSurface3, textTransform: "uppercase", marginTop: spacing.xl, marginBottom: spacing.sm },
+  hint: { color: colors.onSurface3, fontSize: 12, marginTop: 8, lineHeight: 17 }, explain: { color: colors.brand, fontSize: 13, marginTop: 10, lineHeight: 18 },
+  err: { color: colors.error, marginTop: spacing.md },
 });

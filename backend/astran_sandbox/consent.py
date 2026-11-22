@@ -38,7 +38,9 @@ SOURCES = ("register", "google_signup", "settings", "reaccept")
 PURPOSES: dict[str, dict] = {
     "marketing_communications": {
         "version": "1.0",
-        "min_age_category": "adult_18",
+        # GDPR art. 8: de la 16 ani (pragul Romaniei) isi poate da singur consimtamantul. Sub 16 nu se ofera
+        # (ar cere acord parental, iar marketingul nu e necesar serviciului). 16-17 raman "minori" pentru DSA.
+        "min_age_band": "16_17",
         "requires_confirmation_to_withdraw": False,
         "texts": {
             "ro": {
@@ -107,6 +109,15 @@ def _lang(lang: Optional[str]) -> str:
     return LD.get_registry().normalize_lang(lang)
 
 
+def _user_band(user: dict) -> Optional[str]:
+    """Banda de varsta recalculata din data nasterii criptate (nu din campuri trimise de client)."""
+    try:
+        from . import age_policy as AP
+        return AP.evaluate_access(user).band
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def purpose_text(purpose: str, lang: str) -> dict:
     return PURPOSES[purpose]["texts"].get(lang) or PURPOSES[purpose]["texts"][LD.DEFAULT_LANG]
 
@@ -117,8 +128,19 @@ def purpose_wording_sha256(purpose: str, lang: str) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def purpose_eligible(purpose: str, age_category: Optional[str]) -> bool:
-    need = PURPOSES[purpose].get("min_age_category")
+_BAND_ORDER = {"under_16": 0, "16_17": 1, "18_plus": 2}
+
+
+def purpose_eligible(purpose: str, age_category: Optional[str], age_band: Optional[str] = None) -> bool:
+    """Eligibilitate pe BANDA de varsta calculata de server (data nasterii). Fara banda cunoscuta (cont vechi, fara
+    data nasterii) se cade pe regula conservatoare veche: doar `adult_18` (care acum inseamna age assurance verificat)."""
+    cfg = PURPOSES[purpose]
+    need_band = cfg.get("min_age_band")
+    if need_band is not None:
+        if age_band in _BAND_ORDER:
+            return _BAND_ORDER[age_band] >= _BAND_ORDER[need_band]
+        return age_category == "adult_18"
+    need = cfg.get("min_age_category")
     return need is None or age_category == need
 
 
@@ -201,11 +223,12 @@ async def record_document_acceptance(db, user_id: str, doc_type: str, *, lang: s
     return await _append(db, user_id, doc_type, make)
 
 
-async def grant_purpose(db, user_id: str, purpose: str, *, age_category: Optional[str], lang: str, source: str) -> tuple[dict, bool]:
+async def grant_purpose(db, user_id: str, purpose: str, *, age_category: Optional[str], lang: str, source: str,
+                        age_band: Optional[str] = None) -> tuple[dict, bool]:
     lang = _lang(lang)
     if purpose not in PURPOSES:
         raise ConsentError("unknown_subject", 404, lang)
-    if not purpose_eligible(purpose, age_category):
+    if not purpose_eligible(purpose, age_category, age_band):
         raise ConsentError("purpose_not_available", 403, lang)
     p = PURPOSES[purpose]
     fields = {
@@ -249,7 +272,7 @@ async def withdraw_purpose(db, user_id: str, purpose: str, *, confirm: bool, lan
 
 # ----------------------------------------------------------------------------- inregistrare
 def validate_registration_consent(accept_terms: Any, accept_privacy: Any, optional: Any, presented: Any,
-                                  *, age_category: Optional[str], lang: str = "en") -> dict:
+                                  *, age_category: Optional[str], lang: str = "en", age_band: Optional[str] = None) -> dict:
     """Valideaza acceptarea de la inregistrare INAINTE de orice scriere. Nu citeste nicio versiune de la client."""
     lang = _lang(lang)
     reg = LD.get_registry()
@@ -271,20 +294,20 @@ def validate_registration_consent(accept_terms: Any, accept_privacy: Any, option
             if not isinstance(val, bool):
                 raise ConsentError("invalid_request", 422, lang)
             if val:
-                if not purpose_eligible(purpose, age_category):
+                if not purpose_eligible(purpose, age_category, age_band):
                     raise ConsentError("purpose_not_available", 422, lang)
                 granted.append(purpose)
     return {"optional": granted}
 
 
 async def record_registration_consents(db, user_id: str, validated: dict, *, age_category: Optional[str], lang: str,
-                                       source: str = "register") -> list[dict]:
+                                       source: str = "register", age_band: Optional[str] = None) -> list[dict]:
     out = []
     for doc_type in ("terms_of_service", "privacy_policy"):
         ev, _ = await record_document_acceptance(db, user_id, doc_type, lang=lang, source=source)
         out.append(ev)
     for purpose in validated["optional"]:
-        ev, _ = await grant_purpose(db, user_id, purpose, age_category=age_category, lang=lang, source=source)
+        ev, _ = await grant_purpose(db, user_id, purpose, age_category=age_category, lang=lang, source=source, age_band=age_band)
         out.append(ev)
     return out
 
@@ -368,7 +391,7 @@ async def overview(db, user: dict, lang: str) -> dict:
             "granted_version": ev["version"] if granted else None,
             "granted_at": ev["created_at"] if granted else None,
             "withdrawn_at": ev["created_at"] if (ev and ev["action"] == ACTION_WITHDRAWN) else None,
-            "eligible": purpose_eligible(p, user.get("age_category")),
+            "eligible": purpose_eligible(p, user.get("age_category"), _user_band(user)),
             "withdrawable": granted,
             "requires_confirmation": bool(cfg.get("requires_confirmation_to_withdraw")),
         })

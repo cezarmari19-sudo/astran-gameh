@@ -11,6 +11,7 @@ import { AuthProvider } from "@/src/context/AuthContext";
 import { I18nProvider } from "@/src/i18n";
 import { DmProvider } from "@/src/dm/DmContext";
 import ConsentGate from "@/src/components/ConsentGate";
+import AgeGate from "@/src/components/AgeGate";
 
 LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
@@ -41,6 +42,7 @@ export default function RootLayout() {
               <StatusBar barStyle="light-content" />
               <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0F1012" } }} />
               <ConsentGate />
+              <AgeGate />
             </DmProvider>
           </AuthProvider>
         </I18nProvider>

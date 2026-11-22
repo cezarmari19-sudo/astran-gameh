@@ -59,6 +59,8 @@ trebui interpolare intre ultimele doua pozitii primite - nu e inclusa in acest p
 """
 from __future__ import annotations
 
+from astran_sandbox import age_policy as _age_policy
+from astran_sandbox import age_guard as _age_guard
 import asyncio
 import json
 import logging
@@ -352,7 +354,18 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
         user_id = user["user_id"]
         username = user.get("username") or ""
 
+        if _age_policy.evaluate_access(user).restricted:   # acord parental lipsa / varsta lipsa dupa termen
+            await websocket.close(code=4403)
+            return
         if not await is_member_of_instance(instance_id, game_id, user_id):
+            await websocket.close(code=4403)
+            return
+        # VARSTA: accesul 18+ se reverifica si pe WebSocket (nu doar la /play): un cont retrogradat/neverificat
+        # care mai avea o instanta deschisa nu poate ramane conectat la un joc 18+.
+        _g = await db.games.find_one({"game_id": game_id}, {"_id": 0, "age_category": 1, "owner_id": 1, "game_id": 1})
+        try:
+            _age_guard.check_game_access(_g or {}, user)
+        except _age_guard.AdultAccessDenied:
             await websocket.close(code=4403)
             return
 

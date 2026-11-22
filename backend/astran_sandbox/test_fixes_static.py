@@ -66,10 +66,14 @@ class StaticFixes(unittest.TestCase):
         self.assertIn("/wallet/stripe/intent", SERVER)
 
     def test_age_category_cannot_be_raised(self):
+        # Mecanismul vechi (PATCH cu 403 la ridicare) a fost inlocuit: NICIun camp de varsta nu mai e scriabil din
+        # update_me (vezi age_service.AGE_FIELDS); `age_locked` se scrie de serverul la inregistrare (registration_fields).
         body = _func_src("update_me")
-        self.assertIn("age_locked", body)
-        self.assertIn("status_code=403", body)
-        self.assertIn('"age_locked": True', _func_src("register"))
+        self.assertIn("AGE_FIELDS", body)
+        self.assertNotIn('updates["age_category"]', body)
+        self.assertIn("**age_fields", _func_src("register"))
+        from astran_sandbox import age_service
+        self.assertIs(age_service.registration_fields("2000-01-01")["age_locked"], True)
 
     def test_avatar_and_logo_can_be_cleared(self):
         self.assertIn("exclude_unset=True", _func_src("update_me"))

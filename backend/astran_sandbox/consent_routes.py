@@ -119,7 +119,7 @@ def make_consent_router(get_current_user: Callable, db) -> APIRouter:
         _limit(_write_limiter, current["user_id"])
         try:
             await C.grant_purpose(db, current["user_id"], purpose, age_category=current.get("age_category"),
-                                  lang=_lang(body.language, current), source="settings")
+                                  lang=_lang(body.language, current), source="settings", age_band=C._user_band(current))
         except C.ConsentError as e:
             raise _http(e)
         return await C.overview(db, current, _lang(body.language, current))

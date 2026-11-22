@@ -71,6 +71,8 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from . import age_audit as _age_audit
+from . import age_guard as _age_guard
 from .project_rev import ProjectConflict, save_project_doc
 from .scope_rules import target_escalation
 
@@ -447,6 +449,15 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=404, detail="Game not found")
         return g
 
+    async def _age_guard_check(g: dict, current: dict, kind: str, *, authoring: bool = False) -> None:
+        """Poarta 18+ (age_guard): backend, la fiecare acces. `authoring=True`: proprietarul isi poate administra
+        propriul joc 18+ chiar daca nu e verificat, dar nu il poate juca/rula/descarca."""
+        try:
+            _age_guard.check_game_access(g, current, authoring=authoring, is_owner=g.get("owner_id") == current.get("user_id"))
+        except _age_guard.AdultAccessDenied as e:
+            await _age_guard.record_denied(db, current, kind, g.get("game_id"))
+            raise HTTPException(status_code=403, detail=e.detail())
+
     async def get_access(g: dict, current: dict):
         """Punct unic de acces, folosit de toate endpoint-urile de mai jos. Daca modulul
         de permisiuni n-a putut fi incarcat, se pastreaza exact comportamentul dinainte
@@ -511,6 +522,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_view_code:
             raise HTTPException(status_code=403, detail="No access to this project's code")
+        await _age_guard_check(g, current, "game_files", authoring=True)
         files, folders = await load_project(game_id, g)
         if filter_project_to_scope is not None:
             files, folders = filter_project_to_scope(files, folders, access)
@@ -621,6 +633,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_view_code:
             raise HTTPException(status_code=403, detail="No access to this project")
+        await _age_guard_check(g, current, "game_assets", authoring=True)
         await ensure_index()
         doc = await db.game_assets.find_one({"game_id": game_id}, {"_id": 0})
         asset_ids = doc["asset_ids"] if doc and isinstance(doc.get("asset_ids"), list) else []
@@ -666,8 +679,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_play:
             raise HTTPException(status_code=403, detail="No access to play this game")
-        if g.get("age_category") == "adult_18" and current.get("age_category") == "under_18" and access.role not in ("owner", "editor"):
-            raise HTTPException(status_code=403, detail="Age-restricted content")
+        await _age_guard_check(g, current, "game_run")   # inainte de a incarca/rula orice continut
         try:
             project_files, _folders = await load_project(game_id, g)
             files = luau_bundle(project_files)
@@ -695,6 +707,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_play:
             raise HTTPException(status_code=403, detail="No access to play this game")
+        await _age_guard_check(g, current, "scene_models")
         objs = (g.get("scene") or {}).get("objects") or []
         wanted = list(dict.fromkeys(
             o["assetId"] for o in objs
@@ -721,8 +734,7 @@ def make_sandbox_router(get_current_user, db) -> APIRouter:
         access = await get_access(g, current)
         if not access.can_play:
             raise HTTPException(status_code=403, detail="No access to play this game")
-        if g.get("age_category") == "adult_18" and current.get("age_category") == "under_18" and access.role not in ("owner", "editor"):
-            raise HTTPException(status_code=403, detail="Age-restricted content")
+        await _age_guard_check(g, current, "client_bundle")   # inainte de a incarca orice continut al jocului
 
         project_files, _folders = await load_project(game_id, g)
         files = luau_client_bundle(project_files)

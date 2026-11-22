@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
+import { as } from "@/src/i18n/ageStrings";
 import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import PrivacyDataSection from "@/src/components/PrivacyDataSection";
@@ -16,25 +17,11 @@ export default function SettingsScreen() {
   const { t } = useI18n();
   const [graphics, setGraphics] = useState(2);
   const [distance, setDistance] = useState(2);
-  const [ageCat, setAgeCat] = useState<"under_18" | "adult_18">(user?.age_category || "under_18");
-
-  const [ageErr, setAgeErr] = useState<string | null>(null);
-
-  async function changeAge(v: "under_18" | "adult_18") {
-    if (v === ageCat) return;
-    const prev = ageCat;
-    setAgeErr(null);
-    setAgeCat(v);
-    try {
-      await api("/users/me", { method: "PATCH", body: JSON.stringify({ age_category: v }) });
-      await refresh();
-    } catch (e: any) {
-      // Serverul refuza ridicarea la 18+ dupa ce categoria a fost setata (anti-ocolire a filtrelor
-      // pentru minori): revenim la valoarea reala in loc sa aratam una pe care serverul n-a salvat-o.
-      setAgeCat(prev);
-      setAgeErr(e?.status === 403 ? t("age_raise_blocked") : (e?.message || "Error"));
-    }
-  }
+  // Categoria de varsta NU mai e editabila din aplicatie: e calculata de server din data nasterii, iar 18+ cere
+  // verificare a varstei (age assurance). Aici doar o afisam si oferim caile corecte.
+  const { lang } = useI18n();
+  const ageLabel = user?.adult_content_allowed ? as(lang, "av_status_verified")
+    : user?.age_band === "under_16" ? "<16" : user?.age_band === "16_17" ? "16–17" : user?.age_band === "18_plus" ? "18+ (" + as(lang, "av_status_none") + ")" : "?";
 
   const Slider = ({ value, onChange, testID }: any) => (
     <View style={styles.sliderRow} testID={testID}>
@@ -60,16 +47,14 @@ export default function SettingsScreen() {
           <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
         </Pressable>
 
-        <Text style={styles.section}>{t("age_select_title").toUpperCase()}</Text>
-        <View style={styles.ageRow}>
-          <Pressable testID="settings-age-under-18" onPress={() => changeAge("under_18")} style={[styles.ageBtn, ageCat === "under_18" && styles.ageBtnActive]}>
-            <Text style={[styles.ageBtnText, ageCat === "under_18" && { color: colors.brand }]}>{t("age_under_18")}</Text>
-          </Pressable>
-          <Pressable testID="settings-age-18-plus" onPress={() => changeAge("adult_18")} style={[styles.ageBtn, ageCat === "adult_18" && styles.ageBtnActive]}>
-            <Text style={[styles.ageBtnText, ageCat === "adult_18" && { color: colors.brand }]}>{t("age_18_plus")}</Text>
-          </Pressable>
-        </View>
-        {ageErr ? <Text style={{ color: colors.error, fontSize: 12, marginTop: 8 }} testID="settings-age-error">{ageErr}</Text> : null}
+        <Text style={styles.section}>{as(lang, "av_title").toUpperCase()}</Text>
+        <Text style={{ color: colors.onSurface2, fontSize: 14 }} testID="settings-age-status">{ageLabel}</Text>
+        <Pressable testID="settings-age-verify" onPress={() => router.push("/(onboarding)/age-verify")} style={[styles.ageBtn, { marginTop: 8 }]}>
+          <Text style={styles.ageBtnText}>{as(lang, "av_title")}</Text>
+        </Pressable>
+        <Pressable testID="settings-parental-panel" onPress={() => router.push("/parental/panel")} style={[styles.ageBtn, { marginTop: 8 }]}>
+          <Text style={styles.ageBtnText}>{as(lang, "pp_title")}</Text>
+        </Pressable>
 
         <Text style={styles.section}>{t("graphics").toUpperCase()}</Text>
         <Slider value={graphics} onChange={setGraphics} testID="graphics-slider" />

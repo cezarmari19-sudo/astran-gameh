@@ -4,6 +4,8 @@ import { useRouter } from "expo-router";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
+import DateOfBirthPicker, { Dob, EMPTY_DOB, dobToIso, dobClientError, previewBand } from "@/src/components/DateOfBirthPicker";
+import { as, errText } from "@/src/i18n/ageStrings";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
 import ConsentCheckboxes from "@/src/components/ConsentCheckboxes";
@@ -22,7 +24,7 @@ export default function RegisterScreen() {
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [ageCategory, setAgeCategory] = useState<"under_18" | "adult_18">("under_18");
+  const [dob, setDob] = useState<Dob>(EMPTY_DOB);   // data nasterii: categoria o calculeaza SERVERUL
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -38,23 +40,27 @@ export default function RegisterScreen() {
   }, [lang]);
   useEffect(() => { loadVersions(); }, [loadVersions]);
 
+  const band = previewBand(dob);
+
   async function doRegister() {
     setBusy(true); setErr(null);
     try {
-      await register({
-        email: email.trim(), password, username: username.trim(), age_category: ageCategory, language: lang,
+      const dobErr = dobClientError(dob, lang);
+      if (dobErr) { setErr(dobErr); setBusy(false); return; }
+      const created = await register({
+        email: email.trim(), password, username: username.trim(), date_of_birth: dobToIso(dob)!, language: lang,
         accept_terms: termsAccepted, accept_privacy: privacyAck,
-        // consimtamant optional: doar adulti, mereu explicit (refuzul = false, nu blocheaza inregistrarea)
-        optional_consents: ageCategory === "adult_18" ? { marketing_communications: marketing } : {},
+        // consimtamant optional: de la 16 ani (GDPR art. 8), mereu explicit; serverul reverifica eligibilitatea
+        optional_consents: band === "16_17" || band === "18_plus" ? { marketing_communications: marketing } : {},
         presented_versions: versions,
       });
-      router.replace("/(onboarding)/age");
+      router.replace(created?.restricted ? "/(onboarding)/parental-wait" : "/(tabs)");
     } catch (e: any) {
       if (e?.code === "document_version_changed") {
         setTermsAccepted(false); setPrivacyAck(false); loadVersions();
         setErr(cs(lang, "doc_changed"));
       } else {
-        setErr(e.message || "Register failed");
+        setErr(errText(lang, e) || "Register failed");
       }
     } finally {
       setBusy(false);
@@ -80,29 +86,21 @@ export default function RegisterScreen() {
           <Text style={styles.label}>{t("password")}</Text>
           <TextInput testID="register-password-input" value={password} onChangeText={setPassword} secureTextEntry placeholderTextColor={colors.onSurface3} placeholder="••••••••" style={styles.input} />
 
-          <Text style={[styles.label, { marginTop: 20 }]}>{t("age_select_title")}</Text>
-          <View style={styles.ageRow}>
-            <Pressable
-              testID="register-age-under-18"
-              onPress={() => setAgeCategory("under_18")}
-              style={[styles.ageBtn, ageCategory === "under_18" && styles.ageBtnActive]}
-            >
-              <Text style={[styles.ageBtnText, ageCategory === "under_18" && styles.ageBtnTextActive]}>{t("age_under_18")}</Text>
-            </Pressable>
-            <Pressable
-              testID="register-age-18-plus"
-              onPress={() => setAgeCategory("adult_18")}
-              style={[styles.ageBtn, ageCategory === "adult_18" && styles.ageBtnActive]}
-            >
-              <Text style={[styles.ageBtnText, ageCategory === "adult_18" && styles.ageBtnTextActive]}>{t("age_18_plus")}</Text>
-            </Pressable>
-          </View>
+          <Text style={[styles.label, { marginTop: 20 }]}>{as(lang, "dob_title")}</Text>
+          <DateOfBirthPicker value={dob} onChange={setDob} lang={lang} testPrefix="register-dob" />
+          <Text style={styles.dobHint}>{as(lang, "dob_why")}</Text>
+          {band ? (
+            <Text style={styles.dobExplain} testID="register-age-explain">
+              {band === "under_16" ? as(lang, "band_under16") : band === "16_17" ? as(lang, "band_16_17") : as(lang, "band_adult")}
+            </Text>
+          ) : null}
+          <Text style={styles.dobHint}>{as(lang, "dob_note_server")}</Text>
 
           <ConsentCheckboxes
             lang={lang} testPrefix="register"
             terms={termsAccepted} privacy={privacyAck} marketing={marketing}
             onTerms={setTermsAccepted} onPrivacy={setPrivacyAck} onMarketing={setMarketing}
-            showMarketing={ageCategory === "adult_18"}
+            showMarketing={band === "16_17" || band === "18_plus"}
           />
 
           {err ? <Text style={styles.err} testID="register-error">{err}</Text> : null}
@@ -122,6 +120,8 @@ export default function RegisterScreen() {
 }
 
 const styles = StyleSheet.create({
+  dobHint: { color: colors.onSurface3, fontSize: 12, marginTop: 8, lineHeight: 17 },
+  dobExplain: { color: colors.brand, fontSize: 13, marginTop: 10, lineHeight: 18 },
   root: { flex: 1, backgroundColor: colors.surface },
   content: { padding: spacing.lg, paddingTop: 60, paddingBottom: 40 },
   back: { width: 40, height: 40, alignItems: "center", justifyContent: "center", marginBottom: 12 },

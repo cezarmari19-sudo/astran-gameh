@@ -6,6 +6,7 @@ import { Image } from "expo-image";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { useI18n } from "@/src/i18n";
+import { as } from "@/src/i18n/ageStrings";
 import { colors, radius, spacing } from "@/src/theme";
 
 function formatDate(iso: string | null | undefined): string | null {
@@ -22,9 +23,10 @@ function titleCase(s: string): string {
 export default function GameDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [game, setGame] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [errCode, setErrCode] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -32,7 +34,9 @@ export default function GameDetail() {
         const res = await api(`/games/${id}`);
         setGame(res.game);
       } catch (e: any) {
-        setErr(e.message || "Failed");
+        setErrCode(e?.code ?? null);
+        // 403 age_assurance_required / age_restricted: joc 18+ (decizia vine de la server)
+        setErr(e?.code === "age_assurance_required" ? as(lang, "game_age_assurance_required") : e?.code === "age_restricted" ? as(lang, "game_age_restricted") : (e.message || "Failed"));
       }
     })();
   }, [id]);
@@ -41,6 +45,11 @@ export default function GameDetail() {
     return (
       <SafeAreaView style={styles.center}>
         <Text style={{ color: colors.error }} testID="game-error">{err}</Text>
+        {errCode === "age_assurance_required" ? (
+          <Pressable testID="game-verify-age" onPress={() => router.push("/(onboarding)/age-verify")} style={{ marginTop: 16, padding: 12, borderRadius: 12, backgroundColor: colors.brand }}>
+            <Text style={{ color: colors.onBrand, fontWeight: "800" }}>{as(lang, "game_verify_cta")}</Text>
+          </Pressable>
+        ) : null}
       </SafeAreaView>
     );
   }

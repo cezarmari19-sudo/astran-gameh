@@ -9,7 +9,16 @@ export type User = {
   email?: string;
   email_verified?: boolean;
   avatar_url?: string;
+  // Toate campurile de varsta sunt DERIVATE si calculate de server; clientul nu le poate seta.
   age_category: "under_18" | "adult_18";
+  age_band?: "under_16" | "16_17" | "18_plus" | null;
+  adult_content_allowed?: boolean;
+  account_state?: "ACTIVE" | "AGE_INFO_REQUIRED" | "PARENTAL_CONSENT_REQUIRED";
+  restricted?: boolean;
+  needs_age_info?: boolean;
+  parental_state?: string | null;
+  age_assurance?: "none" | "pending" | "verified" | "failed";
+  next_action?: string | null;
   astrans_balance: number;
   language: string;
   is_platform_owner: boolean;
@@ -28,7 +37,7 @@ type Ctx = {
   connectionError: boolean;
   refresh: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { email: string; password: string; username: string; age_category: "under_18" | "adult_18"; language: string; accept_terms: boolean; accept_privacy: boolean; optional_consents?: Record<string, boolean>; presented_versions?: Record<string, string> | null }) => Promise<void>;
+  register: (data: { email: string; password: string; username: string; date_of_birth: string; language: string; accept_terms: boolean; accept_privacy: boolean; optional_consents?: Record<string, boolean>; presented_versions?: Record<string, string> | null }) => Promise<User>;
   loginWithSessionId: (session_id: string) => Promise<void>;
   logout: () => Promise<void>;
   setUser: (u: User | null) => void;
@@ -40,7 +49,7 @@ const AuthContext = createContext<Ctx>({
   connectionError: false,
   refresh: async () => {},
   login: async () => {},
-  register: async () => {},
+  register: async () => ({} as User),
   loginWithSessionId: async () => {},
   logout: async () => {},
   setUser: () => {},
@@ -111,6 +120,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const res = await authApi.register(data);
     await setToken(res.token);
     setUser(res.user);
+    return res.user as User;
   }, []);
 
   const loginWithSessionId = useCallback(async (session_id: string) => {

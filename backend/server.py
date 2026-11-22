@@ -254,6 +254,12 @@ from astran_sandbox import legal_docs                  # versiuni Terms of Servi
 from astran_sandbox.consent_routes import make_consent_router, make_legal_router
 from astran_sandbox import payment_reversal as preversal
 from astran_sandbox import email_verification as emailver
+from astran_sandbox import age_policy as AP            # varsta: DOB, benzi, acces 18+ (decis pe server)
+from astran_sandbox import age_service as age_service  # inregistrare cu DOB, assurance, migrare
+from astran_sandbox import age_guard                   # poarta de acces 18+ pentru jocuri/functii
+from astran_sandbox import age_audit as age_audit      # jurnal de audit adauga-doar, inlantuit
+from astran_sandbox import parental_consent as parental_consent
+from astran_sandbox.age_routes import make_age_router
 from astran_sandbox.media_validation import clean_image_ref
 from astran_sandbox.scene_validation import clean_scene
 
@@ -308,8 +314,11 @@ async def _claim_welcome_bonus(user_id: str) -> bool:
     """Acorda bonusul de bun-venit O SINGURA DATA, dupa verificarea emailului. Idempotent la
     cadere de proces: randul de ledger are tx_id determinist (unic), iar `welcome_bonus_pending`
     se consuma atomic, deci nici retry-ul, nici doua verificari paralele nu dubleaza bonusul."""
-    if not await db.users.find_one({"user_id": user_id, "welcome_bonus_pending": True}, {"_id": 1}):
+    _wb = await db.users.find_one({"user_id": user_id, "welcome_bonus_pending": True}, {"_id": 0})
+    if not _wb:
         return False
+    if AP.evaluate_access(_wb).restricted:
+        return False   # cont sub 16 ani in asteptarea acordului parental: bonusul se acorda dupa aprobare
     try:
         await db.astran_ledger.insert_one({
             "tx_id": f"txwb_{user_id}", "user_id": user_id, "counterparty_id": "system",
@@ -375,7 +384,9 @@ class RegisterBody(BaseModel):
     password: str = Field(min_length=6, max_length=128)
     username: str = Field(min_length=3, max_length=24, pattern=r"^[A-Za-z0-9_.-]+$")
     display_name: Optional[str] = Field(default=None, max_length=40)
-    age_category: AgeCategory = "under_18"
+    # Data nasterii (ISO 8601, AAAA-LL-ZZ). Validata EXCLUSIV pe server (age_policy.parse_dob). Categoria de varsta NU
+    # mai vine de la client: orice categorie trimisa (clienti vechi) este ignorata si backend-ul o determina singur.
+    date_of_birth: Optional[str] = Field(default=None, max_length=32)
     language: str = "ro"
     # GDPR: acceptarea e VALIDATA de server (nu doar checkbox in UI). Fara ambele `true` contul nu se creeaza.
     # Versiunea si data acceptarii le decide serverul; `presented_versions` e doar comparat cu versiunea curenta.
@@ -398,12 +409,14 @@ class SessionBody(BaseModel):
     optional_consents: dict[str, bool] = Field(default_factory=dict)
     presented_versions: Optional[dict[str, str]] = None
     consent_language: Optional[str] = None
+    date_of_birth: Optional[str] = Field(default=None, max_length=32)   # doar la crearea unui cont NOU
 
 
 class UpdateProfileBody(BaseModel):
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
-    age_category: Optional[AgeCategory] = None
+    # Camp acceptat doar pentru compatibilitate cu aplicatiile vechi: valoarea e IGNORATA (vezi update_me).
+    age_category: Optional[str] = None
     language: Optional[str] = None
 
 
@@ -568,13 +581,19 @@ async def resolve_user_from_token(token: str) -> Optional[dict]:
         return None
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
     user = await resolve_user_from_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
+    # Poarta CENTRALA (toate rutele autentificate trec pe aici): un cont sub 16 ani fara acord parental aprobat
+    # (sau un cont fara varsta dupa termenul configurat) poate folosi doar rutele de varsta/parental/privacy.
+    info = AP.evaluate_access(user)
+    if info.restricted and not AP.path_allowed_when_restricted(request.url.path):
+        raise HTTPException(status_code=403, detail={"code": "account_restricted", "account_state": info.account_state,
+                                                     "next_action": info.next_action})
     return user
 
 
@@ -628,6 +647,8 @@ async def startup():
     await privacy.ensure_indexes(db)
     legal_docs.get_registry()   # fail-closed: manifest + amprente SHA-256 verificate la pornire
     await consent_svc.ensure_indexes(db)
+    await age_service.ensure_indexes(db)
+    await parental_consent.ensure_indexes(db)
     app.state.privacy_task = asyncio.create_task(privacy.deletion_worker(db))
     await privacy_export.ensure_indexes(db)
     app.state.privacy_export_task = asyncio.create_task(privacy_export.export_worker(db))
@@ -685,6 +706,9 @@ async def startup():
                 "password_hash": await hash_pw_async(demo_pw),
                 "avatar_url": None,
                 "age_category": "adult_18",
+                # cont seed de operator (dev): NU e o verificare de varsta reala; marcat explicit ca atare
+                "age_assurance": {"status": "verified", "provider": "operator_seed", "threshold": 18, "method": "operator_seed"},
+                "age_locked": True,
                 "astrans_balance": 10000,
                 "language": "ro",
                 "is_platform_owner": True,
@@ -708,6 +732,12 @@ async def startup():
         {"age_locked": {"$exists": False}, "password_hash": {"$nin": [None]}},
         {"$set": {"age_locked": True}},
     )
+    # Varsta: migrare idempotenta (fara stergeri, fara date inventate): declaratiile 18+ fara age assurance sunt coborate
+    # la under_18, conturile fara data nasterii primesc `age_info_required`. Vezi age_service.migrate_existing_accounts.
+    try:
+        log.info("age migration: %s", await age_service.migrate_existing_accounts(db))
+    except Exception:  # noqa: BLE001
+        log.exception("age migration failed - accounts stay fail-closed through age_policy.evaluate_access")
     log.info("Astran API ready. DB=%s", DB_NAME)
 
 
@@ -750,7 +780,8 @@ def _user_public_base(user: dict) -> dict:
         "display_name": user.get("display_name") or user["username"],
         "email": user.get("email"),
         "avatar_url": user.get("avatar_url"),
-        "age_category": user.get("age_category", "under_18"),
+        # age_category/age_band/... sunt DERIVATE de server (age_policy.evaluate_access), nu valori din client
+        **AP.evaluate_access(user).public(),
         "astrans_balance": user.get("astrans_balance", 0),
         "language": user.get("language", "ro"),
         "is_platform_owner": user.get("is_platform_owner", False),
@@ -783,13 +814,19 @@ async def register(body: RegisterBody, request: Request):
     wait = _register_limiter.hit(_client_ip(request))
     if wait is not None:
         raise _too_many(wait)
+    # VARSTA: data nasterii se valideaza EXCLUSIV aici (format ISO, calendar, nu in viitor); categoria o decide serverul.
+    try:
+        age_fields = age_service.registration_fields(body.date_of_birth)
+    except AP.AgeError as ae:
+        raise HTTPException(status_code=ae.status, detail=ae.detail())
     # GDPR: acceptarea obligatorie se valideaza INAINTE de orice scriere; fara ea nu se creeaza contul.
     try:
         consent_checked = consent_svc.validate_registration_consent(
             body.accept_terms, body.accept_privacy, body.optional_consents, body.presented_versions,
-            age_category=body.age_category, lang=body.language)
+            age_category=age_fields["age_category"], age_band=age_fields["age_band"], lang=body.language)
     except consent_svc.ConsentError as ce:
         raise HTTPException(status_code=ce.status, detail=ce.detail())
+    waiting_parent = age_fields["age_band"] == AP.BAND_UNDER_16
     email = body.email.strip().lower()
     ci = lambda v: {"$regex": f"^{re.escape(v)}$", "$options": "i"}  # noqa: E731
     existing = await db.users.find_one({"$or": [{"email": ci(email)}, {"username": ci(body.username)}]}, {"_id": 0})
@@ -803,16 +840,14 @@ async def register(body: RegisterBody, request: Request):
         "display_name": (body.display_name or "").strip() or body.username,
         "password_hash": await hash_pw_async(body.password),
         "avatar_url": None,
-        "age_category": body.age_category,
-        # Categoria de varsta declarata la inregistrare e FINALA pentru API (nu se poate ridica la
-        # 18+ ulterior). NOTA: e o declaratie, nu o verificare - vezi update_me.
-        "age_locked": True,
+        # age_category ("under_18" la creare), age_band, dob_enc (criptat), age_assurance, parental, age_locked
+        **age_fields,
         # Emailul nu e verificat la inregistrare. Cu SMTP configurat, bonusul de bun-venit se acorda
         # DOAR dupa verificare (altfel: conturi-farm cu adrese inventate = Astrans gratis). Fara
         # SMTP (dev) verificarea nu se poate face, deci ramane comportamentul vechi.
         "email_verified": False,
-        "astrans_balance": 0 if psec.email_is_configured() else WELCOME_BONUS,
-        "welcome_bonus_pending": bool(psec.email_is_configured()),
+        "astrans_balance": 0 if (psec.email_is_configured() or waiting_parent) else WELCOME_BONUS,
+        "welcome_bonus_pending": bool(psec.email_is_configured() or waiting_parent),
         "language": body.language,
         "is_platform_owner": False,
         "is_platform_admin": False,
@@ -826,12 +861,14 @@ async def register(body: RegisterBody, request: Request):
     # (inca fara bonus, sesiune sau alte date) se anuleaza: nu poate exista un cont fara dovada acceptarii.
     try:
         await consent_svc.record_registration_consents(
-            db, user_id, consent_checked, age_category=body.age_category, lang=body.language, source="register")
+            db, user_id, consent_checked, age_category=age_fields["age_category"], age_band=age_fields["age_band"],
+            lang=body.language, source="register")
     except Exception:
         log.exception("consent proof could not be stored; rolling back registration")
         await db.users.delete_one({"user_id": user_id})
         raise HTTPException(status_code=500, detail="Registration failed. Please try again.")
-    if not psec.email_is_configured():
+    await age_service.audit_registration(db, user_id, age_fields["age_band"], None, "register")
+    if not psec.email_is_configured() and not waiting_parent:
         await db.astran_ledger.insert_one({
             "tx_id": new_id("tx_"),
             "user_id": user_id,
@@ -929,10 +966,17 @@ async def google_session(body: SessionBody):
     else:
         # GDPR: un cont NOU nu se creeaza fara acceptarea validata pe server (aceeasi regula ca la /auth/register).
         # Nu s-a scris nimic pana aici; clientul cere acceptarea si reia autentificarea Google.
+        # VARSTA: contul Google nu are varsta cunoscuta. Daca clientul trimite data nasterii o validam pe server; altfel
+        # contul se creeaza fail-closed (`age_info_required`) si utilizatorul o introduce la /api/age/date-of-birth.
+        try:
+            g_age = age_service.registration_fields(body.date_of_birth) if body.date_of_birth else age_service.unknown_age_fields()
+        except AP.AgeError as ae:
+            raise HTTPException(status_code=ae.status, detail=ae.detail())
+        g_waiting = g_age.get("age_band") == AP.BAND_UNDER_16
         try:
             google_consent = consent_svc.validate_registration_consent(
                 body.accept_terms, body.accept_privacy, body.optional_consents, body.presented_versions,
-                age_category="under_18", lang=body.consent_language or "en")
+                age_category=g_age["age_category"], age_band=g_age.get("age_band"), lang=body.consent_language or "en")
         except consent_svc.ConsentError as ce:
             raise HTTPException(status_code=ce.status, detail=ce.detail())
         user_id = new_id("user_")
@@ -950,8 +994,9 @@ async def google_session(body: SessionBody):
             "password_hash": None,
             "email_verified": True,   # emailul vine de la Google (proprietatea adresei e dovedita)
             "avatar_url": picture,
-            "age_category": "under_18",
-            "astrans_balance": 100,
+            **g_age,
+            "astrans_balance": 0 if g_waiting else 100,
+            "welcome_bonus_pending": bool(g_waiting),
             "language": "ro",
             "is_platform_owner": False,
             "is_platform_admin": False,
@@ -963,16 +1008,20 @@ async def google_session(body: SessionBody):
             raise HTTPException(status_code=409, detail="Username already taken, please try again")
         try:
             await consent_svc.record_registration_consents(
-                db, user_id, google_consent, age_category="under_18", lang=body.consent_language or "en", source="google_signup")
+                db, user_id, google_consent, age_category=g_age["age_category"], age_band=g_age.get("age_band"),
+                lang=body.consent_language or "en", source="google_signup")
         except Exception:
             log.exception("consent proof could not be stored; rolling back google signup")
             await db.users.delete_one({"user_id": user_id})
             raise HTTPException(status_code=500, detail="Registration failed. Please try again.")
-        await db.astran_ledger.insert_one({
-            "tx_id": new_id("tx_"), "user_id": user_id, "counterparty_id": "system",
-            "type": "welcome_bonus", "amount": 100, "fee": 0, "net": 100,
-            "status": "completed", "timestamp": now_utc(), "reference": "signup_google",
-        })
+        if g_age.get("age_band"):
+            await age_service.audit_registration(db, user_id, g_age["age_band"], None, "google_signup")
+        if not g_waiting:
+            await db.astran_ledger.insert_one({
+                "tx_id": new_id("tx_"), "user_id": user_id, "counterparty_id": "system",
+                "type": "welcome_bonus", "amount": 100, "fee": 0, "net": 100,
+                "status": "completed", "timestamp": now_utc(), "reference": "signup_google",
+            })
 
     try:
         await db.user_sessions.insert_one({
@@ -1167,23 +1216,14 @@ async def update_me(body: UpdateProfileBody, current=Depends(get_current_user)):
     if "avatar_url" in provided and not provided["avatar_url"]:
         updates["avatar_url"] = None
         updates["avatar_cleared"] = True
-    if "age_category" in updates:
-        new_age = updates.pop("age_category")
-        cur_age = current.get("age_category", "under_18")
-        # SECURITY: un minor nu isi poate declara singur 18+ dupa ce categoria a fost setata:
-        # asta ar ocoli filtrul de chat si restrictiile de continut. Coborarea (18+ -> sub 18) e
-        # mereu permisa si definitiva. O singura alegere ramane posibila pentru conturile Google
-        # inca nemarcate (ecranul de onboarding). NOTA: fara verificare reala a varstei (ID /
-        # parinte) orice categorie ramane o declaratie - vezi raportul.
-        if new_age != cur_age:
-            if new_age == "adult_18" and current.get("age_locked"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Categoria de varsta nu mai poate fi ridicata la 18+. Contacteaza suportul.",
-                )
-            updates["age_category"] = new_age
-        if not current.get("age_locked"):
-            updates["age_locked"] = True
+    # VARSTA: niciun camp de varsta nu se scrie din acest endpoint. `age_category` trimis de clienti vechi e ignorat
+    # (fara eroare, pentru compatibilitate) si incercarea de a cere 18+ e jurnalizata. Data nasterii se seteaza O DATA
+    # prin POST /api/age/date-of-birth; 18+ doar prin age assurance (POST /api/age/assurance/start).
+    _ignored = [k for k in provided if k in age_service.AGE_FIELDS]
+    updates = {k: v for k, v in updates.items() if k not in age_service.AGE_FIELDS}
+    if _ignored:
+        await age_audit.record(db, age_audit.AGE_CHANGE_IGNORED, subject_user_id=current["user_id"], actor="user",
+                               details={"reason": ",".join(_ignored)[:100], "requested_value": str(provided.get("age_category"))[:20]})
     if "display_name" in updates:
         updates["display_name"] = updates["display_name"].strip()
         if not (1 <= len(updates["display_name"]) <= 40):
@@ -1675,6 +1715,12 @@ async def _resolve_player_character(model_id: str, source: Optional[str], owner_
 @api.post("/games")
 async def create_game(body: GameCreateBody, current=Depends(get_current_user)):
     gid = new_id("game_")
+    if body.age_category != "under_18":
+        try:
+            age_guard.check_adult_feature(current)   # publicarea de continut 18+ cere age assurance verificat
+        except age_guard.AdultAccessDenied as e:
+            await age_guard.record_denied(db, current, "publish_adult_game")
+            raise HTTPException(status_code=403, detail=e.detail())
 
     # SECURITY: parola de securitate a proiectului e obligatorie la creare - validata (lungime
     # 6-30, confirmare identica) si hash-uita cu Argon2id (salt unic, generat automat de
@@ -1763,6 +1809,12 @@ async def update_game(game_id: str, body: GameUpdateBody, current=Depends(get_cu
         raise HTTPException(status_code=404, detail="Game not found")
 
     is_owner_actor = g["owner_id"] == current["user_id"] or bool(current.get("is_platform_admin"))
+    if body.age_category is not None and body.age_category != "under_18":
+        try:
+            age_guard.check_adult_feature(current)   # marcarea unui joc ca 18+ cere age assurance verificat
+        except age_guard.AdultAccessDenied as e:
+            await age_guard.record_denied(db, current, "publish_adult_game", game_id)
+            raise HTTPException(status_code=403, detail=e.detail())
 
     updates = {
         k: v for k, v in body.dict(
@@ -2206,9 +2258,9 @@ async def webauthn_verify_for_recovery(game_id: str, body: WebAuthnVerifyBody, c
 
 @api.get("/games/discover")
 async def discover(section: str = "for_you", current=Depends(get_current_user)):
-    age = current.get("age_category", "under_18")
     q: dict = {"is_public": True, "status": "active"}
-    if age == "under_18":
+    # fail-closed: doar un cont cu age assurance verificat vede jocuri 18+ (altfel: DOAR jocuri explicit pentru toate varstele)
+    if not AP.can_access_adult_content(current):
         q["age_category"] = "under_18"
     sort_map = {
         "for_you": [("total_plays", -1), ("likes", -1)],
@@ -2255,13 +2307,22 @@ async def recently_played(current=Depends(get_current_user)):
         gg = idx.get(gid)
         if gg is None:
             continue
-        if gg.get("age_category") == "adult_18" and current.get("age_category") == "under_18":
+        if not age_guard.is_all_ages_game(gg) and not AP.can_access_adult_content(current):
             continue
         if not gg.get("is_public") and not await _can_view_private_game(gg, current):
             continue
         ordered.append(gg)
     ordered = await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in ordered]))
     return {"games": ordered}
+async def _adult_guard(g: dict, current: dict, kind: str, *, authoring: bool = False) -> None:
+    """Poarta 18+ pe BACKEND, la fiecare acces relevant (vezi age_guard). Jurnalizeaza incercarea (cu throttle)."""
+    try:
+        age_guard.check_game_access(g, current, authoring=authoring, is_owner=g.get("owner_id") == current.get("user_id"))
+    except age_guard.AdultAccessDenied as e:
+        await age_guard.record_denied(db, current, kind, g.get("game_id"))
+        raise HTTPException(status_code=403, detail=e.detail())
+
+
 async def _can_view_private_game(g: dict, current: dict) -> bool:
     """SECURITY: un joc PRIVAT (draft, inca nepublicat) e vizibil DOAR pentru owner,
     platform admin, sau cineva cu acces explicit (Editor/Tester) - niciodata doar pentru
@@ -2281,8 +2342,7 @@ async def get_game(game_id: str, current=Depends(get_current_user)):
     # obisnuite - raspunde exact ca un 404 normal, nu dezvaluie ca ar exista dar e in cos.
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
-    if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
-        raise HTTPException(status_code=403, detail="Age-restricted content")
+    await _adult_guard(g, current, "game_read")
 
     # SECURITY: vezi _can_view_private_game - un joc privat/nepublicat nu mai e vizibil
     # doar pentru ca cineva are/ghiceste game_id-ul (acelasi bug era si la list_instances).
@@ -2307,8 +2367,7 @@ async def get_player_character(game_id: str, current=Depends(get_current_user)):
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
-    if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
-        raise HTTPException(status_code=403, detail="Age-restricted content")
+    await _adult_guard(g, current, "player_character")
     if not g.get("is_public") and not await _can_view_private_game(g, current):
         raise HTTPException(status_code=403, detail="This game is private")
     g = _game_defaults(g)
@@ -2361,8 +2420,7 @@ async def play_game(game_id: str, body: JoinInstanceBody = JoinInstanceBody(), c
     g = await db.games.find_one({"game_id": game_id}, {"_id": 0})
     if not g or g.get("deleted"):
         raise HTTPException(status_code=404, detail="Game not found")
-    if g["age_category"] == "adult_18" and current.get("age_category") == "under_18":
-        raise HTTPException(status_code=403, detail="Age-restricted content")
+    await _adult_guard(g, current, "game_play")
 
     # SECURITY (items 12/13/15): un joc PRIVAT (draft, inca nepublicat) se poate juca
     # doar de owner, de un Editor, sau de un Tester caruia i s-a dat acces explicit -
@@ -2504,6 +2562,7 @@ async def list_instances(game_id: str, current=Depends(get_current_user)):
     if not g.get("is_public") and not await _can_view_private_game(g, current):
         raise HTTPException(status_code=403, detail="This game is private")
 
+    await _adult_guard(g, current, "game_instances")
     await reap_empty_instances(game_id)
     cursor = db.game_instances.find({"game_id": game_id, "status": "open"}, {"_id": 0}).sort("created_at", 1)
     return {"instances": await cursor.to_list(200)}
@@ -3394,6 +3453,26 @@ api.include_router(make_account_export_router(get_current_user, db, verify_pw=ve
 # GDPR: /api/legal/* (texte versionate, public) si /api/consent/* (istoric + retragere, autentificat)
 api.include_router(make_legal_router())
 api.include_router(make_consent_router(get_current_user, db))
+
+# VARSTA + CONSIMTAMANT PARENTAL: /api/age/*, /api/parental/* - vezi astran_sandbox/age_routes.py
+async def _notify_email(to: str, subject: str, body: str) -> bool:
+    return await asyncio.to_thread(psec.send_plain_email, to, subject, body)
+
+
+async def _erase_child(uid: str) -> None:
+    state, rec = await privacy.begin_deletion(db, uid)
+    if state == "started":
+        asyncio.create_task(privacy.run_deletion(db, uid, rec["deletion_id"], first_run=True))
+
+
+api.include_router(make_age_router(
+    get_current_user, db, client_ip=_client_ip,
+    notifier=_notify_email if psec.email_is_configured() else None,
+    app_base_url=os.environ.get("ASTRAN_PUBLIC_APP_URL"),
+    on_parent_approved=_claim_welcome_bonus,
+    on_withdrawn=privacy.disconnect_user_sockets,
+    erase_child=_erase_child,
+))
 
 app.include_router(api)
 

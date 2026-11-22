@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
+from . import age_policy as _age_policy
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
@@ -221,6 +222,9 @@ def make_dm_routers(
         user = await resolve_user_from_token(token)
         if user is None:
             await websocket.close(code=4401)
+            return
+        if _age_policy.evaluate_access(user).restricted:   # cont in asteptarea acordului parental / fara varsta dupa termen
+            await websocket.close(code=4403)
             return
         uid = user["user_id"]
         await websocket.accept()
