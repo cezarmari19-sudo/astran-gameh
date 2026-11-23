@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "documents": {
+    "refund_policy": {
+      "legal_basis": "information_notice",
+      "current": "1.0",
+      "versions": [
+        {
+          "version": "1.0",
+          "effective_date": null,
+          "requires_reacceptance": false,
+          "summary": {
+            "ro": "Prima versiune (ciornă, neverificată juridic).",
+            "en": "First version (draft, not legally reviewed)."
+          },
+          "files": {
+            "ro": {
+              "path": "refund_policy/1.0.ro.txt",
+              "sha256": "88129c61a633db2555535ba7ff9976e4ac1c960ba323b0d72e41a7fe683ce96d"
+            },
+            "en": {
+              "path": "refund_policy/1.0.en.txt",
+              "sha256": "b0e7076975d1cd9767cb08169975f3088d8abdbc4ae89fe2cb904c56d12eca70"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
