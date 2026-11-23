@@ -10,11 +10,14 @@ import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import { colors, radius, spacing } from "@/src/theme";
 import { PrimaryButton } from "@/src/components/ui";
+import { CheckoutSheet } from "@/src/components/CheckoutSheet";
+import { RefundPolicyLink } from "@/src/components/ConsumerDocModal";
+import { cr } from "@/src/i18n/consumerStrings";
 
 // Tipurile de tranzactii in care utilizatorul CHELTUIE Astrans. Inainte doar `transfer_out` era
 // tratat ca iesire; shop_purchase / clothes_purchase / group_create apareau ca "+" verde (incasari).
 // `net < 0` e plasa de siguranta pentru tipuri viitoare scrise cu net negativ (ex. group_create).
-const DEBIT_TYPES = new Set(["transfer_out", "shop_purchase", "clothes_purchase", "group_create", "purchase_reversal"]);
+const DEBIT_TYPES = new Set(["transfer_out", "shop_purchase", "clothes_purchase", "group_create", "purchase_reversal", "purchase_refund", "refund_out"]);
 function isDebitTx(tx: { type?: string; net?: number }): boolean {
   return DEBIT_TYPES.has(tx.type || "") || (typeof tx.net === "number" && tx.net < 0);
 }
@@ -43,7 +46,7 @@ function isDefinitiveRejection(e: any): boolean {
 export default function WalletScreen() {
   const router = useRouter();
   const { user, refresh } = useAuth();
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [packages, setPackages] = useState<any[]>([]);
   const [currency, setCurrency] = useState("RON");
   const [transactions, setTransactions] = useState<any[]>([]);
@@ -62,6 +65,9 @@ export default function WalletScreen() {
   // `err` (eroare normala de achizitie), ca userul sa stie ca BANII AU FOST LUATI, nu doar
   // ca achizitia a esuat, si sa nu incerce sa plateasca din nou.
   const [pendingCreditWarning, setPendingCreditWarning] = useState<string | null>(null);
+  // CONSUM: pachetul pentru care se afiseaza ecranul de confirmari si checkout-ul confirmat pe server (legat de plata la /wallet/buy)
+  const [checkoutPkg, setCheckoutPkg] = useState<any>(null);
+  const checkoutIdRef = useRef<string | null>(null);
 
   // IAP real (Google Play pe Android, Apple App Store pe iOS) - vezi expo-iap. Pe web
   // acest hook nu face nimic (connected ramane false), fallback-ul ramane mesajul de mai
@@ -114,6 +120,12 @@ export default function WalletScreen() {
       setErr("Store connection not ready, try again in a moment.");
       return;
     }
+    // Informatii precontractuale + cele doua confirmari INAINTE de dialogul de plata al magazinului (vezi CheckoutSheet).
+    setErr(null); setPendingCreditWarning(null);
+    setCheckoutPkg(pkg);
+  }
+
+  async function startStorePurchase(pkg: any) {
     setBusy(true); setErr(null); setPendingCreditWarning(null);
     try {
       // Formatul de request e DIFERIT pe iOS vs Android (vezi expo-iap) - trimitem
@@ -154,9 +166,9 @@ export default function WalletScreen() {
       const package_id: string | undefined = purchase.productId ?? purchase.id;
       if (!provider_token || !package_id) throw new Error("Incomplete purchase data from the store");
 
-      await api("/wallet/buy", {
+      const res: any = await api("/wallet/buy", {
         method: "POST",
-        body: JSON.stringify({ package_id, provider, provider_token }),
+        body: JSON.stringify({ package_id, provider, provider_token, checkout_id: checkoutIdRef.current || undefined }),
       });
 
       // Serverul a confirmat si a creditat Astrans (sau tranzactia era deja creditata -
@@ -164,6 +176,8 @@ export default function WalletScreen() {
       await finishTransaction({ purchase, isConsumable: true });
       await refresh();
       await load();
+      checkoutIdRef.current = null;
+      if (res?.order?.order_id) router.push(`/order/${res.order.order_id}`);   // confirmarea comenzii
     } catch (e: any) {
       console.log("[wallet] credit after purchase failed", e);
       if (isDefinitiveRejection(e)) {
@@ -245,6 +259,11 @@ export default function WalletScreen() {
 
         {pendingCreditWarning ? <Text style={styles.warn} testID="wallet-pending-credit">{pendingCreditWarning}</Text> : null}
 
+        <View style={{ flexDirection: "row", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+          <Pressable onPress={() => router.push("/refunds")} testID="wallet-refunds-link" hitSlop={6}><Text style={{ color: colors.brand, textDecorationLine: "underline" }}>{cr(lang, "refund_requests")}</Text></Pressable>
+          <RefundPolicyLink testID="wallet-refund-policy" />
+        </View>
+
         <Text style={styles.section}>{t("buy_astrans").toUpperCase()}</Text>
         {Platform.OS === "web" ? (
           <Text style={styles.webNotice}>Purchases are available in the mobile app.</Text>
@@ -322,6 +341,11 @@ export default function WalletScreen() {
           </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
+      {checkoutPkg ? (
+        <CheckoutSheet visible productType="astran_package" productId={checkoutPkg.package_id}
+          onClose={() => setCheckoutPkg(null)}
+          onConfirmed={(id) => { checkoutIdRef.current = id; const p = checkoutPkg; setCheckoutPkg(null); startStorePurchase(p); }} />
+      ) : null}
     </SafeAreaView>
   );
 }

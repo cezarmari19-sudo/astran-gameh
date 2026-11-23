@@ -100,3 +100,15 @@ test("newClientId e unic si are cel mult 40 de caractere", () => {
   assert.equal(ids.size, 500);
   for (const id of ids) assert.ok(id.length <= 40);
 }); 
+
+test("cererea de prietenie interzisa de server => mesaj de siguranta generic; alte erori nu il folosesc", () => {
+  assert.equal(S.friendRequestErrorKey("contact_restricted", 403), "friend_request_restricted");
+  assert.equal(S.friendRequestErrorKey(undefined, 0), "dm_err_offline");
+  assert.equal(S.friendRequestErrorKey(undefined, 409), "friend_request_failed");
+  assert.equal(S.friendRequestErrorKey("rate_limited", 429), "friend_request_failed");
+});
+
+test("DM refuzat (Adult<->Minor) apare ca \"nu poti trimite mesaje\", fara detalii despre varsta", () => {
+  assert.equal(S.errorKey("not_allowed", 403), "dm_err_not_allowed");
+  assert.equal(S.errorKey("not_found", 404), "dm_err_not_allowed");
+});

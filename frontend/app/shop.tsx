@@ -18,6 +18,8 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { api } from "@/src/api/client";
+import { CheckoutSheet } from "@/src/components/CheckoutSheet";
+import { RefundPolicyLink } from "@/src/components/ConsumerDocModal";
 import { colors, radius, spacing } from "@/src/theme";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 
@@ -277,6 +279,8 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
   const [err, setErr] = useState<string | null>(null);
   const [showCode, setShowCode] = useState(false);
   const [viewFiles, setViewFiles] = useState<ScriptFile[]>([]);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);   // CONSUM: informatii precontractuale + confirmarile A/B
+  const detailRouter = useRouter();
 
   useEffect(() => {
     if (!itemId) { setItem(null); setShowCode(false); return; }
@@ -290,15 +294,23 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
 
   const isOwner = !!item && !!myId && item.owner_id === myId;
 
-  async function buy() {
+  // Obiectele cu pret trec prin ecranul de checkout (serverul REFUZA cumpararea fara cele doua confirmari valide).
+  function buy() {
+    if (!item) return;
+    if (item.price > 0) { setErr(null); setCheckoutOpen(true); return; }
+    doBuy(null);
+  }
+
+  async function doBuy(checkoutId: string | null) {
     if (!item) return;
     setBusy(true);
     setErr(null);
     try {
-      await api(`/shop/items/${item.item_id}/buy`, { method: "POST" });
+      const res: any = await api(`/shop/items/${item.item_id}/buy`, { method: "POST", ...(checkoutId ? { body: JSON.stringify({ checkout_id: checkoutId }) } : {}) });
       const r = await api(`/shop/items/${item.item_id}`);
       setItem(r.item);
       onChanged();
+      if (res?.order?.order_id) { onClose(); detailRouter.push(`/order/${res.order.order_id}`); }   // confirmarea comenzii
     } catch (e: any) {
       setErr(e?.message || "Purchase failed");
     } finally {
@@ -397,6 +409,7 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
                   )}
                 </Pressable>
               )}
+              {!item.owned && !isOwner && item.price > 0 ? <View style={{ marginTop: 8, alignItems: "center" }}><RefundPolicyLink testID="shop-refund-policy" /></View> : null}
 
               {item.kind === "script" && item.owned && item.files && item.files.length > 0 ? (
                 <Pressable
@@ -424,6 +437,11 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
             </ScrollView>
           )}
         </View>
+
+        {checkoutOpen && item ? (
+          <CheckoutSheet visible productType="shop_item" productId={item.item_id}
+            onClose={() => setCheckoutOpen(false)} onConfirmed={(id) => { setCheckoutOpen(false); doBuy(id); }} />
+        ) : null}
 
         {/* cod doar de citit/copiat (modificarile nu se salveaza nicaieri) */}
         <ScriptEditor

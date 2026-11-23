@@ -6,7 +6,7 @@ Principii (toate pe SERVER; clientul nu este dovada):
     imediata; B: recunoasterea pierderii dreptului de retragere), inregistrate separat, adauga-doar, in
     `consumer_consents`, cu textul exact, amprenta lui, versiunea, data/ora serverului si utilizatorul;
   * o achizitie se leaga de consimtamant prin `consumer_orders` (un rand per tranzactie, cu id-urile confirmarilor);
-  * NU se presupune ca orice achizitie digitala pierde automat dreptul de retragere: `withdrawal_right.status` e "waived"
+  * NU se presupune ca orice achizitie digitala pierde dreptul de retragere: `withdrawal_right.status` e "waived"
     doar daca ambele confirmari valide exista; altfel "preserved" (vezi `build_order`).
 Limita cunoscuta: la plata prin Google Play / Apple plata se face in magazin INAINTE de apelul catre server, deci
 serverul nu poate bloca plata; poate doar sa nu inregistreze renuntarea (dreptul de retragere ramane).

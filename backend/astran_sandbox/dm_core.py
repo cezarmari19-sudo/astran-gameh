@@ -20,7 +20,9 @@ GARANTII DE SECURITATE (toate aplicate PE SERVER)
   trimite si nu poate falsifica user_id/username/ts/id.
 * Accesul la o conversatie: doar cei doi participanti; pentru oricine altcineva raspunsul e
   "not_found" (nu dezvaluim nici ca exista).
-* Trimiterea cere: prietenie existenta + nicio blocare (oricare directie) + utilizator nemutat.
+* Trimiterea cere: prietenie existenta + nicio blocare (oricare directie) + utilizator nemutat
+  + POLITICA ADULT<->MINOR (contact_policy: aceeasi categorie de varsta, din DB, verificata la FIECARE
+  deschidere/trimitere/citire - deci si pentru prietenii create inainte de politica).
   Citirea istoricului cere: participant + nicio blocare. Lista ascunde conversatiile blocate.
 * Modul de varsta NU vine de la client: expeditorul = users.age_category din DB la FIECARE mesaj;
   spectatorul = users.age_category din DB la FIECARE citire/livrare. Lipsa/eroare => sub 18.
@@ -42,6 +44,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
+from astran_sandbox import contact_policy
 from astran_sandbox.chat_core import ADULT, REPORT_REASONS, ChatLimiter, ChatRecord, _INVISIBLE, _WS, text_for
 from astran_sandbox.chat_filter import CompiledRule, filter_text
 
@@ -250,6 +253,12 @@ class DmService:
             log.warning("dm: varsta destinatarului nu a putut fi citita - tratat ca sub 18", exc_info=True)
             return False
 
+    async def _ages_pair(self, a: str, b: str) -> bool:
+        """Politica Adult<->Minor pentru o pereche: categoriile se citesc din DB (user_ages), la fiecare apel.
+        Utilizator lipsa => tratat ca minor (fail-closed). Exceptiile se propaga: apelantul refuza (unavailable)."""
+        ages = await self._user_ages([a, b])
+        return contact_policy.contact_allowed_flags(bool(ages.get(a, False)), bool(ages.get(b, False)))
+
     async def _conversation_for(self, uid: str, cid: Any) -> dict:
         if not isinstance(cid, str) or not (0 < len(cid) <= 64):
             raise DmError("not_found")
@@ -271,7 +280,9 @@ class DmService:
         if not isinstance(friend_id, str) or not (0 < len(friend_id) <= 64) or friend_id == uid:
             raise DmError("invalid")
         try:
-            allowed = await self._are_friends(uid, friend_id) and not await self._blocked_between(uid, friend_id)
+            allowed = (await self._are_friends(uid, friend_id)
+                       and not await self._blocked_between(uid, friend_id)
+                       and await self._ages_pair(uid, friend_id))   # Adult<->Minor: niciun DM, nici cu prieten
             users = await self._users_public([friend_id]) if allowed else {}
         except Exception:  # noqa: BLE001
             log.warning("dm: open_conversation - verificarea a esuat", exc_info=True)
@@ -296,6 +307,11 @@ class DmService:
         friends = await self._friend_ids(uid)
         convs = [c for c in convs if self._other(c, uid) not in blocked]
         others = [self._other(c, uid) for c in convs]
+        # conversatiile Adult<->Minor (ex. create inainte de politica) NU mai apar in lista: istoricul ramane in DB
+        ages = await self._user_ages(others + [uid])
+        me_adult = bool(ages.get(uid, False))
+        convs = [c for c in convs if contact_policy.contact_allowed_flags(me_adult, bool(ages.get(self._other(c, uid), False)))]
+        others = [self._other(c, uid) for c in convs]
         users = await self._users_public(others)
         last = await self.store.get_messages_by_ids([c["last_message_id"] for c in convs if c.get("last_message_id")])
         out = []
@@ -318,15 +334,26 @@ class DmService:
         convs = await self.store.unread_conversations(uid)
         if not convs:
             return 0
-        blocked = await self._blocked_among(uid, [self._other(c, uid) for c in convs])
-        return sum(int(c.get("unread_" + self._slot(c, uid), 0) or 0) for c in convs if self._other(c, uid) not in blocked)
+        others = [self._other(c, uid) for c in convs]
+        blocked = await self._blocked_among(uid, others)
+        ages = await self._user_ages(others + [uid])
+        me_adult = bool(ages.get(uid, False))
+        return sum(int(c.get("unread_" + self._slot(c, uid), 0) or 0) for c in convs
+                   if self._other(c, uid) not in blocked
+                   and contact_policy.contact_allowed_flags(me_adult, bool(ages.get(self._other(c, uid), False))))
 
     # ------------------------------------------------------------------ istoric
     async def history(self, uid: str, viewer_adult: bool, cid: Any, before: Optional[str], limit: int) -> dict:
         conv = await self._conversation_for(uid, cid)
         cursor = parse_cursor(before)
         limit = max(1, min(int(limit), MAX_PAGE))
-        if await self._blocked_between(uid, self._other(conv, uid)):
+        other = self._other(conv, uid)
+        try:
+            ok = not await self._blocked_between(uid, other) and await self._ages_pair(uid, other)
+        except Exception:  # noqa: BLE001
+            log.warning("dm: history - verificarea permisiunilor a esuat", exc_info=True)
+            raise DmError("unavailable")
+        if not ok:   # blocat SAU Adult<->Minor: istoricul ramane stocat (retentie), dar nu se mai citeste prin DM
             raise DmError("not_allowed")
         rows = await self.store.page_messages(conv["conversation_id"], cursor, limit + 1)  # desc
         has_more = len(rows) > limit
@@ -352,7 +379,9 @@ class DmService:
         try:
             state = await self._user_state(uid)
             compiled = await self._rules()
-            allowed = state is not None and await self._are_friends(uid, other) and not await self._blocked_between(uid, other)
+            allowed = (state is not None and await self._are_friends(uid, other)
+                       and not await self._blocked_between(uid, other)
+                       and await self._ages_pair(uid, other))   # verificat la FIECARE mesaj, nu doar la deschidere
         except Exception:  # noqa: BLE001
             log.warning("dm: starea/regulile/permisiunile nu au putut fi citite", exc_info=True)
             raise DmError("unavailable")
@@ -400,6 +429,10 @@ class DmService:
         if not self.hub.has(uid):
             return
         adult = await self._viewer_adult(uid)   # varsta CURENTA din DB, pentru fiecare destinatar
+        # defense-in-depth (si pentru mesaje venite de la alt proces prin Redis): nu livram NICIODATA in timp real
+        # un mesaj peste granita Adult<->Minor, indiferent de ce stie expeditorul/alt proces.
+        if not contact_policy.contact_allowed_flags(bool(msg.get("sender_adult")), adult):
+            return
         await self.hub.send(uid, {"t": "dm", "conversation_id": msg["conversation_id"], "message": view_message(msg, uid, adult)})
 
     async def _deliver(self, msg: dict, targets: list[str]) -> None:

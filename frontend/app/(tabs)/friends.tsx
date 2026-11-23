@@ -6,7 +6,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useI18n } from "@/src/i18n";
 import { api } from "@/src/api/client";
 import { colors, radius, spacing } from "@/src/theme";
-import { errorKey } from "@/src/dm/dmStore";
+import { errorKey, friendRequestErrorKey } from "@/src/dm/dmStore";
 
 type Tab = "friends" | "requests" | "search";
 
@@ -46,7 +46,16 @@ export default function FriendsScreen() {
   }, [q, tab]);
 
   async function act(path: string, target_user_id: string) {
-    await api(path, { method: "POST", body: JSON.stringify({ target_user_id }) });
+    setDmError(null);
+    try {
+      await api(path, { method: "POST", body: JSON.stringify({ target_user_id }) });
+    } catch (e: any) {
+      // Serverul impune restrictiile (ex. contact_restricted = restrictie de siguranta); UI-ul doar le afiseaza clar.
+      setDmError(t(friendRequestErrorKey(e?.code, e?.status)));
+      // o cerere veche/ilegala a fost scoasa de server: reimprospatam listele
+      await load();
+      return;
+    }
     await load();
   }
 
@@ -146,6 +155,11 @@ export default function FriendsScreen() {
                     <MaterialCommunityIcons name="close" size={18} color={colors.onSurface} />
                   </Pressable>
                 </View>
+              ) : item.contact_restricted ? (
+                // Restrictie de siguranta (decisa de server): fara buton de cerere; mesaj generic, fara a spune cine e minor.
+                <View testID={`friend-restricted-${item.user_id}`} style={{ flex: 0, maxWidth: 150 }} accessibilityRole="text">
+                  <Text style={styles.restricted}>{t("friend_request_restricted")}</Text>
+                </View>
               ) : (
                 <Pressable testID={`friend-add-${item.user_id}`} onPress={() => act("/friends/request", item.user_id)} style={[styles.actBtn, { backgroundColor: colors.brand }]}>
                   <MaterialCommunityIcons name="account-plus" size={18} color={colors.onBrand} />
@@ -171,6 +185,7 @@ const styles = StyleSheet.create({
   searchBox: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface2, paddingHorizontal: 12, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border },
   searchInput: { flex: 1, color: colors.onSurface, paddingVertical: 10, fontSize: 14 },
   empty: { color: colors.onSurface3, textAlign: "center", marginTop: 40, fontSize: 13 },
+  restricted: { color: colors.onSurface3, fontSize: 10, lineHeight: 13 },
   dmError: { color: colors.error, fontSize: 12, textAlign: "center", marginBottom: spacing.sm },
   row: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: colors.surface2, borderRadius: radius.md, marginBottom: 8, borderWidth: 1, borderColor: colors.border },
   avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface3, alignItems: "center", justifyContent: "center", position: "relative" },

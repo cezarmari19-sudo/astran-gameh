@@ -1,0 +1,33 @@
+REFUND POLICY AND RIGHT OF WITHDRAWAL – Astran Game
+Version 1.0 (DRAFT – requires legal review before publication)
+
+1. Scope
+This policy applies to digital content purchases made by consumers in Astran Game: Astrans packages bought with real money, and items (models, scripts, clothes/accessories) bought with Astrans. The trader's identity and contact details are shown in the app, on the purchase screen and in the order confirmation.
+
+2. Right of withdrawal (Directive 2011/83/EU Art. 9; Romanian GEO 34/2014)
+As a rule, a consumer may withdraw from a distance contract within 14 days without giving any reason. For digital content not supplied on a tangible medium, the period runs from the conclusion of the contract.
+
+3. Digital content exception (Art. 16(m))
+The right of withdrawal is lost for digital content only if ALL conditions are met: (a) performance began with the consumer's prior express consent; (b) the consumer acknowledged losing the right of withdrawal once performance begins; (c) the trader provided confirmation of the contract on a durable medium.
+Before every paid purchase, Astran Game asks for two separate confirmations, unticked by default: (A) an express request that supply begin immediately; (B) acknowledgement of losing the right of withdrawal. Without both, the purchase cannot be completed in the app. If a purchase was nevertheless recorded without these confirmations, the right of withdrawal is preserved.
+
+4. How to request a refund
+In the app: Wallet → Refund requests. Pick the transaction, the reason and optionally add an explanation. You can follow the status (Pending, Under Review, Approved, Rejected, Refunded) and see the administrator's response. You may also write to the trader's contact address.
+
+5. Non-conformity (Directive (EU) 2019/770)
+Independently of the right of withdrawal, you have statutory remedies if digital content is not in conformity (not as described, defective or not supplied): bringing into conformity, price reduction or termination with a refund, as provided by law. These rights are not affected by losing the right of withdrawal.
+
+6. Astrans – rules by type
+• Astrans bought with real money: refundable in money through the original payment method, up to the amount actually paid. If part of the Astrans was already spent, the refund is calculated proportionally to the Astrans remaining in the wallet; where the law requires a full refund, an administrator may approve a full refund. The balance never becomes negative.
+• Astrans received for free (bonuses, gifts) and Astrans earned on the platform: not paid for with money and not refundable in money.
+• Astrans spent on digital items: if the item is non-conforming or the right of withdrawal applies, the refund is made in Astrans and access to the item is withdrawn. The original transaction stays in the history; the refund appears as a separate transaction.
+• Astrans transferred between users: a transfer is not a purchase from the trader and is not refundable through this system.
+
+7. Deadlines
+Where the right of withdrawal applies, the refund is made without undue delay and within 14 days of the trader being informed of the decision, using the same payment method as the purchase unless agreed otherwise.
+
+8. App stores
+Payments through Google Play or the Apple App Store are processed by them; the actual refund is made by the store under its rules. Your statutory rights are not affected.
+
+9. Complaints
+You may complain to the trader or to the competent consumer protection authorities.

@@ -4,6 +4,8 @@ import { useRouter } from "expo-router";
 import { useI18n } from "@/src/i18n";
 import { ms } from "@/src/i18n/modStrings";
 import { modApi } from "@/src/api/moderation";
+import { useAuth } from "@/src/context/AuthContext";
+import { cr } from "@/src/i18n/consumerStrings";
 import { Badge, Body, Btn, Card, Chips, Input, LoadState, Row, Screen, fmt, label, tone, useLoad } from "@/src/components/modUi";
 
 const CATS = ["", "illegal_content", "child_safety", "harassment", "hate_speech", "violence", "sexual_content", "self_harm", "scam_fraud", "ip_infringement", "spam", "other"];
@@ -12,6 +14,7 @@ const isoDay = (s: string, end?: boolean) => (/^\d{4}-\d{2}-\d{2}$/.test(s) ? `$
 // Panou de moderare. Ascunderea pentru non-staff e doar UX: serverul raspunde 403 la orice ruta /admin fara rol.
 export default function AdminDashboard() {
   const { lang } = useI18n();
+  const { user } = useAuth();   // doar pentru a afisa link-ul; autorizarea reala e pe backend (/consumer/admin/*)
   const router = useRouter();
   const [role, setRole] = useState<string | null | undefined>(undefined);
   const [status, setStatus] = useState(""); const [kind, setKind] = useState(""); const [category, setCategory] = useState("");
@@ -30,6 +33,7 @@ export default function AdminDashboard() {
       <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
         <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_appeals")} onPress={() => router.push("/moderation/admin/appeals")} testID="admin-appeals-link" /></View>
         <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_audit")} onPress={() => router.push("/moderation/admin/audit")} testID="admin-audit-link" /></View>
+        {user?.is_platform_admin ? <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={cr(lang, "adm_title")} onPress={() => router.push("/moderation/admin/refunds")} testID="admin-refunds-link" /></View> : null}
       </View>
       <Card>
         <Input testID="admin-search" value={q} onChangeText={f(setQ)} placeholder={ms(lang, "adm_search")} />

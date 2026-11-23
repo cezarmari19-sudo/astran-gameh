@@ -205,11 +205,13 @@ class DmRoutes(unittest.IsolatedAsyncioTestCase):
         self.db = FakeDb()
         self.clock = 1_700_000_000.0
         self.users = {}
-        for uid, age in (("alice", "adult_18"), ("bob", "adult_18"), ("mia", "under_18"), ("carol", "adult_18")):
+        for uid, age in (("alice", "adult_18"), ("bob", "adult_18"), ("mia", "under_18"), ("max", "under_18"),
+                         ("carol", "adult_18"), ("dan", "adult_18")):
             doc = {"user_id": uid, "username": uid, "age_category": age, "password_hash": "SECRET", "email": f"{uid}@x"}
             self.users[uid] = doc
             self.db.users.docs.append(doc)
-        for a, b in (("alice", "bob"), ("alice", "mia"), ("bob", "mia")):
+        # prietenii doar in aceeasi categorie de varsta (politica Adult<->Minor); dan: al doilea prieten adult al lui alice
+        for a, b in (("alice", "bob"), ("alice", "dan"), ("max", "mia")):
             self.db.friendships.docs.append({"user_a": a, "user_b": b})
 
         async def resolver(token):
@@ -313,12 +315,12 @@ class DmRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [f"m{i:02d}" for i in reversed(range(12))])
 
     async def test_conversations_sorted_and_bump_to_top(self):
-        c1, c2 = await self.open("alice", "bob"), await self.open("alice", "mia")
+        c1, c2 = await self.open("alice", "bob"), await self.open("alice", "dan")
         await self.send("alice", c1, "unu")
         await self.send("alice", c2, "doi")
-        self.assertEqual([c["friend"]["user_id"] for c in await self.conversations("alice")], ["mia", "bob"])
+        self.assertEqual([c["friend"]["user_id"] for c in await self.conversations("alice")], ["dan", "bob"])
         await self.send("bob", c1, "bob raspunde")
-        self.assertEqual([c["friend"]["user_id"] for c in await self.conversations("alice")], ["bob", "mia"])
+        self.assertEqual([c["friend"]["user_id"] for c in await self.conversations("alice")], ["bob", "dan"])
 
     async def test_stranger_gets_404_on_every_endpoint(self):
         cid = await self.open("alice", "bob")
@@ -356,41 +358,41 @@ class DmRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("retry_ms", e.detail)
 
     async def test_age_rules_end_to_end_with_shipped_filter(self):
-        ca, cm = await self.open("alice", "bob"), await self.open("alice", "mia")
+        ca, cm = await self.open("alice", "bob"), await self.open("mia", "max")
         text = "this is a shit game"
         await self.send("alice", ca, text)
-        await self.send("alice", cm, text)
+        await self.send("max", cm, text)
         self.assertEqual((await self.history("bob", ca))["messages"][0]["text"], text)  # 18+ <-> 18+: nefiltrat
         self.assertEqual((await self.history("mia", cm))["messages"][0]["text"], "this is a #### game")  # minor: filtrat de server
-        self.assertEqual((await self.history("alice", cm))["messages"][0]["text"], text)  # expeditorul adult isi vede textul
+        self.assertEqual((await self.history("max", cm))["messages"][0]["text"], "this is a #### game")  # si expeditorul minor
         # ce s-a salvat: raw doar pentru expeditorul adult
         await self.send("mia", cm, "you shit")
         mia_doc = next(d for d in self.db.dm_messages.docs if d["sender_id"] == "mia")
         self.assertIsNone(mia_doc["raw"])
         self.assertEqual(mia_doc["safe"], "you ####")
-        # adultul vede si el varianta filtrata a minorului
-        self.assertEqual((await self.history("alice", cm))["messages"][0]["text"], "you ####")
+        alice_doc = next(d for d in self.db.dm_messages.docs if d["sender_id"] == "alice")
+        self.assertEqual(alice_doc["raw"], text)
 
     async def test_dm_uses_the_exact_same_rule_store_as_game_chat(self):
         store = cf.shared_store(self.db)
         self.assertIs(self.service._rules.__self__, store)  # aceeasi instanta, nu o copie a listei
         compiled = await store.get_compiled()
-        cid = await self.open("alice", "mia")
+        cid = await self.open("max", "mia")
         for text in ("this is a shit game", "totul e bine", "oh shit sorry"):
-            await self.send("alice", cid, text)
+            await self.send("max", cid, text)
             expected = cf.filter_text(text, compiled).text
             self.assertEqual((await self.history("mia", cid))["messages"][0]["text"], expected)
 
     async def test_websocket_live_delivery_per_viewer_and_auth(self):
-        cid = await self.open("alice", "mia")
-        w_mia, w_alice = await self.connect("mia"), await self.connect("alice")
+        cid = await self.open("max", "mia")
+        w_mia, w_max = await self.connect("mia"), await self.connect("max")
         self.assertTrue(w_mia.accepted)
         self.assertEqual(w_mia.of("dm_ready")[0]["t"], "dm_ready")
-        await self.send("alice", cid, "this is a shit game")
+        await self.send("max", cid, "this is a shit game")
         await settle()
         self.assertEqual(w_mia.of("dm")[0]["message"]["text"], "this is a #### game")
-        self.assertEqual(w_alice.of("dm")[0]["message"]["text"], "this is a shit game")
-        self.assertNotIn("shit", json.dumps(w_mia.sent))
+        self.assertEqual(w_max.of("dm")[0]["message"]["text"], "this is a #### game")
+        self.assertNotIn("shit", json.dumps(w_mia.sent) + json.dumps(w_max.sent))
         # token invalid => inchis cu 4401, fara accept
         bad = FakeWS()
         await self.ws_endpoint(bad, "tok_nimeni")
@@ -431,8 +433,8 @@ class DmRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(w.of("dm")), 1)
 
     async def test_report_goes_into_existing_reports_collection(self):
-        cid = await self.open("alice", "mia")
-        m = await self.send("alice", cid, "this is a shit game")
+        cid = await self.open("max", "mia")
+        m = await self.send("max", cid, "this is a shit game")
         await self.call("POST", "/dm/messages/{message_id}/report", "mia", message_id=m["id"], body=dm_routes.ReportBody(reason="harassment"))
         self.assertEqual(len(self.db.reports.docs), 1)
         r = self.db.reports.docs[0]

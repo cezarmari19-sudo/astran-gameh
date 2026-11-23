@@ -107,6 +107,16 @@ export type DmErrorKey =
   | "dm_err_empty" | "dm_err_too_long" | "dm_err_invalid" | "dm_err_rate_limited" | "dm_err_duplicate"
   | "dm_err_muted" | "dm_err_not_allowed" | "dm_err_unavailable" | "dm_err_offline";
 
+export type FriendRequestErrorKey = "friend_request_restricted" | "friend_request_failed" | "dm_err_offline";
+
+/** Eroarea la /friends/request. `contact_restricted` = restrictie de siguranta impusa de SERVER; mesajul e generic
+ * (nu spune care dintre cei doi e minor). Orice alt cod => mesaj generic de esec; fara retea => offline. */
+export function friendRequestErrorKey(code: string | undefined, status?: number): FriendRequestErrorKey {
+  if (code === "contact_restricted") return "friend_request_restricted";
+  if (status === 0) return "dm_err_offline";
+  return "friend_request_failed";
+}
+
 export function errorKey(code: string | undefined, status?: number): DmErrorKey {
   switch (code) {
     case "empty": return "dm_err_empty";

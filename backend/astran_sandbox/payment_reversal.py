@@ -86,8 +86,13 @@ async def reverse_purchase(db, provider_ref: str, reason: str) -> str:
     row = await db.astran_ledger.find_one({"provider_ref": provider_ref, "type": "purchase"}, {"_id": 0})
     if not row:
         return "not_found"
+    # Rambursare initiata de platforma (refunds.py): Astransii au fost deja tratati acolo (fara sold negativ). Webhook-ul
+    # de refund / anulare magazin NU mai retrage a doua oara. Un dispute (chargeback) retrage doar restul nerambursat.
+    done = await _platform_refunded(db, row["tx_id"])
+    if done is not None and reason != "stripe_dispute":
+        return "already"
     h = hashlib.sha256(provider_ref.encode()).hexdigest()
-    applied = await money.clawback(db, row["user_id"], int(row.get("amount", 0)), "rev_" + h[:32])
+    applied = await money.clawback(db, row["user_id"], max(0, int(row.get("amount", 0)) - (done or 0)), "rev_" + h[:32])
     rev = {
         "tx_id": "txrev_" + h[:24], "user_id": row["user_id"], "counterparty_id": "system",
         "type": "purchase_reversal", "amount": int(row.get("amount", 0)), "fee": 0,
@@ -103,3 +108,18 @@ async def reverse_purchase(db, provider_ref: str, reason: str) -> str:
     if applied:
         log.warning("purchase reversed: user=%s astrans=%s reason=%s", row["user_id"], rev["amount"], reason)
     return "reversed" if applied else "already"
+
+
+async def _platform_refunded(db, tx_id: str) -> Optional[int]:
+    """None daca platforma nu a initiat nicio rambursare pentru tranzactie; altfel Astransii deja retrasi de ea."""
+    rows = await db.refund_requests.find({"tx_id": tx_id}, {"_id": 0}).to_list(50)
+    rows = [r for r in rows if r.get("processing_state") in ("processing", "awaiting_store_refund", "done") or r.get("status") == "refunded"]
+    if not rows:
+        return None
+    return sum(int((r.get("plan") or {}).get("astrans_to_reclaim", 0)) for r in rows)
+
+
+async def platform_initiated_for_ref(db, provider_ref: str) -> bool:
+    """True daca pentru plata `provider_ref` exista o rambursare initiata de platforma (suprima alerta de refund partial)."""
+    row = await db.astran_ledger.find_one({"provider_ref": provider_ref, "type": "purchase"}, {"_id": 0, "tx_id": 1})
+    return bool(row) and await _platform_refunded(db, row["tx_id"]) is not None

@@ -10,6 +10,8 @@ import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import PrivacyDataSection from "@/src/components/PrivacyDataSection";
 import LegalDocModal from "@/src/components/LegalDocModal";
+import ConsumerDocModal from "@/src/components/ConsumerDocModal";
+import { cr } from "@/src/i18n/consumerStrings";
 import { ms } from "@/src/i18n/modStrings";
 import { colors, radius, spacing } from "@/src/theme";
 
@@ -20,6 +22,7 @@ export default function SettingsScreen() {
   const [graphics, setGraphics] = useState(2);
   const [distance, setDistance] = useState(2);
   const [terms, setTerms] = useState(false);
+  const [refundPolicy, setRefundPolicy] = useState(false);
   // Categoria de varsta NU mai e editabila din aplicatie: e calculata de server din data nasterii, iar 18+ cere
   // verificare a varstei (age assurance). Aici doar o afisam si oferim caile corecte.
   const { lang } = useI18n();
@@ -85,6 +88,17 @@ export default function SettingsScreen() {
           <Text style={styles.rowText}>{ms(lang, "mod_contact")}</Text>
           <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
         </Pressable>
+        <Pressable onPress={() => setRefundPolicy(true)} style={[styles.row, { marginTop: 8 }]} testID="settings-refund-policy">
+          <MaterialCommunityIcons name="cash-refund" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{cr(lang, "policy_open")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
+        <Pressable onPress={() => router.push("/refunds")} style={[styles.row, { marginTop: 8 }]} testID="settings-refunds">
+          <MaterialCommunityIcons name="receipt-text-outline" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{cr(lang, "refund_requests")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
+        {refundPolicy ? <ConsumerDocModal visible onClose={() => setRefundPolicy(false)} /> : null}
         {terms ? <LegalDocModal visible docType="terms_of_service" lang={lang} onClose={() => setTerms(false)} /> : null}
 
         <PrivacyDataSection />

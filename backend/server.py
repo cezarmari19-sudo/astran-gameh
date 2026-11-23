@@ -114,7 +114,8 @@ _report_limiter = SlidingWindowLimiter(10, 3600)      # rapoarte / ora / utiliza
 _friend_req_limiter = SlidingWindowLimiter(30, 3600)    # cereri de prietenie / ora / utilizator
 _user_search_limiter = SlidingWindowLimiter(60, 60)     # cautari de utilizatori / minut / utilizator
 MAX_PENDING_FRIEND_REQUESTS = 100
-_BLOCK_ADULT_TO_MINOR_REQUESTS = os.environ.get("ASTRAN_BLOCK_ADULT_TO_MINOR_FRIEND_REQUESTS", "0") == "1"
+# Protectia Adult<->Minor (cereri de prietenie + DM) e ACTIVA implicit si se decide in astran_sandbox/contact_policy.py
+# (singurul loc care citeste ASTRAN_BLOCK_ADULT_TO_MINOR_FRIEND_REQUESTS) - nu se mai citeste la import aici.
 _transfer_limiter = SlidingWindowLimiter(30, 3600)    # transferuri de Astrans / ora / utilizator
 
 
@@ -253,10 +254,15 @@ from astran_sandbox import consent as consent_svc      # GDPR: consimtamant demo
 from astran_sandbox import legal_docs                  # versiuni Terms of Service / Privacy Policy (hash verificat)
 from astran_sandbox.consent_routes import make_consent_router, make_legal_router
 from astran_sandbox import payment_reversal as preversal
+from astran_sandbox import consumer as CONS            # drepturile consumatorilor UE: checkout, confirmari, comenzi
+from astran_sandbox import refunds as REFUNDS          # cereri de rambursare + panou admin
+from astran_sandbox.consumer_routes import make_consumer_router
 from astran_sandbox import email_verification as emailver
 from astran_sandbox import age_policy as AP            # varsta: DOB, benzi, acces 18+ (decis pe server)
 from astran_sandbox import age_service as age_service  # inregistrare cu DOB, assurance, migrare
 from astran_sandbox import age_guard                   # poarta de acces 18+ pentru jocuri/functii
+from astran_sandbox import contact_policy              # politica Adult<->Minor (prietenii + DM), decisa pe server
+from astran_sandbox import friend_service as FRIENDS   # cerere/acceptare/liste de prieteni (testabile fara FastAPI)
 from astran_sandbox import age_audit as age_audit      # jurnal de audit adauga-doar, inlantuit
 from astran_sandbox import parental_consent as parental_consent
 from astran_sandbox.age_routes import make_age_router
@@ -516,6 +522,7 @@ class BuyBody(BaseModel):
     package_id: str = Field(min_length=1, max_length=64)
     provider: Literal["stripe", "google_play", "apple", "mock"] = "mock"
     provider_token: Optional[str] = None
+    checkout_id: Optional[str] = Field(default=None, max_length=64)   # confirmarile de consum (vezi consumer.py)
 
 
 REPORT_REASON_MAX = 100
@@ -661,6 +668,9 @@ async def startup():
     # Jurnalul mutarilor de Astrans + task-ul care duce la capat operatiile ramase la jumatate
     # (cadere de proces intre debit si credit/ledger) - vezi astran_sandbox/money.py.
     await money.ensure_indexes(db)
+    await CONS.ensure_indexes(db)      # consum: checkout / confirmari / comenzi (adauga-doar pentru confirmari)
+    await REFUNDS.ensure_indexes(db)   # rambursari + jurnal de audit
+    CONS.docs()                        # fail-closed: manifestul documentelor de consum (SHA-256) verificat la pornire
     app.state.money_recovery_task = asyncio.create_task(money.recovery_loop(db))
     # Cosul de gunoi: stergere definitiva automata dupa TRASH_RETENTION_DAYS (30) - vezi astran_sandbox/trash_purge.py.
     await trash_purge.ensure_indexes(db)
@@ -1277,7 +1287,9 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
         {"$and": [{"$or": [{"username": rx}, {"display_name": rx}]}, {"deletion_state": {"$exists": False}}]},
         {"_id": 0, "password_hash": 0},
     ).limit(20)
-    users = [_user_public_minimal(u) for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
+    # `contact_restricted`: doar un indiciu pentru UX (ascunde butonul de cerere); serverul il impune oricum la /friends/request.
+    users = [{**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(current, u)}
+             for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
     return {"users": users}
 
 
@@ -1288,7 +1300,9 @@ async def get_user_public(user_id: str, current=Depends(get_current_user)):
     u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user": _user_public_minimal(u)}
+    return {"user": {**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(current, u)}}
+
+
 def _game_defaults(doc: dict) -> dict:
     """Completeaza campurile noi (max_players, player_character, group, subgenre) pentru
     jocurile salvate inainte de ele, si expune created_at/updated_at cu semantica ceruta:
@@ -2609,26 +2623,20 @@ def _friend_public(user: dict) -> dict:
     return {**_user_public_minimal(user), "online": False}
 
 
+def _friend_http(e: "FRIENDS.FriendError") -> HTTPException:
+    return HTTPException(status_code=e.status, detail=e.detail)
+
+
 @api.get("/friends")
 async def list_friends(current=Depends(get_current_user)):
-    uid = current["user_id"]
-    cursor = db.friendships.find({"$or": [{"user_a": uid}, {"user_b": uid}]}, {"_id": 0})
-    edges = await cursor.to_list(500)
-    friend_ids = [e["user_b"] if e["user_a"] == uid else e["user_a"] for e in edges]
-    users = await db.users.find({"user_id": {"$in": friend_ids}}, {"_id": 0, "password_hash": 0}).to_list(500)
-    return {"friends": [_friend_public(u) for u in users]}
+    return await FRIENDS.list_friends(db, current, _friend_public)
 
 
 @api.get("/friends/requests")
 async def list_requests(current=Depends(get_current_user)):
-    incoming = await db.friend_requests.find({"to_id": current["user_id"], "status": "pending"}, {"_id": 0}).to_list(200)
-    outgoing = await db.friend_requests.find({"from_id": current["user_id"], "status": "pending"}, {"_id": 0}).to_list(200)
-    in_users = await db.users.find({"user_id": {"$in": [r["from_id"] for r in incoming]}}, {"_id": 0, "password_hash": 0}).to_list(200)
-    out_users = await db.users.find({"user_id": {"$in": [r["to_id"] for r in outgoing]}}, {"_id": 0, "password_hash": 0}).to_list(200)
-    return {
-        "incoming": [_friend_public(u) for u in in_users],
-        "outgoing": [_friend_public(u) for u in out_users],
-    }
+    return await FRIENDS.list_requests(db, current, _friend_public)
+
+
 @api.post("/friends/request")
 async def send_request(body: FriendRequestBody, current=Depends(get_current_user)):
     if body.target_user_id == current["user_id"]:
@@ -2637,61 +2645,22 @@ async def send_request(body: FriendRequestBody, current=Depends(get_current_user
     wait = _friend_req_limiter.hit(current["user_id"])
     if wait is not None:
         raise _too_many(wait)
-    if await db.friend_requests.count_documents({"from_id": current["user_id"], "status": "pending"}) >= MAX_PENDING_FRIEND_REQUESTS:
-        raise HTTPException(status_code=429, detail="Too many pending friend requests")
-    target = await db.users.find_one({"user_id": body.target_user_id}, {"_id": 0})
-    if not target or target.get("deletion_state"):
-        raise HTTPException(status_code=404, detail="User not found")
-    # Politica optionala (decizie de produs, implicit OFF): un adult nu poate TRIMITE cereri catre un cont
-    # sub 18 ani. Prietenia ramane posibila daca minorul trimite el primul cererea.
-    if _BLOCK_ADULT_TO_MINOR_REQUESTS and current.get("age_category") == "adult_18" \
-            and target.get("age_category") == "under_18":
-        raise HTTPException(status_code=403, detail="Adults cannot send friend requests to under-18 accounts")
-    a, b = _pair(current["user_id"], body.target_user_id)
-    if await db.friendships.find_one({"user_a": a, "user_b": b}):
-        raise HTTPException(status_code=409, detail="Already friends")
-    if await db.blocks.find_one({"$or": [
-        {"blocker_id": current["user_id"], "blocked_id": body.target_user_id},
-        {"blocker_id": body.target_user_id, "blocked_id": current["user_id"]},
-    ]}):
-        raise HTTPException(status_code=403, detail="Blocked")
-    # Daca celalalt ne-a trimis deja o cerere (pending, in sens invers), cele doua cereri
-    # simultane devin direct prietenie, in loc sa ramana doua cereri pendinte in paralel.
-    reverse = await db.friend_requests.find_one({
-        "from_id": body.target_user_id, "to_id": current["user_id"], "status": "pending",
-    })
-    if reverse:
-        await db.friendships.update_one(
-            {"user_a": a, "user_b": b},
-            {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}},
-            upsert=True,
-        )
-        await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
-        return {"ok": True, "auto_accepted": True}
+    # Politica Adult<->Minor (categoria din DB, ambele parti, in ambele directii) se aplica in FRIENDS.send_request,
+    # INAINTE de orice scriere in friend_requests / friendships (inclusiv auto-acceptarea cererii inverse).
     try:
-        await db.friend_requests.insert_one({
-            "from_id": current["user_id"], "to_id": body.target_user_id,
-            "status": "pending", "created_at": now_utc(),
-        })
-    except DuplicateKeyError:
-        raise HTTPException(status_code=409, detail="Request already exists")
-    return {"ok": True}
+        return await FRIENDS.send_request(db, current["user_id"], body.target_user_id, now_utc,
+                                          max_pending=MAX_PENDING_FRIEND_REQUESTS)
+    except FRIENDS.FriendError as e:
+        raise _friend_http(e)
 
 
 @api.post("/friends/accept")
 async def accept_request(body: FriendRequestBody, current=Depends(get_current_user)):
-    req = await db.friend_requests.find_one({
-        "from_id": body.target_user_id, "to_id": current["user_id"], "status": "pending",
-    }, {"_id": 0})
-    if not req:
-        raise HTTPException(status_code=404, detail="No pending request")
-    a, b = _pair(current["user_id"], body.target_user_id)
-    await db.friendships.update_one({"user_a": a, "user_b": b}, {"$setOnInsert": {"user_a": a, "user_b": b, "since": now_utc()}}, upsert=True)
-    # Stergem cererea (nu doar o marcam "accepted"): un rand ramas in friend_requests ar
-    # bloca permanent o re-trimitere viitoare, din cauza indexului unic pe (from_id, to_id) -
-    # de exemplu daca cei doi se deprietenesc mai tarziu si unul vrea sa trimita din nou o cerere.
-    await db.friend_requests.delete_one({"from_id": body.target_user_id, "to_id": current["user_id"]})
-    return {"ok": True}
+    # Re-verifica politica si pentru cererile pendinte create inainte de ea (sau dupa o schimbare de categorie).
+    try:
+        return await FRIENDS.accept_request(db, current["user_id"], body.target_user_id, now_utc)
+    except FRIENDS.FriendError as e:
+        raise _friend_http(e)
 
 
 @api.post("/friends/reject")
@@ -2942,6 +2911,9 @@ class StripeProvider(PaymentProvider):
         meta = data.get("metadata") or {}
         if meta.get("astran_user_id") != user.get("user_id") or meta.get("package_id") != package.get("package_id"):
             return VerifyResult(False, detail="This payment does not belong to this account/package")
+        # consum: PaymentIntent-ul trebuie sa fie legat de checkout-ul cu confirmarile (creat doar de /wallet/stripe/intent)
+        if package.get("checkout_id") and meta.get("checkout_id") != package.get("checkout_id"):
+            return VerifyResult(False, detail="This payment is not bound to the purchase confirmations")
         charge = data.get("latest_charge")
         if isinstance(charge, dict) and (charge.get("refunded") or charge.get("disputed")):
             return VerifyResult(False, detail="This payment was refunded or disputed")
@@ -3174,7 +3146,16 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     if provider.name == "mock" and os.environ.get("ALLOW_MOCK_PAYMENTS") != "1":
         raise HTTPException(status_code=403, detail="Mock payments are disabled")
 
-    result = await provider.verify(body.provider_token or "", {**package, "currency": cfg.get("currency", "RON")}, current)
+    # CONSUM: Stripe / mock = poarta HARD (fara cele doua confirmari valide NU se face achizitia). Google Play / Apple:
+    # plata s-a facut deja in magazin, deci livram, dar fara confirmari valide dreptul de retragere se PASTREAZA (vezi consumer.py).
+    hard = provider.name not in CONS.SOFT_PROVIDERS
+    try:
+        ctx = await CONS.require_checkout(db, current, "astran_package", package["package_id"], body.checkout_id, hard=hard)
+    except CONS.ConsumerError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail())
+
+    result = await provider.verify(body.provider_token or "", {**package, "currency": cfg.get("currency", "RON"),
+                                                                "checkout_id": ctx.checkout["checkout_id"] if (ctx.checkout and hard and provider.name == "stripe") else None}, current)
     if not result.ok:
         # 503 = n-am putut verifica acum (reincercabil); 402 = plata e respinsa DEFINITIV
         raise HTTPException(status_code=503 if result.transient else 402, detail=result.detail or "Payment verification failed")
@@ -3182,7 +3163,8 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
     if result.external_id:
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
         if existing:
-            return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
+            return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True,
+                    "order": CONS.public_order(await CONS.get_order_for_tx(db, existing["tx_id"]))}
 
     tx = {
         "tx_id": new_id("tx_"),
@@ -3198,7 +3180,10 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         "provider": provider.name,
         "price": package["price"],
         "currency": cfg.get("currency", "RON"),
+        "package_id": package["package_id"],
     }
+    order_doc, checkout_upd = CONS.build_order(ctx, current, tx["tx_id"], provider.name)
+    tx["order_id"] = order_doc["order_id"]
     if result.external_id:
         tx["provider_ref"] = result.external_id
     # Creditul + randul de ledger merg prin jurnal (money.py): plata REALA a fost deja luata de
@@ -3210,7 +3195,8 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         await money.begin(
             db, op_id=op_id, kind="purchase", payer_id=current["user_id"], amount=0,
             credits=[{"user_id": current["user_id"], "amount": package["astrans"]}],
-            inserts=[{"collection": "astran_ledger", "doc": tx}],
+            inserts=[{"collection": "astran_ledger", "doc": tx}, {"collection": CONS.COL_ORDERS, "doc": order_doc}],
+            updates=[checkout_upd] if checkout_upd else None,
         )
     except DuplicateKeyError:
         prev = await money.get_op(db, op_id)
@@ -3219,18 +3205,22 @@ async def buy_astrans(body: BuyBody, current=Depends(get_current_user)):
         if prev and prev["state"] == "pending":
             await _run_money(op_id)  # o incercare anterioara a ramas la jumatate: o ducem la capat
         existing = await db.astran_ledger.find_one({"provider_ref": result.external_id}, {"_id": 0})
-        return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True}
+        return {"ok": True, "credited": 0, "transaction": existing, "idempotent": True,
+                "order": CONS.public_order(await CONS.get_order_for_tx(db, (existing or {}).get("tx_id", "")))}
     except Exception:  # noqa: BLE001
         log.exception("could not journal verified payment")
         raise HTTPException(status_code=503, detail="Could not record the purchase, try again - you will not be charged twice")
     await _run_money(op_id)
     if provider.name == "google_play" and result.external_id:
         await provider.acknowledge(result.external_id, package["package_id"])
-    return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"}}
+    await CONS.send_confirmation(db, order_doc, current)   # email pe suport durabil (best-effort, inregistrat in comanda)
+    return {"ok": True, "credited": package["astrans"], "transaction": {k: v for k, v in tx.items() if k != "_id"},
+            "order": CONS.public_order(order_doc)}
 
 
 class StripeIntentBody(BaseModel):
     package_id: str = Field(min_length=1, max_length=64)
+    checkout_id: Optional[str] = Field(default=None, max_length=64)
 
 
 _stripe_intent_limiter = SlidingWindowLimiter(20, 3600)
@@ -3252,6 +3242,16 @@ async def stripe_create_intent(body: StripeIntentBody, current=Depends(get_curre
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
     currency = str((cfg or {}).get("currency", "RON")).lower()
+    # CONSUM: fara cele doua confirmari valide nu se creeaza plata; un singur PaymentIntent per checkout
+    try:
+        ctx = await CONS.require_checkout(db, current, "astran_package", package["package_id"], body.checkout_id, hard=True)
+    except CONS.ConsumerError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail())
+    if ctx.checkout:
+        claimed = await db.consumer_checkouts.update_one(
+            {"checkout_id": ctx.checkout["checkout_id"], "payment_started": {"$exists": False}}, {"$set": {"payment_started": now_utc()}})
+        if claimed.matched_count != 1:
+            raise HTTPException(status_code=409, detail={"code": "checkout_already_used", "message": "Start a new checkout"})
     async with httpx.AsyncClient(timeout=10.0) as h:
         try:
             r = await h.post(
@@ -3261,6 +3261,7 @@ async def stripe_create_intent(body: StripeIntentBody, current=Depends(get_curre
                     "automatic_payment_methods[enabled]": "true",
                     "metadata[astran_user_id]": current["user_id"],
                     "metadata[package_id]": package["package_id"],
+                    **({"metadata[checkout_id]": ctx.checkout["checkout_id"]} if ctx.checkout else {}),
                 },
             )
         except Exception as e:  # noqa: BLE001
@@ -3301,8 +3302,12 @@ async def stripe_webhook(request: Request):
         log.warning("stripe %s for %s -> %s", reason, pi, outcome)
     elif isinstance(event, dict) and event.get("type") == "charge.refunded":
         # refund PARTIAL: nu se retrage automat; il lasam intr-o coada pentru verificare manuala
-        log.warning("stripe partial refund needs manual review: %s", str((event.get("data") or {}).get("object", {}).get("id")))
-        await db.payment_alerts.insert_one({"kind": "partial_refund", "event_id": event.get("id"), "at": now_utc()})
+        _pi = ((event.get("data") or {}).get("object") or {}).get("payment_intent")
+        if isinstance(_pi, str) and await preversal.platform_initiated_for_ref(db, _pi):
+            log.info("stripe refund %s was initiated by the platform (refunds.py): no alert", _pi)   # nu e o rambursare externa
+        else:
+            log.warning("stripe partial refund needs manual review: %s", str((event.get("data") or {}).get("object", {}).get("id")))
+            await db.payment_alerts.insert_one({"kind": "partial_refund", "event_id": event.get("id"), "at": now_utc()})
     return {"received": True}
 
 
@@ -3500,6 +3505,10 @@ async def _erase_child(uid: str) -> None:
     if state == "started":
         asyncio.create_task(privacy.run_deletion(db, uid, rec["deletion_id"], first_run=True))
 
+
+CONS.configure(notifier=_notify_email if psec.email_is_configured() else None)
+# CONSUM: /api/consumer/* (checkout, confirmari, comenzi, cereri de rambursare, panou admin) - vezi consumer_routes.py
+api.include_router(make_consumer_router(get_current_user, db))
 
 api.include_router(make_age_router(
     get_current_user, db, client_ip=_client_ip,

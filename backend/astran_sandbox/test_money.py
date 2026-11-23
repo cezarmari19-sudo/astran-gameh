@@ -130,6 +130,7 @@ class FakeDB:
         self.users = FakeColl(unique=("user_id",))
         self.astran_ledger = FakeColl(unique=("tx_id", "idempotency_key"))
         self.shop_purchases = FakeColl()
+        self.refund_requests = FakeColl()   # colectie noua (refunds.py), citita de payment_reversal
         self.groups = FakeColl(unique=("group_id", "owner_id"))
         self._j = FakeColl(unique=("op_id",))
 

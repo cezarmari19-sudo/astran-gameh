@@ -93,13 +93,16 @@ class FakeWs:
 
 
 class Env:
-    """Doua conturi adulte (alice, bob), doua minore (mia, max), prieteni intre toti, fara blocari."""
+    """Doua conturi adulte (alice, bob), doua minore (mia, max). Prieteni DOAR in aceeasi categorie de varsta
+    (alice-bob, mia-max); relatiile Adult<->Minor se adauga explicit cu legacy_mixed_friends() (prietenii vechi).
+    carol (adult) nu e prietena cu nimeni. Fara blocari."""
 
     def __init__(self, rules=None):
         self.now = 1_700_000_000.0
         self.users = {"alice": ADULT, "bob": ADULT, "mia": MINOR, "max": MINOR, "carol": ADULT}
         self.muted = {}
-        self.friends = {dm.pair(a, b) for a in ("alice", "bob", "mia", "max") for b in ("alice", "bob", "mia", "max") if a != b}
+        self.friends = {dm.pair(a, b) for a in ("alice", "bob", "mia", "max") for b in ("alice", "bob", "mia", "max")
+                        if a != b and self.users[a] == self.users[b]}
         self.blocks = set()  # (blocker, blocked)
         self.rules = cf.compile_rules(cf.parse_rules(rules if rules is not None else [
             {"term": "badword", "action": "mask_word"},
@@ -162,6 +165,10 @@ class Env:
 
     def adult(self, uid):
         return self.users[uid] == ADULT
+
+    def legacy_mixed_friends(self, a, b):
+        """O prietenie Adult<->Minor creata INAINTE de politica (exista in DB, dar nu ar mai putea fi creata)."""
+        self.friends.add(dm.pair(a, b))
 
 
 def err(fn, *a, **k):
@@ -343,64 +350,67 @@ class AgeAndFiltering(unittest.TestCase):
         sent = run(e.svc.history("alice", True, cid, None, 30))
         self.assertEqual(sent["messages"][0]["text"], "you badword")
 
-    def test_adult_to_minor_minor_sees_only_filtered_everywhere(self):
+    def test_minor_to_minor_sees_only_filtered_everywhere(self):
         e = Env()
-        cid = e.open("alice", "mia")
-        e.send("alice", cid, "you badword")
+        cid = e.open("mia", "max")
+        e.send("mia", cid, "you badword")
         # istoric
-        h = run(e.svc.history("mia", False, cid, None, 30))
+        h = run(e.svc.history("max", False, cid, None, 30))
         self.assertEqual(h["messages"][0]["text"], "you #######")
         # lista (ultimul mesaj)
-        lst = run(e.svc.list_conversations("mia", False))
+        lst = run(e.svc.list_conversations("max", False))
         self.assertEqual(lst[0]["last_message"]["text"], "you #######")
         # nicaieri in raspunsurile catre minor nu apare textul brut
         self.assertNotIn("badword", json.dumps(h) + json.dumps(lst))
 
-    def test_minor_to_adult_adult_sees_filtered_too(self):  # minorul nu "scapa" cuvinte spre adulti
-        e = Env()
-        cid = e.open("mia", "alice")
-        e.send("mia", cid, "you badword")
-        self.assertEqual(run(e.svc.history("alice", True, cid, None, 30))["messages"][0]["text"], "you #######")
-
     def test_mask_sentence_rule_hides_whole_message_for_minor_only(self):
         e = Env()
-        cid = e.open("alice", "mia")
-        e.send("alice", cid, "this is an awful phrase ok")
-        self.assertEqual(run(e.svc.history("mia", False, cid, None, 30))["messages"][0]["text"], "#" * len("this is an awful phrase ok"))
-        self.assertEqual(run(e.svc.history("alice", True, cid, None, 30))["messages"][0]["text"], "this is an awful phrase ok")
+        cm, ca = e.open("mia", "max"), e.open("alice", "bob")
+        e.send("mia", cm, "this is an awful phrase ok")
+        e.send("alice", ca, "this is an awful phrase ok")
+        self.assertEqual(run(e.svc.history("max", False, cm, None, 30))["messages"][0]["text"], "#" * len("this is an awful phrase ok"))
+        self.assertEqual(run(e.svc.history("bob", True, ca, None, 30))["messages"][0]["text"], "this is an awful phrase ok")
 
     def test_uses_the_same_rule_source_as_game_chat(self):  # nu exista o a doua lista: regulile vin din rules_provider
         e = Env(rules=[{"term": "zzz", "action": "mask_word"}])
-        cid = e.open("alice", "mia")
-        e.send("alice", cid, "badword zzz")
-        self.assertEqual(run(e.svc.history("mia", False, cid, None, 30))["messages"][0]["text"], "badword ###")
+        cid = e.open("mia", "max")
+        e.send("mia", cid, "badword zzz")
+        self.assertEqual(run(e.svc.history("max", False, cid, None, 30))["messages"][0]["text"], "badword ###")
         e.rules = cf.compile_rules(cf.parse_rules([{"term": "badword", "action": "mask_word"}]))  # regula schimbata, fara cod nou
-        e.send("alice", cid, "badword zzz again")
-        self.assertEqual(run(e.svc.history("mia", False, cid, None, 30))["messages"][0]["text"], "******* zzz again".replace("*", "#"))
+        e.send("mia", cid, "badword zzz again")
+        self.assertEqual(run(e.svc.history("max", False, cid, None, 30))["messages"][0]["text"], "******* zzz again".replace("*", "#"))
 
     def test_rules_unavailable_refuses_instead_of_sending_unfiltered(self):
         e = Env()
-        cid = e.open("alice", "mia")
+        cid = e.open("mia", "max")
         e.rules_fail = True
-        self.assertEqual(err(e.send, "alice", cid, "badword").code, "unavailable")
+        self.assertEqual(err(e.send, "mia", cid, "badword").code, "unavailable")
         self.assertEqual(e.store.msgs, [])
 
     def test_age_is_read_from_db_at_read_time(self):  # nu o valoare "congelata" / de la client
         e = Env()
         cid = e.open("alice", "bob")
         e.send("alice", cid, "you badword")
-        e.users["bob"] = MINOR  # bob trece pe modul sub 18 (setare noua in DB)
-        bob_now_adult = e.adult("bob")
-        self.assertEqual(run(e.svc.history("bob", bob_now_adult, cid, None, 30))["messages"][0]["text"], "you #######")
+        e.users["bob"] = MINOR  # bob trece pe modul sub 18 (setare noua in DB): conversatia devine Adult<->Minor
+        # restrictia noua se aplica si conversatiilor EXISTENTE: nici istoric, nici trimitere, nici in lista
+        self.assertEqual(err(lambda: run(e.svc.history("bob", e.adult("bob"), cid, None, 30))).code, "not_allowed")
+        self.assertEqual(err(e.send, "alice", cid, "inca un mesaj").code, "not_allowed")
+        self.assertEqual(run(e.svc.list_conversations("bob", False)), [])
+        self.assertEqual(len(e.store.msgs), 1)  # istoricul ramane stocat (retentie), doar nu mai e accesibil prin DM
 
     def test_unknown_or_missing_age_treated_as_minor(self):
         e = Env()
         cid = e.open("alice", "bob")
-        e.users["alice"] = None  # categorie lipsa/necunoscuta pentru expeditor
-        e.send("alice", cid, "you badword")
+        e.users["alice"] = None  # categorie lipsa/necunoscuta pentru expeditor => minor => nu mai poate scrie unui adult
+        self.assertEqual(err(e.send, "alice", cid, "you badword").code, "not_allowed")
+        self.assertEqual(e.store.msgs, [])
+        # ...dar cu un alt cont sub 18 (aceeasi categorie) functioneaza, iar textul brut nu se pastreaza
+        e.friends.add(dm.pair("alice", "mia"))
+        c2 = e.open("alice", "mia")
+        e.send("alice", c2, "you badword")
         self.assertIsNone(e.store.msgs[0]["raw"])
         self.assertFalse(e.store.msgs[0]["sender_adult"])
-        self.assertEqual(run(e.svc.history("bob", True, cid, None, 30))["messages"][0]["text"], "you #######")
+        self.assertEqual(run(e.svc.history("mia", False, c2, None, 30))["messages"][0]["text"], "you #######")
 
 
 class Pagination(unittest.TestCase):
@@ -450,14 +460,15 @@ class UnreadAndList(unittest.TestCase):
 
     def test_list_sorted_by_last_message_and_moves_to_top(self):
         e = Env()
-        c1, c2 = e.open("alice", "bob"), e.open("alice", "mia")
+        e.friends.add(dm.pair("alice", "carol"))
+        c1, c2 = e.open("alice", "bob"), e.open("alice", "carol")
         e.send("alice", c1, "primul")
         e.send("alice", c2, "al doilea")
         order = [x["friend"]["user_id"] for x in run(e.svc.list_conversations("alice", True))]
-        self.assertEqual(order, ["mia", "bob"])
+        self.assertEqual(order, ["carol", "bob"])
         e.send("bob", c1, "bob scrie din nou")
         order = [x["friend"]["user_id"] for x in run(e.svc.list_conversations("alice", True))]
-        self.assertEqual(order, ["bob", "mia"])
+        self.assertEqual(order, ["bob", "carol"])
         top = run(e.svc.list_conversations("alice", True))[0]
         self.assertEqual(top["last_message"]["text"], "bob scrie din nou")
         self.assertFalse(top["last_message"]["mine"])
@@ -467,26 +478,37 @@ class UnreadAndList(unittest.TestCase):
 class RealtimeDelivery(unittest.TestCase):
     def test_delivered_live_to_recipient_and_sender_other_devices_with_per_viewer_text(self):
         e = Env()
-        cid = e.open("alice", "mia")
-        w_mia, w_alice2 = FakeWs(), FakeWs()
-        run(e.hub.add("mia", w_mia))
-        run(e.hub.add("alice", w_alice2))
-        e.send("alice", cid, "you badword")
-        self.assertEqual(w_mia.sent[0]["t"], "dm")
-        self.assertEqual(w_mia.sent[0]["message"]["text"], "you #######")  # minor: filtrat, NICIODATA raw
-        self.assertFalse(w_mia.sent[0]["message"]["mine"])
-        self.assertEqual(w_alice2.sent[0]["message"]["text"], "you badword")  # expeditorul adult isi vede textul
-        self.assertTrue(w_alice2.sent[0]["message"]["mine"])
-        self.assertNotIn("badword", json.dumps(w_mia.sent))
+        cid = e.open("mia", "max")
+        w_max, w_mia2 = FakeWs(), FakeWs()
+        run(e.hub.add("max", w_max))
+        run(e.hub.add("mia", w_mia2))
+        e.send("mia", cid, "you badword")
+        self.assertEqual(w_max.sent[0]["t"], "dm")
+        self.assertEqual(w_max.sent[0]["message"]["text"], "you #######")  # minor: filtrat, NICIODATA raw
+        self.assertFalse(w_max.sent[0]["message"]["mine"])
+        self.assertEqual(w_mia2.sent[0]["message"]["text"], "you #######")  # si expeditorul minor vede doar varianta filtrata
+        self.assertTrue(w_mia2.sent[0]["message"]["mine"])
+        self.assertNotIn("badword", json.dumps(w_max.sent))
+        # adult <-> adult: textul brut, pentru ambii
+        ca = e.open("alice", "bob")
+        w_bob = FakeWs()
+        run(e.hub.add("bob", w_bob))
+        e.send("alice", ca, "you badword")
+        self.assertEqual(w_bob.sent[0]["message"]["text"], "you badword")
 
     def test_recipient_age_reread_at_delivery_and_failsafe_on_db_error(self):
         e = Env()
         cid = e.open("alice", "bob")
         w = FakeWs()
         run(e.hub.add("bob", w))
-        e.ages_fail = True  # nu putem citi varsta destinatarului
-        e.send("alice", cid, "you badword")
-        self.assertEqual(w.sent[0]["message"]["text"], "you #######")  # fail-safe: sub 18
+        e.ages_fail = True  # nu putem citi varsta destinatarului => NU se trimite nimic (fail-closed)
+        self.assertEqual(err(e.send, "alice", cid, "you badword").code, "unavailable")
+        self.assertEqual((e.store.msgs, w.sent), ([], []))
+        # livrarea unui mesaj venit de la alt proces, cand varsta spectatorului nu poate fi citita: spectator = minor
+        # => un mesaj de la un adult NU e livrat (nu se decide in favoarea livrarii)
+        run(e.svc.relay_remote("bob", {"cid": "c", "id": "m", "ts": 1, "sid": "alice", "adult": True,
+                                       "raw": "you badword", "safe": "you #######"}))
+        self.assertEqual(w.sent, [])
 
     def test_offline_recipient_gets_message_later_via_history_and_unread(self):
         e = Env()
@@ -497,8 +519,9 @@ class RealtimeDelivery(unittest.TestCase):
 
     def test_cross_process_publish_never_carries_minor_raw_and_relay_revalidates(self):
         e = Env()
-        cid = e.open("mia", "alice")
+        cid = e.open("mia", "max")
         e.send("mia", cid, "you badword")
+        self.assertTrue(e.published)
         for _uid, payload in e.published:
             self.assertIsNone(payload["raw"])
             self.assertNotIn("badword", json.dumps(payload))
@@ -508,10 +531,10 @@ class RealtimeDelivery(unittest.TestCase):
         run(e.svc.relay_remote("bob", {"t": "dm_x", "cid": "c", "id": "m", "ts": 5, "sid": "alice", "adult": True,
                                        "raw": "you badword", "safe": "you #######"}))
         self.assertEqual(w.sent[0]["message"]["text"], "you badword")  # bob adult, expeditor adult
-        e.users["bob"] = MINOR
+        e.users["bob"] = MINOR   # varsta se reciteste din DB: acum spectatorul e minor, expeditorul adult => NU se livreaza
         run(e.svc.relay_remote("bob", {"t": "dm_x", "cid": "c", "id": "m2", "ts": 6, "sid": "alice", "adult": True,
                                        "raw": "you badword", "safe": "you #######"}))
-        self.assertEqual(w.sent[1]["message"]["text"], "you #######")
+        self.assertEqual(len(w.sent), 1)
         n = len(w.sent)
         for bad in ({}, {"cid": 1}, {"cid": "c", "id": "m", "ts": True, "sid": "a", "safe": "x"},
                     {"cid": "c", "id": "m", "ts": 1, "sid": "a", "safe": "x" * 5000},
@@ -522,8 +545,8 @@ class RealtimeDelivery(unittest.TestCase):
     def test_remote_adult_flag_false_ignores_raw(self):
         e = Env()
         w = FakeWs()
-        run(e.hub.add("bob", w))
-        run(e.svc.relay_remote("bob", {"cid": "c", "id": "m", "ts": 1, "sid": "x", "adult": False,
+        run(e.hub.add("mia", w))
+        run(e.svc.relay_remote("mia", {"cid": "c", "id": "m", "ts": 1, "sid": "x", "adult": False,
                                        "raw": "TREBUIE IGNORAT", "safe": "safe text"}))
         self.assertEqual(w.sent[0]["message"]["text"], "safe text")
 
@@ -540,14 +563,14 @@ class RealtimeDelivery(unittest.TestCase):
 class Reports(unittest.TestCase):
     def test_participant_can_report_other_persons_message_once(self):
         e = Env()
-        cid = e.open("alice", "mia")
-        m = e.send("alice", cid, "you badword")
-        run(e.svc.report("mia", m["id"], "harassment"))
-        run(e.svc.report("mia", m["id"], "harassment"))  # idempotent
+        cid = e.open("mia", "max")
+        m = e.send("mia", cid, "you badword")
+        run(e.svc.report("max", m["id"], "harassment"))
+        run(e.svc.report("max", m["id"], "harassment"))  # idempotent
         self.assertEqual(len(e.store.reports), 1)
         r = e.store.reports[0]
-        self.assertEqual((r["reporter_id"], r["target_type"], r["target_id"], r["reason"]), ("mia", "message", m["id"], "harassment"))
-        self.assertEqual(r["context"]["sender_id"], "alice")
+        self.assertEqual((r["reporter_id"], r["target_type"], r["target_id"], r["reason"]), ("max", "message", m["id"], "harassment"))
+        self.assertEqual(r["context"]["sender_id"], "mia")
         self.assertEqual(r["context"]["source"], "private_dm")
 
     def test_cannot_report_own_message_or_unknown_or_bad_reason_normalised(self):
