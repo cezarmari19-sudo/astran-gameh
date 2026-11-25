@@ -16,8 +16,9 @@ export type AgeState = {
   age_band: "under_16" | "16_17" | "18_plus" | null;
   age_category: "under_18" | "adult_18";
   adult_content_allowed: boolean;
-  account_state: "ACTIVE" | "AGE_INFO_REQUIRED" | "PARENTAL_CONSENT_REQUIRED";
+  account_state: "ACTIVE" | "AGE_INFO_REQUIRED" | "PARENTAL_CONSENT_REQUIRED" | "AGE_VERIFICATION_REQUIRED";
   restricted: boolean; needs_age_info: boolean;
+  limited: boolean; consent_eligibility: "verified" | "parental" | "unverified"; consent_features_allowed: boolean; parental_option: boolean;
   parental_state: ParentalState | null;
   age_assurance: "none" | "pending" | "verified" | "failed";
   next_action: string | null;
@@ -32,7 +33,8 @@ export const ageApi = {
   setDateOfBirth: (date_of_birth: string) => post("/age/date-of-birth", { date_of_birth }),
   requestParent: (parent_email: string, language: string) => post("/age/parental/request", { parent_email, language }),
   ownConsent: (language: string) => post("/age/own-consent", { language }),
-  startAssurance: () => post("/age/assurance/start", {}) as Promise<{ status: string; redirect_url?: string | null; provider?: string }>,
+  // `threshold` e doar o preferinta: serverul decide ce prag e permis (16-17 => 16, 18+ => 18) si il leaga de sesiune.
+  startAssurance: (threshold?: 16 | 18) => post("/age/assurance/start", threshold ? { threshold } : {}) as Promise<{ status: string; redirect_url?: string | null; provider?: string; threshold?: number }>,
 };
 
 export type Acks = { read_notice: boolean; is_parent_or_guardian: boolean; understands_withdrawal: boolean };

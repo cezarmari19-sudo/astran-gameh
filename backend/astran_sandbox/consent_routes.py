@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+
+from . import age_policy as AP
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import consent as C
@@ -63,6 +65,7 @@ def make_legal_router() -> APIRouter:
                 "doc_type": t, "legal_basis": reg.legal_basis(t), "current_version": cur,
                 "effective_date": meta.get("effective_date"), "requires_reacceptance": bool(meta.get("requires_reacceptance")),
                 "sha256": (reg.text(t, cur, lg) or (None, None))[1], "language": lg,
+                "draft": reg.is_draft(t, cur),
             })
         return {"documents": out}
 
@@ -77,7 +80,8 @@ def make_legal_router() -> APIRouter:
         if got is None:
             raise HTTPException(status_code=404, detail={"code": "unknown_version", "message": "Unknown version"})
         return {"doc_type": doc_type, "version": ver, "language": lg, "sha256": got[1], "text": got[0],
-                "is_current": ver == reg.current_version(doc_type), "legal_basis": reg.legal_basis(doc_type)}
+                "is_current": ver == reg.current_version(doc_type), "legal_basis": reg.legal_basis(doc_type),
+                "draft": reg.is_draft(doc_type, ver)}
 
     return router
 
@@ -117,6 +121,9 @@ def make_consent_router(get_current_user: Callable, db) -> APIRouter:
     @router.post("/purposes/{purpose}/grant")
     async def grant(purpose: str, body: GrantBody, current=Depends(get_current_user)):
         _limit(_write_limiter, current["user_id"])
+        if not AP.evaluate_access(current).consent_features_allowed:
+            # varsta declarata NU e suficienta pentru a da consimtamant: cere verificare / acord parental
+            raise HTTPException(status_code=403, detail={"code": "age_verification_required"})
         try:
             await C.grant_purpose(db, current["user_id"], purpose, age_category=current.get("age_category"),
                                   lang=_lang(body.language, current), source="settings", age_band=C._user_band(current))

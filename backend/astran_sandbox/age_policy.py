@@ -50,6 +50,17 @@ PARENTAL_VERIFICATION_REQUIRED = "PARENTAL_VERIFICATION_REQUIRED"
 PARENTAL_STATES = (PARENTAL_PENDING, PARENTAL_APPROVED, PARENTAL_REJECTED, PARENTAL_WITHDRAWN,
                    PARENTAL_VERIFICATION_REQUIRED)
 
+# Pragurile pe care un provider de age assurance le poate ATESTA (nu se deduc niciodata din data declarata):
+#   16 = eligibil pentru consimtamant digital propriu (GDPR art. 8); 18 = adult (functii 18+; implica si 16).
+ASSURANCE_THRESHOLDS = (DIGITAL_CONSENT_AGE, ADULT_AGE)
+
+# Eligibilitatea pentru consimtamant digital este SEPARATA de categoria minor/adult:
+ELIG_VERIFIED = "verified"        # provider extern a atestat pragul (>=16) - semnat si sigilat
+ELIG_PARENTAL = "parental"        # acord parental APROBAT (dupa verificarea parintelui)
+ELIG_UNVERIFIED = "unverified"    # doar data declarata => NU e dovada
+
+ACCOUNT_AGE_VERIFICATION_REQUIRED = "AGE_VERIFICATION_REQUIRED"
+
 ASSURANCE_NONE = "none"
 ASSURANCE_PENDING = "pending"
 ASSURANCE_VERIFIED = "verified"
@@ -198,26 +209,70 @@ def email_fingerprint(email: str) -> str:
     return pseudonym(normalize_email(email), "email")
 
 
+# ----------------------------------------------------------------------------- sigiliul atestarii de varsta
+# `users.age_assurance` si `users.age_category` sunt campuri obisnuite in Mongo: cine are drept de scriere in DB (sau un
+# bug de injectie) le-ar putea seta direct. Atestarea e deci SIGILATA cu HMAC (cheie din AGE_DATA_KEY/JWT_SECRET), legata
+# de user_id + stare + prag. Fara sigiliu valid, atestarea NU conteaza (=> minor, fail-closed).
+def _seal_input(user_id: str, status: str, threshold: Any) -> bytes:
+    return f"{user_id}|{status}|{threshold}".encode()
+
+
+def assurance_seal(user_id: str, status: str, threshold: Any) -> str:
+    return hmac.new(_derive("assurance-seal"), _seal_input(user_id, status, threshold), hashlib.sha256).hexdigest()
+
+
+def sealed_assurance(user_id: str, *, threshold: int, provider: str, method: str, verified_at: Any, ref: str) -> dict:
+    """SINGURUL constructor al unei atestari `verified` (apelat doar de age_service.apply_assurance_result si de seed-ul
+    de operator). Orice `verified` scris altfel in DB nu are sigiliu valid si e ignorat."""
+    if threshold not in ASSURANCE_THRESHOLDS:
+        raise ValueError("threshold")
+    return {"status": ASSURANCE_VERIFIED, "provider": provider, "method": method, "threshold": threshold,
+            "verified_at": verified_at, "ref": ref, "seal": assurance_seal(user_id, ASSURANCE_VERIFIED, threshold)}
+
+
+def verified_threshold(user: Optional[dict]) -> Optional[int]:
+    """Pragul atestat (16 sau 18) DOAR daca atestarea e `verified` si sigiliul e valid pentru ACEST user_id."""
+    u = user or {}
+    a = u.get("age_assurance") if isinstance(u.get("age_assurance"), dict) else {}
+    thr, seal, uid = a.get("threshold"), a.get("seal"), u.get("user_id")
+    if a.get("status") != ASSURANCE_VERIFIED or thr not in ASSURANCE_THRESHOLDS or isinstance(thr, bool):
+        return None
+    if not (isinstance(seal, str) and isinstance(uid, str) and uid):
+        return None
+    return thr if hmac.compare_digest(seal, assurance_seal(uid, ASSURANCE_VERIFIED, thr)) else None
+
+
 # ----------------------------------------------------------------------------- evaluarea contului
 @dataclass(frozen=True)
 class AccessInfo:
-    band: Optional[str]                 # None = varsta necunoscuta
-    age_category: str                   # valoarea EFECTIVA pentru codul legacy: "adult_18" doar cu age assurance
+    band: Optional[str]                 # banda DECLARATA din DOB (None = necunoscuta). NU e dovada de varsta.
+    age_category: str                   # valoarea EFECTIVA pentru codul legacy: "adult_18" doar cu age assurance sigilat
     adult_content_allowed: bool
-    account_state: str                  # ACTIVE | AGE_INFO_REQUIRED | PARENTAL_CONSENT_REQUIRED
-    restricted: bool                    # True => doar rutele de varsta/parental/privacy raman accesibile
+    account_state: str                  # ACTIVE | AGE_INFO_REQUIRED | PARENTAL_CONSENT_REQUIRED | AGE_VERIFICATION_REQUIRED
+    restricted: bool                    # True => doar rutele de varsta/parental/privacy raman accesibile (blocare totala)
     needs_age_info: bool
     parental_state: Optional[str]
     assurance_status: str
-    next_action: Optional[str]          # enter_date_of_birth | parent_email | await_parent | verify_age_18 | None
+    next_action: Optional[str]          # enter_date_of_birth | parent_email | await_parent | verify_age_16 | verify_age_18 | confirm_own_consent | None
+    # --- eligibilitate pentru consimtamant digital (separata de minor/adult) ---
+    consent_eligibility: str = ELIG_UNVERIFIED
+    limited: bool = False               # True => functiile care cer consimtamant/verificare sunt blocate; restul raman
+    verified_threshold: Optional[int] = None
+    parental_option: bool = False       # utilizatorul poate alege acordul parental ca alternativa la verificarea varstei
+
+    @property
+    def consent_features_allowed(self) -> bool:
+        return (not self.restricted) and (not self.limited) and self.band is not None \
+            and self.consent_eligibility in (ELIG_VERIFIED, ELIG_PARENTAL)
 
     def public(self) -> dict:
         return {
             "age_band": self.band, "age_category": self.age_category,
             "adult_content_allowed": self.adult_content_allowed, "account_state": self.account_state,
-            "restricted": self.restricted, "needs_age_info": self.needs_age_info,
+            "restricted": self.restricted, "limited": self.limited, "needs_age_info": self.needs_age_info,
             "parental_state": self.parental_state, "age_assurance": self.assurance_status,
-            "next_action": self.next_action,
+            "next_action": self.next_action, "consent_eligibility": self.consent_eligibility,
+            "consent_features_allowed": self.consent_features_allowed, "parental_option": self.parental_option,
         }
 
 
@@ -244,55 +299,110 @@ def _age_info_deadline() -> Optional[date]:
 
 def evaluate_access(user: Optional[dict], today: Optional[date] = None) -> AccessInfo:
     """Starea de acces a unui cont, calculata DIN NOU la fiecare cerere (fara incredere in campuri din client).
-    Pozitiv, fail-closed: orice lipsa/ambiguitate => fara acces 18+."""
+    Pozitiv, fail-closed: orice lipsa/ambiguitate => fara acces 18+ si fara functii care cer consimtamant.
+
+    REGULA CENTRALA: data nasterii DECLARATA nu dovedeste varsta. Banda din DOB spune doar ce flux se aplica:
+      * sub 16 declarat      -> blocare totala pana la acord parental APROBAT (verificat extern);
+      * 16-17 / 18+ declarat -> eligibil pentru consimtamant digital DOAR dupa (a) atestare semnata de provider (prag >=16)
+                                sau (b) acord parental APROBAT (doar pentru 16-17). Pana atunci contul e LIMITAT: functiile
+                                care cer consimtamant (social, UGC, plati) sunt blocate pe backend; restul raman.
+    """
     today = today or _today()
     u = user or {}
     assurance = u.get("age_assurance") if isinstance(u.get("age_assurance"), dict) else {}
     a_status = assurance.get("status") or ASSURANCE_NONE
     dob = decrypt_dob(u.get("dob_enc"))
     band: Optional[str] = band_for_age(compute_age(dob, today)) if dob else None
-    verified = a_status == ASSURANCE_VERIFIED
+    vthr = verified_threshold(u)            # None daca nu e verificat SAU sigiliul lipseste/e invalid
 
-    # Un pragul-18 confirmat de provider fara DOB (metoda "doar prag") ridica banda la 18_plus; cu DOB, DOB-ul
-    # trebuie sa fie compatibil (un DOB de 15 ani + "verificat 18+" = conflict => fara acces 18+).
-    if band is None and verified and assurance.get("threshold") == ADULT_AGE:
+    # Un prag-18 confirmat de provider fara DOB (metoda "doar prag") ridica banda la 18_plus; cu DOB, DOB-ul
+    # trebuie sa fie compatibil (DOB de 15 ani + "verificat" = conflict => atestarea nu se ia in calcul).
+    if band is None and vthr == ADULT_AGE:
         band = BAND_ADULT
-    adult_ok = bool(verified and assurance.get("threshold") == ADULT_AGE and band == BAND_ADULT)
+    if vthr is not None and band == BAND_UNDER_16:
+        vthr = None
+    if vthr == ADULT_AGE and band == BAND_16_17:
+        vthr = None
+    adult_ok = bool(vthr == ADULT_AGE and band == BAND_ADULT)
 
     parental = u.get("parental") if isinstance(u.get("parental"), dict) else {}
     p_state = parental.get("state")
     self_consent = bool(parental.get("self_consent_at"))
+    parental_ok = p_state == PARENTAL_APPROVED and band in (BAND_UNDER_16, BAND_16_17)
 
-    state, restricted, needs_info, nxt = ACCOUNT_ACTIVE, False, False, None
+    # eligibilitate pentru consimtamant digital
+    if vthr is not None and band is not None:
+        elig = ELIG_VERIFIED
+    elif parental_ok:
+        elig = ELIG_PARENTAL
+    else:
+        elig = ELIG_UNVERIFIED
+
+    state, restricted, limited, needs_info, nxt = ACCOUNT_ACTIVE, False, False, False, None
+    parental_option = False
     if band is None:
-        needs_info, nxt = True, "enter_date_of_birth"
+        needs_info, nxt, limited = True, "enter_date_of_birth", True
         dl = _age_info_deadline()
         if dl is not None and today > dl:
             state, restricted = ACCOUNT_AGE_INFO_REQUIRED, True
     elif band == BAND_UNDER_16:
-        if p_state != PARENTAL_APPROVED:
+        if elig != ELIG_PARENTAL:
+            limited = True
             if block_under16_until_parental():
                 state, restricted = ACCOUNT_PARENTAL_BLOCKED, True
             nxt = "parent_email" if p_state in (None, PARENTAL_REJECTED, PARENTAL_WITHDRAWN) else "await_parent"
+    elif elig == ELIG_UNVERIFIED:
+        # 16+ DECLARAT, dar neverificat: un copil poate minti "17 ani". NU primeste functiile care cer consimtamant.
+        limited, state = True, ACCOUNT_AGE_VERIFICATION_REQUIRED
+        if band == BAND_16_17:
+            parental_option = True
+            nxt = "await_parent" if p_state in (PARENTAL_PENDING, PARENTAL_VERIFICATION_REQUIRED) else "verify_age_16"
+        else:
+            nxt = "verify_age_18"
     else:
-        # 16+: isi da singur consimtamantul (GDPR art. 8). Daca exista stare parentala neaprobata, trebuie sa
-        # confirme el insusi (age_service.confirm_own_consent); pana atunci ramane restrans.
-        if p_state in (PARENTAL_PENDING, PARENTAL_REJECTED, PARENTAL_WITHDRAWN, PARENTAL_VERIFICATION_REQUIRED) \
-                and not self_consent:
+        # eligibil. Daca exista o stare parentala neaprobata (a implinit 16 ani / acord retras) si atestarea a venit
+        # de la provider, utilizatorul trebuie sa confirme singur (art. 8) - doar cu eligibilitate VERIFICATA.
+        if elig == ELIG_VERIFIED and p_state in (PARENTAL_PENDING, PARENTAL_REJECTED, PARENTAL_WITHDRAWN,
+                                                 PARENTAL_VERIFICATION_REQUIRED) and not self_consent:
             state, restricted, nxt = ACCOUNT_PARENTAL_BLOCKED, True, "confirm_own_consent"
-    if nxt is None and band != BAND_ADULT and not adult_ok:
-        nxt = None  # 18+ nu e o actiune obligatorie; se ofera la cerere (verify_age_18)
     return AccessInfo(
         band=band, age_category=CAT_ADULT if adult_ok else CAT_MINOR, adult_content_allowed=adult_ok and not restricted,
         account_state=state, restricted=restricted, needs_age_info=needs_info, parental_state=p_state,
-        assurance_status=a_status, next_action=nxt,
+        assurance_status=a_status, next_action=nxt, consent_eligibility=elig, limited=limited or restricted,
+        verified_threshold=vthr, parental_option=parental_option,
     )
 
 
 def can_access_adult_content(user: Optional[dict], today: Optional[date] = None) -> bool:
-    """SINGURA functie care decide accesul la continut/functii 18+. Pozitiva: fara `age_assurance` verificat
+    """SINGURA functie care decide accesul la continut/functii 18+. Pozitiva: fara `age_assurance` verificat, SIGILAT
     si compatibil cu data nasterii (daca exista), raspunsul e False - indiferent de `age_category`."""
     return evaluate_access(user, today).adult_content_allowed
+
+
+# Campurile necesare pentru a decide categoria EFECTIVA a unui utilizator. Orice citire a categoriei din DB trebuie sa
+# le proiecteze (altfel `effective_category` nu are cu ce verifica sigiliul si intoarce "necunoscuta").
+ACCESS_PROJECTION = {"_id": 0, "user_id": 1, "age_category": 1, "dob_enc": 1, "age_assurance": 1, "parental": 1}
+
+
+def effective_category(user: Optional[dict], today: Optional[date] = None) -> Optional[str]:
+    """Categoria folosita de chat / DM / grupuri / realtime. Derivata, nu citita brut din `age_category`:
+      * "adult_18"  doar cu atestare 18 SIGILATA + DOB compatibil (editarea manuala a campului in DB nu ajunge);
+      * "under_18"  pentru cont eligibil, ne-adult dovedit;
+      * None        (necunoscuta => refuz in chat/grupuri) pentru cont blocat/limitat: varsta neverificata."""
+    if not isinstance(user, dict):
+        return None
+    info = evaluate_access(user, today)
+    if info.restricted or info.limited:
+        return None
+    return CAT_ADULT if info.age_category == CAT_ADULT else CAT_MINOR
+
+
+def derive_category_doc(user: Optional[dict]) -> dict:
+    """Copie a documentului cu `age_category` INLOCUIT de categoria efectiva (derivata + verificata sigiliul). Se da
+    codului de contact (prieteni, DM, grupuri) in locul documentului brut din DB."""
+    u = dict(user) if isinstance(user, dict) else {}
+    u["age_category"] = effective_category(user)
+    return u
 
 
 # Rute accesibile unui cont restrans (asteptare parentala / varsta lipsa dupa termen): doar ce trebuie ca
@@ -301,6 +411,33 @@ RESTRICTED_ALLOWED_PREFIXES = (
     "/api/auth/me", "/api/auth/logout", "/api/age/", "/api/legal/", "/api/consent/", "/api/privacy/",
     "/api/account/data-export", "/api/parental/",
 )
+
+
+# Functii care cer consimtamant digital valid (prelucrari dincolo de contul de baza): social (prieteni, DM, grupuri,
+# cautare utilizatori, colaboratori), continut generat de utilizator (publicare/editare jocuri, Studio, Shop, haine),
+# plati (portofel, checkout). Pentru un cont LIMITAT (varsta declarata, neverificata) sunt refuzate pe BACKEND.
+# NU sunt blocate: autentificare, setari, confidentialitate/export, documente legale, drepturile consumatorului
+# (refund), raportari/moderare (DSA), explorarea si JOCUL in jocuri pentru toate varstele (fara chat - vezi
+# `effective_category`).
+CONSENT_FEATURE_PREFIXES = (
+    "/api/friends", "/api/dm", "/ws/dm", "/api/groups", "/api/users/search", "/api/wallet", "/api/shop",
+    "/api/clothes", "/api/consumer/checkout",
+)
+CONSENT_FEATURE_MUTATION_PREFIXES = ("/api/games", "/api/studio", "/api/sandbox")   # doar metode care scriu
+_PLAY_PATH = re.compile(r"^/api/games/[^/]+/(play|instance/heartbeat|instance/leave)$")
+_COLLAB_PATH = re.compile(r"^/api/games/[^/]+/(collaborators|testers)(/|$)")
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def path_requires_consent_features(path: str, method: str = "GET") -> bool:
+    m = (method or "GET").upper()
+    if any(path == p or path.startswith(p + "/") for p in CONSENT_FEATURE_PREFIXES):
+        return True
+    if _COLLAB_PATH.match(path):
+        return True
+    if m not in _SAFE_METHODS and any(path == p or path.startswith(p + "/") for p in CONSENT_FEATURE_MUTATION_PREFIXES):
+        return not _PLAY_PATH.match(path)
+    return False
 
 
 def path_allowed_when_restricted(path: str) -> bool:

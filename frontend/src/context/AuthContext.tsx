@@ -13,8 +13,14 @@ export type User = {
   age_category: "under_18" | "adult_18";
   age_band?: "under_16" | "16_17" | "18_plus" | null;
   adult_content_allowed?: boolean;
-  account_state?: "ACTIVE" | "AGE_INFO_REQUIRED" | "PARENTAL_CONSENT_REQUIRED";
+  account_state?: "ACTIVE" | "AGE_INFO_REQUIRED" | "PARENTAL_CONSENT_REQUIRED" | "AGE_VERIFICATION_REQUIRED";
   restricted?: boolean;
+  // Varsta DECLARATA nu e dovada: `limited` = functiile care cer consimtamant sunt blocate pe server pana la verificare.
+  // Decizia o ia backend-ul; frontend-ul doar afiseaza starea.
+  limited?: boolean;
+  consent_eligibility?: "verified" | "parental" | "unverified";
+  consent_features_allowed?: boolean;
+  parental_option?: boolean;
   needs_age_info?: boolean;
   parental_state?: string | null;
   age_assurance?: "none" | "pending" | "verified" | "failed";

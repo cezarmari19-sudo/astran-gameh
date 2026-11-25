@@ -23,3 +23,8 @@ dacă diferă de manifest (`legal_docs.py`). Amprenta textului prezentat se salv
 Se definesc în `astran_sandbox/consent.py` (`PURPOSES`) și doar pentru prelucrări care chiar există în aplicație.
 Dacă schimbi textul unui consimțământ, crește `version`-ul lui. Orice cod care prelucrează pe baza unui consimțământ
 trebuie să folosească `consent.require_consent(...)` / `consent.purpose_audience(...)`.
+## Poarta de publicare și audit (vezi PRIVACY_AUDIT.md)
+- Un document cu marcaje `[DE COMPLETAT…]`/`[TO BE COMPLETED…]` sau fără `"status": "final"` + `effective_date` este DRAFT (`legal_docs.publication_blockers()`; API expune `draft`).
+- `ASTRAN_REQUIRE_FINAL_LEGAL_DOCS=1` în producție => serverul refuză să pornească cu documente draft.
+- Textele frontend `privacyPolicy.{ro,en}.ts` se generează: `python sync_frontend_policy.py`.
+- Orice colecție/host/dependență nouă => `test_privacy_policy` eșuează până reevaluezi politica și actualizezi `data_inventory.json`.

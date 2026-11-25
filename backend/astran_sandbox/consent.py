@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import age_policy as AP
 from . import legal_docs as LD
 
 log = logging.getLogger("astran.consent")
@@ -391,7 +392,7 @@ async def overview(db, user: dict, lang: str) -> dict:
             "granted_version": ev["version"] if granted else None,
             "granted_at": ev["created_at"] if granted else None,
             "withdrawn_at": ev["created_at"] if (ev and ev["action"] == ACTION_WITHDRAWN) else None,
-            "eligible": purpose_eligible(p, user.get("age_category"), _user_band(user)),
+            "eligible": purpose_eligible(p, user.get("age_category"), _user_band(user)) and AP.evaluate_access(user).consent_features_allowed,
             "withdrawable": granted,
             "requires_confirmation": bool(cfg.get("requires_confirmation_to_withdraw")),
         })

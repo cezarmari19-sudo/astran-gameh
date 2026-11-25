@@ -274,7 +274,7 @@ function GameChatInner({ chat, reservedBottom }: { chat: ChatApi; reservedBottom
         <View testID="play-chat-panel" style={[styles.panel, { left, top: panelTop, width: panelW, height: panelH }]}>
           <View style={[styles.header, compact && { height: 32 }]}>
             <Text style={styles.title}>{t("chat")}</Text>
-            {state.mode ? (
+            {state.mode === "under_18" || state.mode === "adult_18" ? (
               <View style={[styles.modeBadge, state.mode === "adult_18" && styles.modeBadgeAdult]}>
                 <Text style={[styles.modeText, state.mode === "adult_18" && { color: "#fff" }]}>
                   {state.mode === "adult_18" ? t("chat_mode_adult") : t("chat_mode_filtered")}

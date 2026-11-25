@@ -4,7 +4,7 @@ NU exista un provider real conectat in acest repo. Ce exista:
   * `AgeAssuranceProvider` - interfata (start + verificarea atestarii);
   * `NullProvider` - implicit: "neconfigurat"; accesul 18+ ramane BLOCAT, nimic nu se marcheaza verificat;
   * `SignedWebhookProvider` - integrare generica: un serviciu extern (verificare ID/selfie/eID/banca/operator mobil,
-    ales de operator) confirma DOAR pragul (over_18=true) si trimite o atestare semnata HMAC la
+    ales de operator) confirma DOAR un prag (16 sau 18; `threshold` + `threshold_met`) si trimite o atestare semnata HMAC la
     POST /api/age/assurance/callback. Se activeaza doar cu variabilele de mediu de mai jos.
 
 Mediu:  ASTRAN_AGE_ASSURANCE_PROVIDER=signed_webhook
@@ -45,6 +45,7 @@ class AssuranceResult:
     provider: str
     method: str
     nonce: str
+    threshold: int = 18          # pragul pe care providerul l-a atestat (16 sau 18); se compara cu cel cerut la start
 
 
 class AgeAssuranceProvider:
@@ -53,7 +54,7 @@ class AgeAssuranceProvider:
     def configured(self) -> bool:
         return False
 
-    def start(self, session_id: str) -> AssuranceStart:
+    def start(self, session_id: str, threshold: int = 18) -> AssuranceStart:
         raise AssuranceError("age_assurance_not_configured", 503)
 
     def parse_callback(self, body: bytes, signature: Optional[str], now: Optional[float] = None) -> AssuranceResult:
@@ -71,12 +72,14 @@ class SignedWebhookProvider(AgeAssuranceProvider):
     def configured(self) -> bool:
         return bool(self._secret and self._start_url.startswith("https://"))
 
-    def start(self, session_id: str) -> AssuranceStart:
+    def start(self, session_id: str, threshold: int = 18) -> AssuranceStart:
         if not self.configured():
             raise AssuranceError("age_assurance_not_configured", 503)
+        if threshold not in (16, 18):
+            raise AssuranceError("invalid_threshold", 400)
         from urllib.parse import urlencode
         sep = "&" if "?" in self._start_url else "?"
-        return AssuranceStart(self.name, f"{self._start_url}{sep}{urlencode({'session': session_id})}")
+        return AssuranceStart(self.name, f"{self._start_url}{sep}{urlencode({'session': session_id, 'threshold': threshold})}")
 
     def parse_callback(self, body: bytes, signature: Optional[str], now: Optional[float] = None) -> AssuranceResult:
         if not self.configured():
@@ -89,12 +92,25 @@ class SignedWebhookProvider(AgeAssuranceProvider):
             data = json.loads(body.decode("utf-8"))
         except Exception:  # noqa: BLE001
             raise AssuranceError("invalid_payload", 400)
-        sid, nonce, method = data.get("session_id"), data.get("nonce"), data.get("method")
-        # `over_18` trebuie sa fie exact boolean: "true"/1/"yes" NU sunt acceptate.
-        if not (isinstance(sid, str) and 16 <= len(sid) <= 128 and isinstance(nonce, str) and 8 <= len(nonce) <= 128
-                and isinstance(data.get("over_18"), bool)):
+        if not isinstance(data, dict):
             raise AssuranceError("invalid_payload", 400)
-        return AssuranceResult(sid, data["over_18"], self.name, str(method or "unspecified")[:40], nonce)
+        sid, nonce, method = data.get("session_id"), data.get("nonce"), data.get("method")
+        if not (isinstance(sid, str) and 16 <= len(sid) <= 128 and isinstance(nonce, str) and 8 <= len(nonce) <= 128):
+            raise AssuranceError("invalid_payload", 400)
+        # Contract (definit de acest repo; un provider real are nevoie de un adaptor care il produce):
+        #   {"session_id", "nonce", "method"?, "threshold": 16|18, "threshold_met": <bool strict>}
+        # Forma veche {"over_18": bool} == prag 18. `threshold_met` trebuie sa fie EXACT boolean: "true"/1/"yes" NU.
+        if "threshold" in data or "threshold_met" in data:
+            thr, met = data.get("threshold"), data.get("threshold_met")
+            if isinstance(thr, bool) or thr not in (16, 18) or not isinstance(met, bool):
+                raise AssuranceError("invalid_payload", 400)
+            if "over_18" in data and (not isinstance(data["over_18"], bool) or (thr == 18 and data["over_18"] != met)):
+                raise AssuranceError("invalid_payload", 400)
+        elif isinstance(data.get("over_18"), bool):
+            thr, met = 18, data["over_18"]
+        else:
+            raise AssuranceError("invalid_payload", 400)
+        return AssuranceResult(sid, met, self.name, str(method or "unspecified")[:40], nonce, thr)
 
 
 def get_provider() -> AgeAssuranceProvider:

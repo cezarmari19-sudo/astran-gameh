@@ -265,7 +265,10 @@ async def request_consent(db, child: dict, parent_email: Any, *, lang: str = "ro
                           app_base_url: Optional[str] = None, now: Optional[datetime] = None) -> dict:
     now = now or _now()
     info = AP.evaluate_access(child, now.date())
-    if info.band != AP.BAND_UNDER_16:
+    # sub 16: obligatoriu. 16-17 DECLARAT si neverificat: poate alege acordul parental ca alternativa la verificarea
+    # varstei (data declarata nu dovedeste ca are 16+). Adultul declarat nu are aceasta cale (verifica varsta).
+    if not (info.band == AP.BAND_UNDER_16 or (info.band == AP.BAND_16_17 and info.parental_option
+                                               and info.consent_eligibility == AP.ELIG_UNVERIFIED)):
         raise ParentalError("parental_consent_not_required", 409)
     if not isinstance(parent_email, str) or not _EMAIL_RX.match(parent_email.strip()):
         raise ParentalError("parent_email_invalid", 422)
@@ -455,7 +458,9 @@ def _parent_account_ok(parent_user: dict, now: datetime) -> None:
     if not parent_user.get("email_verified") or not parent_user.get("email"):
         raise ParentalError("parent_email_not_verified", 403)
     info = AP.evaluate_access(parent_user, now.date())
-    if info.band in (AP.BAND_UNDER_16, AP.BAND_16_17) or (info.band is None and not parent_user.get("age_assurance", {}).get("status") == AP.ASSURANCE_VERIFIED):
+    # cont de parinte = adult DOVEDIT (atestare 18 sigilata); o data de nastere declarata nu e suficienta, altfel un copil
+    # si-ar putea crea un al doilea cont "adult" si si-ar aproba singur consimtamantul.
+    if info.age_category != AP.CAT_ADULT:
         raise ParentalError("parent_account_not_adult", 403)
 
 

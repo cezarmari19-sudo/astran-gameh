@@ -69,6 +69,7 @@ except ImportError:
     _STUBBED = ["fastapi", "pydantic"]
 
 import realtime  # noqa: E402,F401  (dm_routes il importa pentru wiring-ul Redis)
+from astran_sandbox import test_support_age as AGE
 from astran_sandbox import chat_filter as cf  # noqa: E402
 from astran_sandbox import dm_routes  # noqa: E402
 
@@ -207,7 +208,7 @@ class DmRoutes(unittest.IsolatedAsyncioTestCase):
         self.users = {}
         for uid, age in (("alice", "adult_18"), ("bob", "adult_18"), ("mia", "under_18"), ("max", "under_18"),
                          ("carol", "adult_18"), ("dan", "adult_18")):
-            doc = {"user_id": uid, "username": uid, "age_category": age, "password_hash": "SECRET", "email": f"{uid}@x"}
+            doc = {"user_id": uid, "username": uid, **AGE.fields(uid, age), "password_hash": "SECRET", "email": f"{uid}@x"}
             self.users[uid] = doc
             self.db.users.docs.append(doc)
         # prietenii doar in aceeasi categorie de varsta (politica Adult<->Minor); dan: al doilea prieten adult al lui alice

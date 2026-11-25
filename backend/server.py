@@ -112,6 +112,7 @@ _register_limiter = SlidingWindowLimiter(10, 3600)    # conturi noi / ora / IP
 _login_ip_limiter = SlidingWindowLimiter(30, 600)     # incercari de login / 10 min / IP
 _report_limiter = SlidingWindowLimiter(10, 3600)      # rapoarte / ora / utilizator
 _friend_req_limiter = SlidingWindowLimiter(30, 3600)    # cereri de prietenie / ora / utilizator
+_unblock_limiter = SlidingWindowLimiter(60, 3600)       # deblocari / ora / utilizator
 _user_search_limiter = SlidingWindowLimiter(60, 60)     # cautari de utilizatori / minut / utilizator
 MAX_PENDING_FRIEND_REQUESTS = 100
 # Protectia Adult<->Minor (cereri de prietenie + DM) e ACTIVA implicit si se decide in astran_sandbox/contact_policy.py
@@ -623,6 +624,12 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
     if info.restricted and not AP.path_allowed_when_restricted(request.url.path):
         raise HTTPException(status_code=403, detail={"code": "account_restricted", "account_state": info.account_state,
                                                      "next_action": info.next_action})
+    # Cont LIMITAT (varsta DECLARATA, neverificata): functiile care cer consimtamant digital sunt refuzate pe backend,
+    # indiferent de ce trimite clientul. Restul (explorare, joc, setari, confidentialitate, DSA, refund) raman.
+    if info.limited and AP.path_requires_consent_features(request.url.path, request.method):
+        raise HTTPException(status_code=403, detail={"code": "age_verification_required", "account_state": info.account_state,
+                                                     "next_action": info.next_action,
+                                                     "parental_option": info.parental_option})
     return user
 
 
@@ -730,7 +737,11 @@ async def startup():
     demo_owner_id = "user_astran_demo"
     demo_pw = os.environ.get("ASTRAN_DEMO_PASSWORD")
     if os.environ.get("ASTRAN_SEED_DEMO_USER") == "1" and demo_pw:
-        if not await db.users.find_one({"user_id": demo_owner_id}, {"_id": 0}):
+        if await db.users.find_one({"user_id": demo_owner_id}, {"_id": 0}):
+            # un seed mai vechi nu are sigiliu => nu mai e recunoscut ca adult; il resigilam (operatorul a pornit seed-ul explicit)
+            await db.users.update_one({"user_id": demo_owner_id}, {"$set": {"age_assurance": AP.sealed_assurance(
+                demo_owner_id, threshold=18, provider="operator_seed", method="operator_seed", verified_at=now_utc(), ref="operator_seed")}})
+        else:
             await db.users.insert_one({
                 "user_id": demo_owner_id,
                 "email": "demo@astran.game",
@@ -740,7 +751,8 @@ async def startup():
                 "avatar_url": None,
                 "age_category": "adult_18",
                 # cont seed de operator (dev): NU e o verificare de varsta reala; marcat explicit ca atare
-                "age_assurance": {"status": "verified", "provider": "operator_seed", "threshold": 18, "method": "operator_seed"},
+                "age_assurance": AP.sealed_assurance(demo_owner_id, threshold=18, provider="operator_seed",
+                                                     method="operator_seed", verified_at=now_utc(), ref="operator_seed"),
                 "age_locked": True,
                 "astrans_balance": 10000,
                 "language": "ro",
@@ -1288,7 +1300,7 @@ async def search_users(q: str = "", current=Depends(get_current_user)):
         {"_id": 0, "password_hash": 0},
     ).limit(20)
     # `contact_restricted`: doar un indiciu pentru UX (ascunde butonul de cerere); serverul il impune oricum la /friends/request.
-    users = [{**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(current, u)}
+    users = [{**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(AP.derive_category_doc(current), AP.derive_category_doc(u))}
              for u in await cursor.to_list(20) if u["user_id"] != current["user_id"]]
     return {"users": users}
 
@@ -1300,7 +1312,7 @@ async def get_user_public(user_id: str, current=Depends(get_current_user)):
     u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user": {**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(current, u)}}
+    return {"user": {**_user_public_minimal(u), "contact_restricted": not contact_policy.users_contact_allowed(AP.derive_category_doc(current), AP.derive_category_doc(u))}}
 
 
 def _game_defaults(doc: dict) -> dict:
@@ -2685,20 +2697,29 @@ async def remove_friend(body: FriendRequestBody, current=Depends(get_current_use
 
 @api.post("/friends/block")
 async def block_user(body: FriendRequestBody, current=Depends(get_current_user)):
-    if body.target_user_id == current["user_id"]:
-        raise HTTPException(status_code=400, detail="Cannot block yourself")
-    a, b = _pair(current["user_id"], body.target_user_id)
-    await db.friendships.delete_one({"user_a": a, "user_b": b})
-    await db.friend_requests.delete_many({"$or": [
-        {"from_id": current["user_id"], "to_id": body.target_user_id},
-        {"from_id": body.target_user_id, "to_id": current["user_id"]},
-    ]})
-    await db.blocks.update_one(
-        {"blocker_id": current["user_id"], "blocked_id": body.target_user_id},
-        {"$setOnInsert": {"blocker_id": current["user_id"], "blocked_id": body.target_user_id, "since": now_utc()}},
-        upsert=True,
-    )
-    return {"ok": True}
+    try:
+        return await FRIENDS.block_user(db, current["user_id"], body.target_user_id, now_utc)
+    except FRIENDS.FriendError as e:
+        raise _friend_http(e)
+
+
+@api.get("/friends/blocked")
+async def list_blocked_users(current=Depends(get_current_user)):
+    """Utilizatorii blocati de contul curent: doar id / username / display_name / avatar_url."""
+    return await FRIENDS.list_blocked(db, current["user_id"])
+
+
+@api.post("/friends/unblock")
+async def unblock_user(body: FriendRequestBody, current=Depends(get_current_user)):
+    """Ridica blocarea facuta de contul curent. Nu readauga prietenia si nu trimite cereri (vezi FRIENDS.unblock_user)."""
+    wait = _unblock_limiter.hit(current["user_id"])
+    if wait is not None:
+        raise _too_many(wait)
+    try:
+        target_id = FRIENDS.clean_user_id(body.target_user_id)
+        return await FRIENDS.unblock_user(db, current["user_id"], target_id)
+    except FRIENDS.FriendError as e:
+        raise _friend_http(e)
 
 
 @api.get("/wallet/balance")

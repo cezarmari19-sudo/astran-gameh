@@ -1,0 +1,144 @@
+ASTRAN GAME — PRIVACY POLICY
+
+Version: 1.1
+Status: DRAFT — NEEDS COMPLETION (see the markers [TO BE COMPLETED] below; this document must not be presented as final while any marker remains)
+Effective date: [TO BE COMPLETED: effective date]
+Controller: [TO BE COMPLETED: legal name, registration number and registered address of the operator]
+Privacy contact e-mail: [TO BE COMPLETED: privacy e-mail address]
+
+
+1. WHO WE ARE AND WHAT THIS POLICY COVERS
+
+Astran Game ("Astran", "we") is a platform for creating, publishing and playing games and other user-generated content. This policy explains what personal data the Astran app and its servers process, why, on what legal basis, who receives it, how long it is kept and what rights you have (Regulation (EU) 2016/679, "GDPR", Articles 5, 12-14).
+
+Astran does not use advertising, behavioural profiling, analytics or crash-reporting SDKs, does not train AI models on user data and does not sell or license personal data. If this changes, this policy will be updated before the change takes effect.
+
+
+2. DATA WE PROCESS, PURPOSES AND LEGAL BASIS
+
+2.1. Account and sign-in
+Data: e-mail address, username, display name, password (stored only as a salted hash), preferred language, account ID, creation and update dates, e-mail verification status, profile picture reference, Astrans balance, session tokens (valid 7 days), password-reset and e-mail verification codes (short-lived), and, if you register a passkey/biometric sign-in (WebAuthn), the credential's public key and name (your fingerprint or face data stays on your device and is not received by us). If you sign in with Google, we receive your e-mail, name and profile picture through an authentication broker (see section 4).
+Purpose: create and secure your account, authenticate you, deliver the service.
+Legal basis: performance of the contract (Art. 6(1)(b)); security of the service (Art. 6(1)(f)).
+
+2.2. Age and parental consent
+Data: date of birth (stored encrypted), age band/category, whether age assurance was completed; for users under 16, the e-mail address of the parent or guardian (stored encrypted), the parental decision, its date and technical records of the verification steps; single-use links sent to the parent are stored only as keyed hashes and expire. Records of age and parental-consent events are kept in a tamper-evident audit log using pseudonymised identifiers (no date of birth, e-mail or IP address).
+Purpose: apply age-appropriate protections, obtain and prove parental consent where required.
+Legal basis: legal obligation and protection of minors (Art. 6(1)(c)/(f)); consent of the holder of parental responsibility (Art. 8 GDPR).
+Optional providers: where an external provider is configured for 18+ age assurance or parental verification, you are redirected to it and we receive only a signed result. [TO BE COMPLETED: name of the provider(s) actually used, or confirmation that none is used]
+
+2.3. Games, avatar and creations
+Data: games, scripts, assets, 3D models, avatar and clothing configuration, items you publish or buy, recently played games, collaborator/tester roles, and presence in a game session (expires automatically after about 60 seconds of inactivity). Movement and in-game events are relayed in real time to other players in the same session.
+Purpose: operate multiplayer games, Studio and the shop.
+Legal basis: contract (Art. 6(1)(b)).
+
+2.4. Chat and messages
+- In-game chat is relayed to players of the same session and kept only in a short in-memory buffer; it is stored only if it is reported.
+- Group chat messages and private (direct) messages between friends are stored on our servers. For senders under 18, the unfiltered original text of direct messages is not stored.
+- For users under 18, messages are filtered automatically by fixed word/phrase rules (no AI); filtered text is what minors receive.
+- Messages may be reviewed by moderators when reported.
+Purpose: provide messaging, protect minors, moderate abuse.
+Legal basis: contract (Art. 6(1)(b)); legitimate interest in safety (Art. 6(1)(f)); legal obligations (Digital Services Act).
+
+2.5. Friends, groups and social features
+Data: friend list and requests, blocked users, groups, memberships, roles, mute status.
+Purpose and legal basis: provide the social features (Art. 6(1)(b)).
+
+2.6. Reports and moderation
+Data: reports you submit or that concern you, message context and evidence attached to a report, moderator decisions and statements of reasons, appeals and notifications, audit records of moderator actions, and messages you send through the contact form (name, e-mail, subject, message). Moderation decisions are taken by people; automated tools may only help detect content.
+Purpose: handle reports, enforce rules, give reasons and appeals, answer requests.
+Legal basis: legal obligation (Art. 6(1)(c)); legitimate interest in a safe platform (Art. 6(1)(f)).
+
+2.7. Purchases and virtual currency
+Data: Astrans transactions (ledger), purchases of shop/clothing items, purchases of Astrans packages (provider reference, amount, status), refund requests and decisions, withdrawal/consumer-rights records. We do not receive or store full payment-card numbers: payments are processed by Google Play, Apple or Stripe, and we receive identifiers and status, and we send the purchase token/receipt to the provider to verify it.
+Purpose: process payments, prevent fraud, accounting, refunds, consumer rights.
+Legal basis: contract (Art. 6(1)(b)); legal obligations such as accounting (Art. 6(1)(c)); fraud prevention (Art. 6(1)(f)).
+
+2.8. Security, logs and abuse prevention
+Data: IP address in security-event records (for example password reset, project deletion or recovery) and for rate limiting; failed-attempt counters; revoked-token records; server logs with technical request data (access tokens are masked).
+Purpose: protect accounts, detect abuse and fraud.
+Legal basis: legitimate interest (Art. 6(1)(f)).
+
+2.9. Consent records and optional marketing consent
+We store proof of which version of the Terms and of this Policy you accepted or read (version, date, fingerprint of the text; no IP address or device data). Users aged 16 or over may give optional consent to marketing e-mails; it is not needed to use Astran and can be withdrawn in Settings at any time. Legal basis: legal obligation / legitimate interest in proving compliance (Art. 6(1)(c)/(f)); consent for marketing (Art. 6(1)(a)).
+
+2.10. Data we do not collect
+Astran does not request access to your microphone, camera or location, does not use device advertising identifiers, push notifications, analytics or advertising SDKs, and does not offer voice or video chat.
+
+
+3. AUTOMATED DECISIONS
+
+Astran takes no decision based solely on automated processing that produces legal or similarly significant effects on you (Art. 22 GDPR). The automatic chat filter for users under 18 masks words or messages according to fixed rules; you may report or contest a result through the contact form.
+
+
+4. RECIPIENTS
+
+We do not sell or license personal data. Data is disclosed only to:
+- infrastructure providers hosting the servers, database and (if enabled) real-time messaging cache [TO BE COMPLETED: names and locations];
+- an authentication broker and Google, for "Sign in with Google" (Emergent authentication service and Google);
+- Google Play, Apple and Stripe, for payment verification, refunds and reversals;
+- an e-mail delivery provider used to send verification, password-reset and parental e-mails [TO BE COMPLETED: provider];
+- age-assurance and parental-verification providers, only if configured (see 2.2);
+- parents or guardians of under-16 users, for the data needed to take their decision;
+- competent authorities, courts and other parties where required by law;
+- other users, for the content you choose to make visible (username, display name, avatar, games, chat messages).
+Providers act as processors under our instructions, except where they act as independent controllers (for example Google, Apple, Stripe for their own services).
+
+
+5. INTERNATIONAL TRANSFERS
+
+Some recipients (for example Google, Apple, Stripe, hosting providers) may process data outside the EEA. [TO BE COMPLETED: for each transfer, the safeguard relied on — adequacy decision, standard contractual clauses or other — and where to obtain a copy.]
+
+
+6. RETENTION
+
+Data is kept while your account exists, unless a shorter period is stated. Current technical periods:
+- sessions: 7 days; password-reset and e-mail verification codes: until they expire; presence in a game: about 60 seconds;
+- data-export archives: automatically deleted after 24 hours;
+- items in the project trash: permanently deleted after 30 days;
+- age-assurance sessions: deleted automatically within 24 hours; single-use parental links: expire (7 days to decide, 30 days to claim);
+- security-event records of active accounts are currently not deleted on a fixed schedule.
+After you delete your account, data that must be kept is pseudonymised and removed when the period ends: real-money purchase records 5 years (accounting/anti-fraud), consent proof 3 years, moderation reports 365 days, security records 365 days (without IP). These periods are the platform's current settings. [TO BE COMPLETED: operator to confirm these periods and their legal justification]
+Backups: [TO BE COMPLETED: backup retention]
+
+
+7. DELETING YOUR ACCOUNT
+
+You can delete your account in Settings (re-authentication and explicit confirmation required). Sessions are revoked, your friends, blocks, settings, avatar, owned games, models, collaborations and recently played data are deleted; group ownership is transferred or the group is removed; direct messages are deleted or your side pseudonymised; shop items that others have bought are delisted and anonymised; records listed in section 6 are pseudonymised and kept for the stated periods. Your published messages in groups reported to moderators may be retained in pseudonymised form until the moderation period ends.
+
+
+8. CHILDREN AND MINORS
+
+- Users must give their date of birth at registration; the age band cannot be raised afterwards without an age-assurance result.
+- Under 16: the account stays restricted until a parent or guardian gives consent through the verification flow; parents can view, withdraw consent and request data actions through the parental panel.
+- Under 18: filtered chat, no storage of unfiltered direct-message text, restricted contact with adults, and no optional consent-based processing under 16.
+- 18+ access requires age assurance by an external provider; without one, 18+ features stay locked.
+
+
+9. YOUR RIGHTS AND HOW TO EXERCISE THEM
+
+You have the rights of access, rectification, erasure, restriction, portability and objection, and the right to withdraw consent at any time without affecting earlier processing (Art. 15-21, 7(3) GDPR).
+- Access and portability: Settings › Privacy and security › Your data › Download Your Data (ZIP archive).
+- Erasure: Settings › Privacy and security (account deletion).
+- Rectification and preferences: profile and Settings; consent management in Settings.
+- Anything else: write to the privacy e-mail address above. We reply within one month (extendable by two months for complex requests).
+You may lodge a complaint with the Romanian National Supervisory Authority for Personal Data Processing (ANSPDCP, www.dataprotection.ro) or with the authority of your country of residence. Providing the data in 2.1 and 2.2 is necessary to create an account; without it we cannot provide the service.
+
+
+10. COOKIES AND LOCAL STORAGE
+
+The mobile app does not use cookies. It stores your session token and settings on your device (secure storage / local storage) to keep you signed in and remember preferences. The web version uses browser local storage for the same purpose. No tracking or advertising cookies or similar technologies are used.
+
+
+11. CHANGES
+
+Material changes are published as a new version; you may be asked to read and accept it again.
+
+
+12. CONTACT
+
+Controller: [TO BE COMPLETED: legal name and address]
+E-mail: [TO BE COMPLETED: privacy e-mail]
+Data protection officer (if appointed): [TO BE COMPLETED: name/contact or "none appointed"]
+
+END OF THE PRIVACY POLICY

@@ -76,3 +76,52 @@ def users_contact_allowed(user_a: Optional[dict], user_b: Optional[dict],
     if user_a is None or user_b is None:
         return False
     return contact_allowed(user_a.get("age_category"), user_b.get("age_category"), environ)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# GRUPURI + CHAT (aceeasi politica, aceeasi sursa de adevar). Spre deosebire de prietenii/DM de mai sus (unde lipsa
+# categoriei = minor, fail-closed), aici avem o stare TREI-valorica: `under_18` | `adult_18` | None (necunoscuta).
+# Un cont cu varsta necunoscuta NU e presupus nici adult, nici minor: nu intra in grupuri si nu comunica deloc
+# prin chat (grup / joc) - nu exista valoare implicita nesigura.
+# ---------------------------------------------------------------------------------------------------------------
+MINOR = "under_18"
+VALID_CATEGORIES = frozenset({MINOR, ADULT})
+
+CODE_AGE_UNKNOWN = "age_category_unknown"
+CODE_AGE_MISMATCH = "contact_restricted"            # acelasi cod stabil/generic ca in DM: nu dezvaluie care parte e minor
+CODE_GROUP_REVIEW = "group_age_review_required"     # grup mostenit, cu categorie nerezolvata (vezi group_age_migration)
+
+MESSAGES = {
+    CODE_AGE_UNKNOWN: "Your account does not have a verified age category yet, so this feature is unavailable.",
+    CODE_AGE_MISMATCH: DENIED_MESSAGE,
+    CODE_GROUP_REVIEW: "This Group is under a safety review and is not accepting new activity right now.",
+}
+
+
+def category_of(value: Any) -> Optional[str]:
+    """Categoria STRICTA: exact 'under_18' sau 'adult_18'; orice altceva (lipsa, None, '', 'ADULT_18', 'adult', tip
+    gresit) => None = necunoscuta. NU se intoarce niciodata o valoare presupusa."""
+    return value if isinstance(value, str) and value in VALID_CATEGORIES else None
+
+
+def user_category(user: Optional[dict]) -> Optional[str]:
+    """Categoria unui document de utilizator din DB (None daca utilizatorul lipseste sau categoria e necunoscuta)."""
+    return category_of(user.get("age_category")) if isinstance(user, dict) else None
+
+
+def same_group_allowed(category_a: Any, category_b: Any, environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Pot doua categorii sa coexiste intr-un grup / sa comunice in chat? Intoarce None daca da, altfel CODUL refuzului.
+    Necunoscuta (oricare parte) => refuz CODE_AGE_UNKNOWN, INDIFERENT de variabila de mediu (nu exista un
+    comportament sigur de presupus). Adult<->minor => refuz CODE_AGE_MISMATCH (cu aceeasi regula `contact_allowed`
+    ca la DM/prietenii, deci inclusiv acelasi intrerupator explicit)."""
+    a, b = category_of(category_a), category_of(category_b)
+    if a is None or b is None:
+        return CODE_AGE_UNKNOWN
+    return None if contact_allowed(a, b, environ) else CODE_AGE_MISMATCH
+
+
+def chat_allowed(sender_category: Any, recipient_category: Any, environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Comoditate booleana pentru livrarea mesajelor (grup / joc): True doar daca ambele categorii sunt cunoscute
+    si compatibile."""
+    return same_group_allowed(sender_category, recipient_category, environ) is None
+

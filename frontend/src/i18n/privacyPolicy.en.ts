@@ -1,551 +1,146 @@
+// GENERAT din backend/legal/privacy_policy/1.1.en.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
 export const PRIVACY_POLICY_EN = `ASTRAN GAME — PRIVACY POLICY
 
-Version: 1.0
-Effective date: [DATE — REPLACE WHEN AVAILABLE]
-Controller: [LEGAL COMPANY NAME — REPLACE WHEN AVAILABLE]
-Privacy e-mail: [EMAIL — REPLACE WHEN AVAILABLE]
-Website: [WEBSITE — REPLACE WHEN AVAILABLE]
+Version: 1.1
+Status: DRAFT — NEEDS COMPLETION (see the markers [TO BE COMPLETED] below; this document must not be presented as final while any marker remains)
+Effective date: [TO BE COMPLETED: effective date]
+Controller: [TO BE COMPLETED: legal name, registration number and registered address of the operator]
+Privacy contact e-mail: [TO BE COMPLETED: privacy e-mail address]
 
 
-1. ABOUT THIS PRIVACY POLICY
+1. WHO WE ARE AND WHAT THIS POLICY COVERS
 
-Astran Game ("Astran", "we", "us" or "the platform") is a platform for creating, publishing, discovering and using games and other user-generated content.
+Astran Game ("Astran", "we") is a platform for creating, publishing and playing games and other user-generated content. This policy explains what personal data the Astran app and its servers process, why, on what legal basis, who receives it, how long it is kept and what rights you have (Regulation (EU) 2016/679, "GDPR", Articles 5, 12-14).
 
-This Privacy Policy explains:
+Astran does not use advertising, behavioural profiling, analytics or crash-reporting SDKs, does not train AI models on user data and does not sell or license personal data. If this changes, this policy will be updated before the change takes effect.
 
-- what information we may collect;
-- how we may use that information;
-- how we may analyze that information;
-- how we may use information for moderation and security;
-- how we may use information to develop and train AI systems;
-- how we may use information for advertising and personalization;
-- how we may share information with providers and partners;
-- when and under what conditions we may sell, license or transfer certain data to third parties;
-- where data may be processed;
-- what may happen to data after an account is deleted.
 
-Astran may operate internationally, and user data may be processed in countries other than the one where the user resides.
+2. DATA WE PROCESS, PURPOSES AND LEGAL BASIS
 
+2.1. Account and sign-in
+Data: e-mail address, username, display name, password (stored only as a salted hash), preferred language, account ID, creation and update dates, e-mail verification status, profile picture reference, Astrans balance, session tokens (valid 7 days), password-reset and e-mail verification codes (short-lived), and, if you register a passkey/biometric sign-in (WebAuthn), the credential's public key and name (your fingerprint or face data stays on your device and is not received by us). If you sign in with Google, we receive your e-mail, name and profile picture through an authentication broker (see section 4).
+Purpose: create and secure your account, authenticate you, deliver the service.
+Legal basis: performance of the contract (Art. 6(1)(b)); security of the service (Art. 6(1)(f)).
 
-2. USER CATEGORIES
+2.2. Age and parental consent
+Data: date of birth (stored encrypted), age band/category, whether age assurance was completed; for users under 16, the e-mail address of the parent or guardian (stored encrypted), the parental decision, its date and technical records of the verification steps; single-use links sent to the parent are stored only as keyed hashes and expire. Records of age and parental-consent events are kept in a tamper-evident audit log using pseudonymised identifiers (no date of birth, e-mail or IP address).
+Purpose: apply age-appropriate protections, obtain and prove parental consent where required.
+Legal basis: legal obligation and protection of minors (Art. 6(1)(c)/(f)); consent of the holder of parental responsibility (Art. 8 GDPR).
+Optional providers: where an external provider is configured for 18+ age assurance or parental verification, you are redirected to it and we receive only a signed result. [TO BE COMPLETED: name of the provider(s) actually used, or confirmation that none is used]
 
-When creating an account, the user must select one of the following categories:
+2.3. Games, avatar and creations
+Data: games, scripts, assets, 3D models, avatar and clothing configuration, items you publish or buy, recently played games, collaborator/tester roles, and presence in a game session (expires automatically after about 60 seconds of inactivity). Movement and in-game events are relayed in real time to other players in the same session.
+Purpose: operate multiplayer games, Studio and the shop.
+Legal basis: contract (Art. 6(1)(b)).
 
+2.4. Chat and messages
+- In-game chat is relayed to players of the same session and kept only in a short in-memory buffer; it is stored only if it is reported.
+- Group chat messages and private (direct) messages between friends are stored on our servers. For senders under 18, the unfiltered original text of direct messages is not stored.
+- For users under 18, messages are filtered automatically by fixed word/phrase rules (no AI); filtered text is what minors receive.
+- Messages may be reviewed by moderators when reported.
+Purpose: provide messaging, protect minors, moderate abuse.
+Legal basis: contract (Art. 6(1)(b)); legitimate interest in safety (Art. 6(1)(f)); legal obligations (Digital Services Act).
 
-2.1. UNDER 18
+2.5. Friends, groups and social features
+Data: friend list and requests, blocked users, groups, memberships, roles, mute status.
+Purpose and legal basis: provide the social features (Art. 6(1)(b)).
 
-This category is intended for people aged 0 to 17.
+2.6. Reports and moderation
+Data: reports you submit or that concern you, message context and evidence attached to a report, moderator decisions and statements of reasons, appeals and notifications, audit records of moderator actions, and messages you send through the contact form (name, e-mail, subject, message). Moderation decisions are taken by people; automated tools may only help detect content.
+Purpose: handle reports, enforce rules, give reasons and appeals, answer requests.
+Legal basis: legal obligation (Art. 6(1)(c)); legitimate interest in a safe platform (Art. 6(1)(f)).
 
-Depending on the user's country and applicable law, Astran may require a parent's or guardian's consent before the user can use certain features or the platform.
+2.7. Purchases and virtual currency
+Data: Astrans transactions (ledger), purchases of shop/clothing items, purchases of Astrans packages (provider reference, amount, status), refund requests and decisions, withdrawal/consumer-rights records. We do not receive or store full payment-card numbers: payments are processed by Google Play, Apple or Stripe, and we receive identifiers and status, and we send the purchase token/receipt to the provider to verify it.
+Purpose: process payments, prevent fraud, accounting, refunds, consumer rights.
+Legal basis: contract (Art. 6(1)(b)); legal obligations such as accounting (Art. 6(1)(c)); fraud prevention (Art. 6(1)(f)).
 
-Where parental consent is required, Astran may request the e-mail address of a parent or guardian and may process the information necessary to verify and record that parental consent.
+2.8. Security, logs and abuse prevention
+Data: IP address in security-event records (for example password reset, project deletion or recovery) and for rate limiting; failed-attempt counters; revoked-token records; server logs with technical request data (access tokens are masked).
+Purpose: protect accounts, detect abuse and fraud.
+Legal basis: legitimate interest (Art. 6(1)(f)).
 
-Astran may apply additional restrictions to certain age groups within the under-18 user group, depending on applicable law, platform features and the safety measures in place.
+2.9. Consent records and optional marketing consent
+We store proof of which version of the Terms and of this Policy you accepted or read (version, date, fingerprint of the text; no IP address or device data). Users aged 16 or over may give optional consent to marketing e-mails; it is not needed to use Astran and can be withdrawn in Settings at any time. Legal basis: legal obligation / legitimate interest in proving compliance (Art. 6(1)(c)/(f)); consent for marketing (Art. 6(1)(a)).
 
+2.10. Data we do not collect
+Astran does not request access to your microphone, camera or location, does not use device advertising identifiers, push notifications, analytics or advertising SDKs, and does not offer voice or video chat.
 
-2.2. 18+
 
-This category is intended for people who are at least 18 years old.
+3. AUTOMATED DECISIONS
 
-Astran may apply different rules, features, restrictions and verification mechanisms depending on the age category and applicable law.
+Astran takes no decision based solely on automated processing that produces legal or similarly significant effects on you (Art. 22 GDPR). The automatic chat filter for users under 18 masks words or messages according to fixed rules; you may report or contest a result through the contact form.
 
-Selecting an age category does not replace any verification or parental consent that may be required under applicable law.
 
+4. RECIPIENTS
 
-3. DATA WE MAY COLLECT
+We do not sell or license personal data. Data is disclosed only to:
+- infrastructure providers hosting the servers, database and (if enabled) real-time messaging cache [TO BE COMPLETED: names and locations];
+- an authentication broker and Google, for "Sign in with Google" (Emergent authentication service and Google);
+- Google Play, Apple and Stripe, for payment verification, refunds and reversals;
+- an e-mail delivery provider used to send verification, password-reset and parental e-mails [TO BE COMPLETED: provider];
+- age-assurance and parental-verification providers, only if configured (see 2.2);
+- parents or guardians of under-16 users, for the data needed to take their decision;
+- competent authorities, courts and other parties where required by law;
+- other users, for the content you choose to make visible (username, display name, avatar, games, chat messages).
+Providers act as processors under our instructions, except where they act as independent controllers (for example Google, Apple, Stripe for their own services).
 
-Depending on how the platform is used and which features are available, Astran may collect the following categories of information.
 
+5. INTERNATIONAL TRANSFERS
 
-3.1. ACCOUNT DATA
+Some recipients (for example Google, Apple, Stripe, hosting providers) may process data outside the EEA. [TO BE COMPLETED: for each transfer, the safeguard relied on — adequacy decision, standard contractual clauses or other — and where to obtain a copy.]
 
-We may collect:
 
-- e-mail address;
-- username;
-- display name;
-- password;
-- age category;
-- date of birth or other age-related information, when required;
-- account ID;
-- account creation date;
-- account settings;
-- account preferences.
+6. RETENTION
 
-Passwords are not intended to be stored in plain text and must be protected with appropriate cryptographic methods, such as hashing with a modern algorithm.
+Data is kept while your account exists, unless a shorter period is stated. Current technical periods:
+- sessions: 7 days; password-reset and e-mail verification codes: until they expire; presence in a game: about 60 seconds;
+- data-export archives: automatically deleted after 24 hours;
+- items in the project trash: permanently deleted after 30 days;
+- age-assurance sessions: deleted automatically within 24 hours; single-use parental links: expire (7 days to decide, 30 days to claim);
+- security-event records of active accounts are currently not deleted on a fixed schedule.
+After you delete your account, data that must be kept is pseudonymised and removed when the period ends: real-money purchase records 5 years (accounting/anti-fraud), consent proof 3 years, moderation reports 365 days, security records 365 days (without IP). These periods are the platform's current settings. [TO BE COMPLETED: operator to confirm these periods and their legal justification]
+Backups: [TO BE COMPLETED: backup retention]
 
-Passwords will not be sold or provided to third parties in their original form.
 
+7. DELETING YOUR ACCOUNT
 
-4. DEVICE AND CONNECTION DATA
+You can delete your account in Settings (re-authentication and explicit confirmation required). Sessions are revoked, your friends, blocks, settings, avatar, owned games, models, collaborations and recently played data are deleted; group ownership is transferred or the group is removed; direct messages are deleted or your side pseudonymised; shop items that others have bought are delisted and anonymised; records listed in section 6 are pseudonymised and kept for the stated periods. Your published messages in groups reported to moderators may be retained in pseudonymised form until the moderation period ends.
 
-Astran may collect:
 
-- IP address;
-- device type;
-- device manufacturer and model;
-- operating system version;
-- app version;
-- device identifiers;
-- application identifiers;
-- network information;
-- browser information, if the platform is accessed through a browser;
-- performance information;
-- crashes;
-- errors;
-- technical logs;
-- security events;
-- information necessary to prevent fraud and abuse.
+8. CHILDREN AND MINORS
 
-Astran does not intentionally collect the user's approximate location, unless this is changed in the future and properly communicated to users.
+- Users must give their date of birth at registration; the age band cannot be raised afterwards without an age-assurance result.
+- Under 16: the account stays restricted until a parent or guardian gives consent through the verification flow; parents can view, withdraw consent and request data actions through the parental panel.
+- Under 18: filtered chat, no storage of unfiltered direct-message text, restricted contact with adults, and no optional consent-based processing under 16.
+- 18+ access requires age assurance by an external provider; without one, 18+ features stay locked.
 
 
-5. AVATAR AND IN-GAME IDENTITY DATA
-
-Astran may collect and process:
-
-- the user's avatar;
-- avatar clothing;
-- accessories;
-- character models;
-- animations;
-- avatar modifications;
-- owned items;
-- created items;
-- published items;
-- avatar configuration;
-- modification history;
-- identifiers of objects associated with the account.
-
-This data may be used for operating the platform, displaying the profile and avatar, multiplayer, personalization, moderation, analytics, product development and other purposes described in this policy.
-
-
-6. GAME AND USER ACTIVITY DATA
-
-When the user uses Astran Game, we may collect information about their activity.
-
-This may include:
-
-- games accessed;
-- games played;
-- session duration;
-- time spent in each game;
-- actions performed in-game;
-- character movements;
-- the character's position in the game world;
-- movement direction;
-- speed;
-- jumps;
-- interactions with objects;
-- objects used;
-- objects collected;
-- in-game events;
-- game history;
-- multiplayer interactions;
-- actions performed in Studio;
-- actions performed in the editor;
-- games created;
-- changes made to games;
-- models created;
-- avatars created;
-- published content;
-- deleted content;
-- information about game performance.
+9. YOUR RIGHTS AND HOW TO EXERCISE THEM
 
-Astran may decide that certain categories of data are kept for a specific period, anonymized, aggregated, deleted, or not kept at all, depending on the platform's needs, the feature involved and legal requirements.
+You have the rights of access, rectification, erasure, restriction, portability and objection, and the right to withdraw consent at any time without affecting earlier processing (Art. 15-21, 7(3) GDPR).
+- Access and portability: Settings › Privacy and security › Your data › Download Your Data (ZIP archive).
+- Erasure: Settings › Privacy and security (account deletion).
+- Rectification and preferences: profile and Settings; consent management in Settings.
+- Anything else: write to the privacy e-mail address above. We reply within one month (extendable by two months for complex requests).
+You may lodge a complaint with the Romanian National Supervisory Authority for Personal Data Processing (ANSPDCP, www.dataprotection.ro) or with the authority of your country of residence. Providing the data in 2.1 and 2.2 is necessary to create an account; without it we cannot provide the service.
 
 
-7. TEXT CHAT
+10. COOKIES AND LOCAL STORAGE
 
-Astran may process messages and other text communications made through the platform.
+The mobile app does not use cookies. It stores your session token and settings on your device (secure storage / local storage) to keep you signed in and remember preferences. The web version uses browser local storage for the same purpose. No tracking or advertising cookies or similar technologies are used.
 
-This may include:
 
-- in-game chat;
-- public chat;
-- private messages;
-- messages between friends;
-- communications between users;
-- content transmitted through the platform's social features.
+11. CHANGES
 
-Messages may be:
+Material changes are published as a new version; you may be asked to read and accept it again.
 
-- automatically analyzed;
-- analyzed by AI systems;
-- moderated;
-- reported;
-- stored;
-- kept for different periods of time;
-- deleted;
-- anonymized;
-- used for security;
-- used to improve the services;
-- used for research and development;
-- used to develop and train AI systems, where there is an appropriate legal basis;
-- used for other purposes permitted by applicable law.
 
-Depending on the feature and the platform's needs, some conversations may not be kept at all, while others may be kept for a longer period.
+12. CONTACT
 
+Controller: [TO BE COMPLETED: legal name and address]
+E-mail: [TO BE COMPLETED: privacy e-mail]
+Data protection officer (if appointed): [TO BE COMPLETED: name/contact or "none appointed"]
 
-8. VOICE CHAT AND AUDIO DATA
-
-If the user grants the app permission to access the microphone and uses a feature that requires it, Astran may process audio and voice data.
-
-This may include:
-
-- the user's voice;
-- audio recordings;
-- audio transmissions;
-- voice conversations;
-- metadata associated with voice communication;
-- technical information about the audio transmission.
-
-Depending on the feature, settings and needs, certain audio communications may:
-
-- not be recorded;
-- be processed temporarily;
-- be retained;
-- be deleted after a certain period;
-- be analyzed for moderation;
-- be used for security;
-- be used to develop the service;
-- be used to develop or train AI systems, where this is permitted by law and the applicable legal basis;
-- be used for other purposes permitted by applicable law.
-
-If the user does not grant the operating system permission for the microphone, Astran cannot access the microphone through that feature.
-
-
-9. CAMERA AND VIDEO DATA
-
-If Astran introduces features in the future that require camera access, the app may request the operating system's permission.
-
-If the user grants the permission and uses that feature, Astran may process:
-
-- images;
-- video;
-- video transmissions;
-- recordings;
-- associated technical information;
-- content generated through the camera.
-
-Depending on the feature, this data may be processed temporarily, recorded, retained, analyzed, moderated, used to develop the service, or used for other purposes permitted by applicable law.
-
-Without the necessary operating system permission, Astran cannot access the camera through that feature.
-
-
-10. FRIENDS AND SOCIAL INTERACTIONS
-
-We may collect information about:
-
-- friends list;
-- friend requests;
-- blocked users;
-- reported users;
-- deactivated or removed users;
-- interactions between users;
-- groups;
-- roles;
-- administrators;
-- members;
-- social activity associated with the account.
-
-
-11. REPORTS, BLOCKS AND MODERATION
-
-If a user reports, blocks or deactivates another user, we may collect and retain the information necessary to:
-
-- investigate the report;
-- enforce the rules;
-- prevent abuse;
-- ensure security;
-- detect fraud;
-- resolve disputes;
-- apply sanctions;
-- protect users.
-
-
-12. PURCHASES AND FINANCIAL INFORMATION
-
-Astran may collect:
-
-- purchase history;
-- items purchased;
-- virtual currency purchased;
-- subscriptions;
-- transactions;
-- refunds;
-- payment method information;
-- transaction identifiers;
-- information provided by payment processors.
-
-Full card details or other sensitive financial data may be processed by specialized payment processors, depending on the payment method used.
-
-Astran does not intend to sell data such as full card numbers or passwords.
-
-Instead, we may transmit the information necessary to payment processors and other authorized providers.
-
-
-13. DATA PROVIDED BY PARENTS OR GUARDIANS
-
-Where parental consent is required, Astran may collect from the parent or guardian:
-
-- e-mail address;
-- name, if required;
-- information necessary to verify the consent;
-- the date and time the consent was given;
-- information about the relationship with the minor, when required;
-- technical and administrative information associated with the verification process.
-
-This data may be used to verify, document and manage parental consent.
-
-
-14. HOW WE MAY USE DATA
-
-To the extent permitted by applicable law and depending on the relevant legal basis, Astran may use data for:
-
-- providing the platform;
-- operating games;
-- multiplayer;
-- accounts;
-- authentication;
-- security;
-- fraud prevention;
-- abuse prevention;
-- moderation;
-- enforcing the rules;
-- support;
-- troubleshooting;
-- product development;
-- analytics;
-- statistics;
-- research;
-- personalization;
-- recommendations;
-- advertising;
-- marketing;
-- performance measurement;
-- developing new features;
-- developing and training AI systems;
-- evaluating AI systems;
-- improving AI systems;
-- detecting problematic content;
-- detecting automated or fraudulent behavior;
-- protecting the platform;
-- complying with legal obligations;
-- other purposes permitted by applicable law.
-
-
-15. USE FOR AI
-
-Astran may use certain data collected through the platform for:
-
-- developing AI models;
-- training AI models;
-- evaluating AI models;
-- testing AI models;
-- improving AI models;
-- research;
-- developing AI-based products or services.
-
-Depending on the feature and the applicable legal basis, this data may include:
-
-- game data;
-- in-game behavior;
-- text conversations;
-- interactions;
-- created content;
-- audio data;
-- voice;
-- other technical data.
-
-Astran may use the data directly or through providers, partners, researchers or other authorized organizations.
-
-
-16. RESTRICTION ON CERTAIN AI USES OF VOICE
-
-Although Astran may allow certain data to be used for AI development, Astran does not authorize the use of voice data, vocal style or other voice-related data for developing AI systems specifically intended to:
-
-- generate pornographic content;
-- generate sexual deepfakes;
-- sexually simulate a person;
-- create a non-consensual sexual impersonation of a person;
-- create a romantic or intimate simulation presented as a relationship with the user;
-- other similar uses that Astran prohibits by contract or policy.
-
-This restriction may be included in contractual agreements with data recipients to enforce compliance with it.
-
-
-17. SALE AND LICENSING OF DATA
-
-To the extent permitted by law and the applicable legal basis, Astran may license, transfer, make available or sell certain data and information to third parties.
-
-These third parties may include:
-
-- companies;
-- providers;
-- business partners;
-- researchers;
-- developers;
-- organizations;
-- institutions;
-- other entities;
-- in certain situations, individuals.
-
-Data may be provided for purposes such as:
-
-- analytics;
-- research;
-- advertising;
-- marketing;
-- personalization;
-- AI;
-- software development;
-- security;
-- statistics;
-- commercial research;
-- product development;
-- commercial services;
-- other purposes permitted by applicable law.
-
-
-18. FURTHER TRANSMISSION BY RECIPIENTS
-
-To the extent permitted by law and the applicable agreements, a recipient of data may use the data received and may further transfer or license it.
-
-As a result, data may circulate among multiple organizations or individuals.
-
-Where Astran imposes contractual restrictions on certain uses, recipients must comply with those restrictions.
-
-Astran cannot guarantee how a third party will subsequently use data after a transfer has taken place, where that use is permitted by applicable law and contracts.
-
-
-19. SENSITIVE AND HIGH-RISK DATA
-
-Astran does not intend to routinely sell certain highly sensitive data, such as:
-
-- passwords;
-- full card numbers;
-- authentication keys;
-- secret tokens;
-- other security credentials.
-
-For other categories of personal data, the possibility of transfer, licensing or sale will depend on applicable law, the legal basis, and the consent required.
-
-
-20. INTERNATIONAL PROCESSING
-
-Astran may use providers and infrastructure located in:
-
-- Europe;
-- North America;
-- South America;
-- Asia;
-- Africa;
-- Australia and Oceania;
-- other regions.
-
-As a result, data may be transferred to or processed on continents other than the one where the user resides.
-
-For international transfers, Astran will apply the necessary legal mechanisms where required by applicable law.
-
-
-21. HOW LONG WE KEEP DATA
-
-Astran may retain different categories of data for different periods.
-
-Some data may be:
-
-- deleted quickly;
-- kept temporarily;
-- kept for as long as is necessary for the feature;
-- kept for security purposes;
-- kept for legal obligations;
-- anonymized;
-- aggregated;
-- kept in backup systems for a certain period.
-
-The retention period may vary depending on the type of data, the purpose for which it was collected, the feature used, legal obligations and other relevant circumstances.
-
-Astran does not guarantee that all data is deleted immediately after a feature stops being used.
-
-
-22. WHAT HAPPENS WHEN YOU DELETE YOUR ACCOUNT
-
-Deleting an account does not automatically mean that every copy of every piece of information associated with the account is immediately removed from all systems or from all recipients.
-
-Details about this will be presented in a separate Policy on account deletion and data retention.
-
-Depending on applicable law, certain data may remain necessary for:
-
-- legal obligations;
-- security;
-- fraud prevention;
-- dispute resolution;
-- financial records;
-- backups;
-- compliance with contractual obligations;
-- data already anonymized or aggregated;
-- data that has already been shared with a third party under conditions permitted by law.
-
-Deleting the account stops its use as an active service and, depending on the feature and applicable law, may stop the collection of new data associated with the account.
-
-Previously collected data may continue to exist in Astran's systems or in third-party systems where this is permitted by applicable law and agreements.
-
-Mandatory deletion rights and other rights provided for by applicable law will be respected.
-
-
-23. CHANGES TO THIS POLICY
-
-Astran may modify this Privacy Policy.
-
-If the changes are material, Astran may require the user to review and, where necessary, accept the new version before continuing to use certain services.
-
-For processing that requires new or separate consent, Astran will request the corresponding consent.
-
-
-24. MINOR USERS
-
-Astran applies additional measures when the user is a minor.
-
-This may include:
-
-- age verification;
-- requesting a parent's or guardian's e-mail;
-- obtaining parental consent;
-- limiting certain features;
-- limiting certain types of advertising;
-- limiting certain types of data sharing;
-- additional safety mechanisms.
-
-For child users, certain forms of selling or disclosing data may require separate parental consent or may be restricted by law.
-
-Rules applicable to minors may vary depending on the country where the user is located.
-
-
-25. COMPLIANCE WITH LAW
-
-Nothing in this Privacy Policy shall be interpreted as allowing Astran to carry out processing that is prohibited by applicable law.
-
-If local law grants the user additional protections, Astran will comply with those requirements to the extent applicable.
-
-In particular, for users in the EU and EEA, Astran will take into account the requirements of data protection law, including the principles of lawfulness, transparency, purpose limitation, data minimization, security and storage limitation.
-
-
-26. CONTACT
-
-For questions regarding this Privacy Policy:
-
-Controller:
-[LEGAL COMPANY NAME — REPLACE WHEN AVAILABLE]
-
-E-mail:
-[PRIVACY EMAIL — REPLACE WHEN AVAILABLE]
-
-Website:
-[WEBSITE — REPLACE WHEN AVAILABLE]
-
-Address:
-[LEGAL ADDRESS — REPLACE WHEN AVAILABLE]
-
-
-END OF THE PRIVACY POLICY`;
+END OF THE PRIVACY POLICY
+`;

@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("astran.legal")
 
 LANGS = ("ro", "en")
 DEFAULT_LANG = "en"
@@ -27,6 +31,16 @@ DEFAULT_LEGAL_DIR = Path(__file__).resolve().parent.parent / "legal"
 BASIS_CONTRACT = "contract"
 BASIS_NOTICE = "information_notice"
 BASIS_CONSENT = "consent"
+
+
+# Marcaje de completat (valori pe care trebuie sa le furnizeze administratorul). Un document care mai contine unul NU
+# poate fi prezentat ca final. Include si formulele vechi din Termeni (ToS 1.0/1.1).
+PLACEHOLDER_RE = re.compile(
+    r"\[[^\]\n]*(?:DE COMPLETAT|TO BE COMPLETED|REPLACE WHEN AVAILABLE|ÎNLOCUIEȘTE|OPERATOR_NAME|EMAIL_HERE)[^\]\n]*\]",
+    re.IGNORECASE)
+STATUS_FINAL = "final"
+STATUS_DRAFT = "draft_needs_completion"
+REQUIRE_FINAL_ENV = "ASTRAN_REQUIRE_FINAL_LEGAL_DOCS"
 
 
 class LegalDocsError(RuntimeError):
@@ -138,6 +152,39 @@ class LegalRegistry:
             return "accept"
         return "notice"
 
+    # ------------------------------------------------------------------ poarta de publicare
+    def placeholders(self, doc_type: str, version: str, lang: str) -> list[str]:
+        got = self.text(doc_type, version, lang)
+        return PLACEHOLDER_RE.findall(got[0]) if got else []
+
+    def status(self, doc_type: str, version: str) -> str:
+        """'final' DOAR daca manifestul spune asa SI textul nu mai contine marcaje de completat."""
+        meta = self.version_meta(doc_type, version) or {}
+        if meta.get("status") != STATUS_FINAL:
+            return STATUS_DRAFT
+        if any(self.placeholders(doc_type, version, l) for l in LANGS):
+            return STATUS_DRAFT
+        return STATUS_FINAL
+
+    def is_draft(self, doc_type: str, version: Optional[str] = None) -> bool:
+        return self.status(doc_type, version or self.current_version(doc_type)) != STATUS_FINAL
+
+    def publication_blockers(self) -> list[str]:
+        """Motive pentru care versiunea CURENTA a unui document nu poate fi prezentata drept finala."""
+        out: list[str] = []
+        for t in self.doc_types():
+            cur = self.current_version(t)
+            meta = self.version_meta(t, cur) or {}
+            if meta.get("status") != STATUS_FINAL:
+                out.append(f"{t}@{cur}: status={meta.get('status')!r} (asteptat 'final')")
+            for l in LANGS:
+                ph = self.placeholders(t, cur, l)
+                if ph:
+                    out.append(f"{t}@{cur} [{l}]: {len(ph)} marcaj(e) necompletate")
+            if meta.get("effective_date") in (None, ""):
+                out.append(f"{t}@{cur}: effective_date lipseste din manifest")
+        return out
+
     def summary_for(self, doc_type: str, version: str, lang: str) -> Optional[str]:
         meta = self.version_meta(doc_type, version) or {}
         return (meta.get("summary") or {}).get(lang) or (meta.get("summary") or {}).get(DEFAULT_LANG)
@@ -149,7 +196,14 @@ _registry: Optional[LegalRegistry] = None
 def get_registry() -> LegalRegistry:
     global _registry
     if _registry is None:
-        _registry = LegalRegistry()
+        reg = LegalRegistry()
+        blockers = reg.publication_blockers()
+        if blockers:
+            msg = "documente juridice NECESITA COMPLETARE: " + "; ".join(blockers)
+            if os.environ.get(REQUIRE_FINAL_ENV, "").strip().lower() in ("1", "true", "yes"):
+                raise LegalDocsError(msg + f" ({REQUIRE_FINAL_ENV}=1: pornirea este refuzata)")
+            log.error("%s - NU publica aplicatia in productie; seteaza %s=1 ca sa blochezi pornirea", msg, REQUIRE_FINAL_ENV)
+        _registry = reg
     return _registry
 
 

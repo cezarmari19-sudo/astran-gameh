@@ -35,6 +35,10 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AssuranceStartBody(_Strict):
+    threshold: Optional[int] = Field(default=None, description="16 sau 18; validat de server fata de starea contului")
+
+
 class DobBody(_Strict):
     date_of_birth: str = Field(max_length=32)
 
@@ -135,10 +139,12 @@ def make_age_router(get_current_user, db, *, client_ip: Callable[[Request], str]
         return AS.public_state(user, await PC.child_status(db, user))
 
     @router.post("/age/assurance/start")
-    async def assurance_start(current=Depends(get_current_user)):
+    async def assurance_start(body: Optional[AssuranceStartBody] = None, current=Depends(get_current_user)):
         _wait(_user_limiter, "as:" + current["user_id"])
         try:
-            return await AS.start_assurance(db, current, prov())
+            # pragul il valideaza SERVERUL fata de starea contului (16-17 => 16; 18+ => 18); clientul poate doar sa il
+            # restranga la o valoare permisa, niciodata sa o extinda
+            return await AS.start_assurance(db, current, prov(), threshold=body.threshold if body else None)
         except Exception as e:  # noqa: BLE001
             raise _err(e)
 

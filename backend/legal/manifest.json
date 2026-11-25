@@ -3,24 +3,25 @@
   "documents": {
     "privacy_policy": {
       "legal_basis": "information_notice",
-      "current": "1.0",
+      "current": "1.1",
       "versions": [
         {
-          "version": "1.0",
+          "version": "1.1",
           "effective_date": null,
+          "status": "draft_needs_completion",
           "requires_reacceptance": true,
           "summary": {
-            "ro": "Prima versiune.",
-            "en": "First version."
+            "ro": "Politică rescrisă după auditul codului: fără publicitate, fără antrenare IA, fără vânzare de date; descrie prelucrările reale (ciornă, necesită completare).",
+            "en": "Rewritten after a code audit: no advertising, no AI training, no sale of data; describes the real processing (draft, needs completion)."
           },
           "files": {
             "ro": {
-              "path": "privacy_policy/1.0.ro.txt",
-              "sha256": "245249054ff69700d1c597049c287a6f398785ae7eba002ee184346cd05d1a95"
+              "path": "privacy_policy/1.1.ro.txt",
+              "sha256": "ddc6840bf5a163ba1d747481cc877ab863de0fb5460806452ad91c5e2ef57de3"
             },
             "en": {
-              "path": "privacy_policy/1.0.en.txt",
-              "sha256": "8fa5445700add70cdd53efea24cd13746cb6ae9cd4ee2af8eb7014ba8898bc84"
+              "path": "privacy_policy/1.1.en.txt",
+              "sha256": "912fc5c8d7e69329265a13aac194b8f4621a8d3572dabfe327e6b51ca5328def"
             }
           }
         }

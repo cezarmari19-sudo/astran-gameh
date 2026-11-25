@@ -61,6 +61,7 @@ from __future__ import annotations
 
 from astran_sandbox import age_policy as _age_policy
 from astran_sandbox import age_guard as _age_guard
+from astran_sandbox import contact_policy as _cp
 import asyncio
 import json
 import logging
@@ -194,6 +195,9 @@ class _RoomMember:
     # chat_core o reverifica din DB la fiecare mesaj/livrare. chat_limiter: anti-spam per conexiune.
     is_adult: bool = False
     chat_limiter: Any = None
+    # POLITICA ADULT<->MINOR: categoria exacta ("under_18" | "adult_18") din DB la conectare; None = necunoscuta
+    # (nu presupunem nimic). Decide cine primeste campul liber `anim` (singurul text liber din `state`).
+    age_category: Optional[str] = None
 
 
 @dataclass
@@ -266,7 +270,32 @@ class RealtimeHub:
             if self.chat is not None:
                 await self.chat.relay_remote(r, payload)
             return
-        await fan_out([m.ws for m in list(r.members.values())], json.dumps(payload))
+        # `cat` = categoria expeditorului, pusa de procesul care a publicat; NU ajunge la clienti. Lipsa/invalida =>
+        # necunoscuta => nimeni nu primeste `anim`.
+        payload = dict(payload)
+        sender_cat = _cp.category_of(payload.pop("cat", None))
+        await _fan_out_state(list(r.members.values()), payload, sender_cat)
+
+
+def _split_by_category(members: list, sender_cat: Optional[str]) -> tuple[list, list]:
+    """(compatibili, restul): compatibil = ambele categorii cunoscute si permise de contact_policy."""
+    ok, other = [], []
+    for m in members:
+        (ok if _cp.chat_allowed(sender_cat, m.age_category) else other).append(m)
+    return ok, other
+
+
+async def _fan_out_state(members: list, payload: dict, sender_cat: Optional[str]) -> None:
+    """`state` contine `anim` = text liber (<=32 caractere): un canal de comunicare ocolit. Il livram doar
+    membrilor compatibili cu expeditorul (contact_policy); ceilalti primesc aceeasi stare FARA `anim`."""
+    if "anim" not in payload:
+        await fan_out([m.ws for m in members], json.dumps(payload))
+        return
+    ok, other = _split_by_category(members, sender_cat)
+    if ok:
+        await fan_out([m.ws for m in ok], json.dumps(payload))
+    if other:
+        await fan_out([m.ws for m in other], json.dumps({k: v for k, v in payload.items() if k != "anim"}))
 
 
 hub = RealtimeHub()
@@ -292,18 +321,24 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
 
     # ---- CHAT: accesul la date, injectat in ChatDispatcher (logica e in astran_sandbox/chat_core.py)
     async def chat_user_state(uid: str) -> Optional[dict]:
-        doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "age_category": 1, "chat_muted_until": 1})
+        doc = await db.users.find_one({"user_id": uid}, {**_age_policy.ACCESS_PROJECTION, "chat_muted_until": 1})
         if doc is None:
             return None
         until = doc.get("chat_muted_until")
         epoch = None
         if isinstance(until, datetime):
             epoch = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).timestamp()
-        return {"age_category": doc.get("age_category"), "chat_muted_until": epoch}
+        # categoria EFECTIVA (sigiliu verificat; None pentru cont limitat/neverificat => refuz in chat)
+        return {"age_category": _age_policy.effective_category(doc), "chat_muted_until": epoch}
 
     async def chat_recipient_ages(ids: list) -> dict:
-        rows = await db.users.find({"user_id": {"$in": ids}}, {"_id": 0, "user_id": 1, "age_category": 1}).to_list(len(ids))
-        return {r["user_id"]: r.get("age_category") == ADULT for r in rows}
+        rows = await db.users.find({"user_id": {"$in": ids}}, _age_policy.ACCESS_PROJECTION).to_list(len(ids))
+        # True = adult_18, False = under_18, None = categorie necunoscuta/invalida (=> nu primeste mesaje, nu trimite)
+        out: dict = {i: None for i in ids}
+        for r in rows:
+            cat = _cp.category_of(_age_policy.effective_category(r))
+            out[r["user_id"]] = None if cat is None else cat == ADULT
+        return out
 
     async def chat_blocked_with(uid: str, ids: list) -> set:
         rows = await db.blocks.find(
@@ -377,8 +412,9 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
         room.game_id = game_id
         member = _RoomMember(
             ws=websocket, user_id=user_id, username=username,
-            is_adult=user.get("age_category") == ADULT,   # din DB (resolve_user_from_token), nu de la client
+            is_adult=_age_policy.effective_category(user) == ADULT,   # derivat din DB (sigiliu), nu de la client
             chat_limiter=ChatLimiter(),
+            age_category=_cp.category_of(_age_policy.effective_category(user)),   # strict; None = necunoscuta/limitat
         )
         previous = room.members.get(user_id)
         room.members[user_id] = member
@@ -392,16 +428,24 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
 
         async def broadcast(payload: dict, except_user_id: Optional[str] = None) -> None:
             # concurent + timeout per client (vezi ws_fanout): un client lent nu mai blocheaza camera
-            await fan_out([o.ws for o in list(room.members.values()) if o.user_id != except_user_id],
-                          json.dumps(payload))
+            await _fan_out_state([o for o in list(room.members.values()) if o.user_id != except_user_id],
+                                 payload, member.age_category)
             # si catre membrii ACELEIASI instante, dar conectati la ALTE procese (daca Redis
             # e configurat) - fara asta, doi jucatori din aceeasi instanta, pe procese diferite,
             # nu s-ar vedea deloc (vezi LIMITAREA REALA #1 din docstring-ul fisierului).
             if hub.redis is not None:
-                await hub.redis.publish(instance_id, payload)
+                # `cat` e folosit doar de procesele-pereche ca sa aplice aceeasi politica pentru `anim`
+                await hub.redis.publish(instance_id, {**payload, "cat": member.age_category})
 
         try:
-            roster = [{"user_id": m.user_id, "username": m.username, **m.last_state} for m in room.members.values() if m.user_id != user_id]
+            roster = []
+            for m in room.members.values():
+                if m.user_id == user_id:
+                    continue
+                st = dict(m.last_state)
+                if not _cp.chat_allowed(m.age_category, member.age_category):
+                    st.pop("anim", None)   # text liber (anim) doar intre aceeasi categorie de varsta
+                roster.append({"user_id": m.user_id, "username": m.username, **st})
             await websocket.send_text(json.dumps({"t": "roster", "players": roster}))
             await broadcast({"t": "join", "user_id": user_id, "username": username}, except_user_id=user_id)
             await chat.on_join(room, member)

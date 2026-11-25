@@ -124,6 +124,11 @@ async def fresh(db, uid):
     return await db.users.find_one({"user_id": uid}, {"_id": 0})
 
 
+def sealed(uid: str, threshold: int = 18) -> dict:
+    """Atestare `verified` cu sigiliu valid (ca cea scrisa de age_service.apply_assurance_result)."""
+    return AP.sealed_assurance(uid, threshold=threshold, provider="test", method="test", verified_at=NOW, ref="r")
+
+
 def attest(payload: dict, t=None) -> tuple[bytes, str]:
     body = json.dumps(payload).encode()
     return body, attestation.sign(SECRET, body, t)
@@ -226,13 +231,19 @@ class CategoryForgery(unittest.TestCase):
             u = await add_user(db, "x", years_ago(30))
             u["age_category"] = "adult_18"                       # chiar daca documentul ar fi falsificat
             self.assertFalse(AP.can_access_adult_content(u))
-            u["age_assurance"] = {"status": "verified", "threshold": 18}
+            u["age_assurance"] = {"status": "verified", "threshold": 18}      # scris direct in DB, FARA sigiliu
+            self.assertFalse(AP.can_access_adult_content(u))
+            u["age_assurance"] = sealed("x", 18)
             self.assertTrue(AP.can_access_adult_content(u))
+            u["age_assurance"] = {**sealed("someone_else", 18)}               # sigiliu copiat de la alt cont
+            self.assertFalse(AP.can_access_adult_content(u))
+            u["age_assurance"] = {**sealed("x", 16), "threshold": 18}         # sigiliu de 16 prezentat drept 18
+            self.assertFalse(AP.can_access_adult_content(u))
             u2 = await add_user(db, "y", years_ago(15))
-            u2["age_assurance"] = {"status": "verified", "threshold": 18}     # verificat, dar data zice 15 ani
+            u2["age_assurance"] = sealed("y", 18)                             # verificat, dar data zice 15 ani
             self.assertFalse(AP.can_access_adult_content(u2))
             u3 = await add_user(db, "z", years_ago(17))
-            u3["age_assurance"] = {"status": "verified", "threshold": 18}
+            u3["age_assurance"] = sealed("z", 18)
             self.assertFalse(AP.can_access_adult_content(u3))
         run(go())
 
@@ -455,10 +466,16 @@ class ParentalFlow(unittest.TestCase):
     def test_request_only_for_under_16(self):
         async def go():
             db = await new_db()
-            teen = await add_user(db, "teen", years_ago(16))
-            with self.assertRaises(PC.ParentalError) as c:
-                await PC.request_consent(db, teen, "p@example.com", notifier=Notifier(), app_base_url=BASE, now=NOW)
+            adult = await add_user(db, "adult", years_ago(30))
+            with self.assertRaises(PC.ParentalError) as c:       # adultul declarat nu are cale parentala
+                await PC.request_consent(db, adult, "p@example.com", notifier=Notifier(), app_base_url=BASE, now=NOW)
             self.assertEqual(c.exception.code, "parental_consent_not_required")
+            teen = await add_user(db, "teen", years_ago(16))     # 16-17 declarat si neverificat: ARE cale parentala
+            r = await PC.request_consent(db, teen, "p@example.com", notifier=Notifier(), app_base_url=BASE, now=NOW)
+            self.assertIn("delivery", r)
+            verified16 = await add_user(db, "v16", years_ago(16), age_assurance=sealed("v16", 16))
+            with self.assertRaises(PC.ParentalError):            # deja verificat >=16: nu mai e necesar
+                await PC.request_consent(db, verified16, "q@example.com", notifier=Notifier(), app_base_url=BASE, now=NOW)
         run(go())
 
 
@@ -526,7 +543,8 @@ class ParentalPanel(unittest.TestCase):
     async def world(self):
         db = await new_db()
         await add_user(db, "kid", years_ago(12), email="kid@example.com")
-        await add_user(db, "mom", years_ago(40), email="mom@example.com", verified=True)
+        await add_user(db, "mom", years_ago(40), email="mom@example.com", verified=True,
+                       age_assurance=sealed("mom", 18), age_category="adult_18")   # parinte = adult DOVEDIT (nu doar declarat)
         await add_user(db, "evil", years_ago(40), email="evil@example.com")
         n = Notifier()
         r = await PC.request_consent(db, await fresh(db, "kid"), "mom@example.com", notifier=n, app_base_url=BASE, now=NOW)
@@ -634,12 +652,19 @@ class Teens(unittest.TestCase):
                 u = await add_user(db, uid, years_ago(yrs))
                 info = AP.evaluate_access(u)
                 self.assertEqual(info.band, AP.BAND_16_17)
-                self.assertFalse(info.restricted)                    # isi da singur consimtamantul
+                # data declarata NU e dovada: 16-17 declarat e LIMITAT pana la verificare (nu mai isi da singur consimtamantul)
+                self.assertFalse(info.restricted)
+                self.assertTrue(info.limited)
+                self.assertEqual(info.consent_eligibility, AP.ELIG_UNVERIFIED)
+                self.assertFalse(info.consent_features_allowed)
                 self.assertEqual(info.age_category, "under_18")      # ramane in sistemul pentru minori
                 self.assertFalse(AP.can_access_adult_content(u))
-                self.assertFalse(AP.can_access_adult_content({**u, "age_assurance": {"status": "verified", "threshold": 18}}))
-                with self.assertRaises(AssuranceError):              # nici nu poate porni age assurance 18+
-                    await AS.start_assurance(db, u, PROVIDER, now=NOW)
+                self.assertFalse(AP.can_access_adult_content({**u, "age_assurance": sealed(uid, 18)}))   # conflict cu DOB
+                with self.assertRaises(AssuranceError) as c:         # nu poate cere pragul 18
+                    await AS.start_assurance(db, u, PROVIDER, threshold=18, now=NOW)
+                self.assertEqual(c.exception.code, "threshold_not_allowed")
+                r = await AS.start_assurance(db, u, PROVIDER, now=NOW)   # poate cere 16 (decis de server)
+                self.assertEqual(r["threshold"], 16)
             from astran_sandbox import consent as C
             self.assertTrue(C.purpose_eligible("marketing_communications", "under_18", AP.BAND_16_17))
             self.assertFalse(C.purpose_eligible("marketing_communications", "under_18", AP.BAND_UNDER_16))
@@ -651,6 +676,10 @@ class Teens(unittest.TestCase):
             db = await new_db()
             u = await add_user(db, "k", years_ago(16))
             await db.users.update_one({"user_id": "k"}, {"$set": {"parental": {"state": AP.PARENTAL_WITHDRAWN, "consent_id": "pc_x", "self_consent_at": None}}})
+            u = await fresh(db, "k")
+            with self.assertRaises(AP.AgeError):                 # fara verificare provider, auto-confirmarea e refuzata
+                await AS.confirm_own_consent(db, u, now=NOW)
+            await db.users.update_one({"user_id": "k"}, {"$set": {"age_assurance": sealed("k", 16)}})
             u = await fresh(db, "k")
             self.assertTrue(AP.evaluate_access(u).restricted)
             self.assertEqual(AP.evaluate_access(u).next_action, "confirm_own_consent")
@@ -699,7 +728,7 @@ class AdultAccess(unittest.TestCase):
         async def go():
             db = await new_db()
             u = await add_user(db, "p", years_ago(10))
-            u["age_assurance"] = {"status": "verified", "threshold": 18}
+            u["age_assurance"] = sealed("p", 18)
             self.assertFalse(AP.can_access_adult_content(u))
         run(go())
 
@@ -722,10 +751,12 @@ class AdultAccess(unittest.TestCase):
             ages = {"teen": teen["age_category"], "dadult": declared_adult["age_category"], "real": real["age_category"]}
             w, d, room, (a, b, c) = TC.setup(("real", ages["real"]), ("teen", ages["teen"]), ("dadult", ages["dadult"]))
             await d.handle_chat(room, a, {"text": "you are a badword"})
-            self.assertEqual(b.ws.of("chat")[0]["text"], "you are a #######")     # minor 16-17: filtrat
-            self.assertEqual(c.ws.of("chat")[0]["text"], "you are a #######")     # "adult" declarat: filtrat
+            self.assertEqual(b.ws.of("chat"), [])      # adult verificat -> minor 16-17: NU se livreaza (politica Adult<->Minor)
+            self.assertEqual(c.ws.of("chat"), [])      # "adult" doar declarat = minor: tot nu primeste
             await d.handle_chat(room, b, {"text": "badword here", "age_category": "adult_18", "is_adult": True})
-            self.assertNotIn("badword", json.dumps(a.ws.sent[-1]))                  # nici expeditorul minor nu trimite raw
+            self.assertEqual(c.ws.of("chat")[0]["text"], "####### here")            # minor -> minor: filtrat, nu raw
+            self.assertNotIn("badword", json.dumps(c.ws.sent))
+            self.assertEqual([m for m in a.ws.of("chat") if m["user_id"] != "real"], [])   # minorul nu ajunge la adultul verificat
         run(go())
 
 
@@ -827,7 +858,9 @@ class LegacyMigration(unittest.TestCase):
             await db.users.insert_one({"user_id": "no_field", "username": "nf"})
             await db.users.insert_one({"user_id": "weird", "username": "w", "age_category": None})
             await db.users.insert_one({"user_id": "seed", "username": "s", "age_category": "adult_18",
-                                       "age_assurance": {"status": "verified", "provider": "operator_seed", "threshold": 18}})
+                                       "age_assurance": sealed("seed", 18)})            # atestare sigilata ramane
+            await db.users.insert_one({"user_id": "forged", "username": "f", "age_category": "adult_18",
+                                       "age_assurance": {"status": "verified", "provider": "operator_seed", "threshold": 18}})  # fara sigiliu
             await db.games.insert_one({"game_id": "g1", "owner_id": "old_adult"})
             before = len(db.users.docs)
             counts = await AS.migrate_existing_accounts(db, now=NOW)
@@ -842,8 +875,9 @@ class LegacyMigration(unittest.TestCase):
             self.assertEqual((await fresh(db, "no_field"))["age_category"], "under_18")
             self.assertEqual((await fresh(db, "weird"))["age_category"], "under_18")
             self.assertEqual((await fresh(db, "seed"))["age_category"], "adult_18")        # adult cu assurance verificat ramane
+            self.assertEqual((await fresh(db, "forged"))["age_category"], "under_18")      # "verified" scris direct in DB: coborat
             self.assertTrue(AP.can_access_adult_content(await fresh(db, "seed")))
-            self.assertEqual(counts["adult_declarations_demoted"], 1)
+            self.assertEqual(counts["adult_declarations_demoted"], 2)      # old_adult + forged (fara sigiliu)
             again = await AS.migrate_existing_accounts(db, now=NOW)                         # idempotent
             self.assertEqual(again, {"adult_declarations_demoted": 0, "unknown_category_fixed": 0, "age_info_required_set": 0})
             # fluxul de actualizare: DOB o singura data; adult declarat tot nu primeste 18+

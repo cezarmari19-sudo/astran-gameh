@@ -26,6 +26,7 @@ from unittest import mock
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
+from astran_sandbox import test_support_age as AGE
 from astran_sandbox import contact_migration as cm  # noqa: E402
 from astran_sandbox import contact_policy as cp  # noqa: E402
 from astran_sandbox import friend_service as fs  # noqa: E402
@@ -49,7 +50,7 @@ def _now():
 
 
 def _user(uid, cat):
-    return {"user_id": uid, "username": uid, "age_category": cat, "password_hash": "SECRET", "email": f"{uid}@x"}
+    return {"user_id": uid, "username": uid, **AGE.fields(uid, cat), "password_hash": "SECRET", "email": f"{uid}@x"}
 
 
 def _public(u):
@@ -178,7 +179,7 @@ class FriendRequests(unittest.IsolatedAsyncioTestCase):
         # categoria se recitește la fiecare apel: dupa schimbarea in DB, decizia se schimba
         for u in self.db.users.docs:
             if u["user_id"] == "mia":
-                u["age_category"] = ADULT
+                AGE.set(u, ADULT)
         self.assertEqual(await fs.send_request(self.db, "mia", "alice", _now), {"ok": True})
 
     async def test_T12_reverse_pending_cannot_auto_accept_across_categories(self):
@@ -196,7 +197,7 @@ class FriendRequests(unittest.IsolatedAsyncioTestCase):
         await fs.send_request(self.db, "alice", "bob", _now)
         for u in self.db.users.docs:
             if u["user_id"] == "bob":
-                u["age_category"] = MINOR     # ex. age assurance revocat dupa trimitere
+                AGE.set(u, MINOR)     # ex. age assurance revocat dupa trimitere
         await self.denied(fs.accept_request(self.db, "bob", "alice", _now))
         self.assertEqual(self.friends(), [])
 
@@ -440,7 +441,7 @@ class DmContact(unittest.IsolatedAsyncioTestCase):
         # conversatie legitima minor<->minor; apoi unul trece (in DB) in alta categorie => urmatorul mesaj e refuzat
         cid = (await self.open("mia", "max"))["conversation_id"]
         await self.send("mia", cid, "unu")
-        self.users["max"]["age_category"] = ADULT
+        AGE.set(self.users["max"], ADULT)
         await self.refused(self.send("mia", cid, "doi"))
         await self.refused(self.send("max", cid, "doi"))
         await self.refused(self.history("mia", cid))
@@ -522,7 +523,7 @@ class ServerWiring(unittest.TestCase):
             self.assertIn("_ages_pair", body, fn)
 
     def test_search_and_profile_expose_only_a_boolean_hint_not_the_age(self):
-        self.assertIn('"contact_restricted": not contact_policy.users_contact_allowed(current, u)', self.SERVER)
+        self.assertIn('"contact_restricted": not contact_policy.users_contact_allowed(AP.derive_category_doc(current), AP.derive_category_doc(u))', self.SERVER)
         self.assertNotIn('"age_category": u', self.SERVER.split("def _user_public_minimal", 1)[1].split("@api.get", 1)[0])
 
 

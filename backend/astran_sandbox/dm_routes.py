@@ -65,18 +65,18 @@ def make_dm_routers(
     """Returneaza (router_api, router_ws) + serviciul si hub-ul (pentru wiring Redis/teste)."""
 
     async def user_state(uid: str) -> Optional[dict]:
-        doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "age_category": 1, "chat_muted_until": 1})
+        doc = await db.users.find_one({"user_id": uid}, {**_age_policy.ACCESS_PROJECTION, "chat_muted_until": 1})
         if doc is None:
             return None
         until = doc.get("chat_muted_until")
         epoch = None
         if isinstance(until, datetime):
             epoch = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).timestamp()
-        return {"age_category": doc.get("age_category"), "chat_muted_until": epoch}
+        return {"age_category": _age_policy.effective_category(doc), "chat_muted_until": epoch}
 
     async def user_ages(ids: list) -> dict:
-        rows = await db.users.find({"user_id": {"$in": ids}}, {"_id": 0, "user_id": 1, "age_category": 1}).to_list(len(ids))
-        return {r["user_id"]: r.get("age_category") == _ADULT for r in rows}
+        rows = await db.users.find({"user_id": {"$in": ids}}, _age_policy.ACCESS_PROJECTION).to_list(len(ids))
+        return {r["user_id"]: _age_policy.effective_category(r) == _ADULT for r in rows}
 
     async def users_public(ids: list) -> dict:
         if not ids:
@@ -145,7 +145,7 @@ def make_dm_routers(
         rt_hub.dm_relay = service.relay_remote
 
     def _adult(current: dict) -> bool:
-        return current.get("age_category") == _ADULT   # din DB (get_current_user), nu de la client
+        return _age_policy.effective_category(current) == _ADULT   # derivat din DB (sigiliu), nu de la client
 
     api = APIRouter()
 
@@ -223,7 +223,8 @@ def make_dm_routers(
         if user is None:
             await websocket.close(code=4401)
             return
-        if _age_policy.evaluate_access(user).restricted:   # cont in asteptarea acordului parental / fara varsta dupa termen
+        _info = _age_policy.evaluate_access(user)
+        if _info.restricted or _info.limited:   # acord parental lipsa / varsta neverificata / fara varsta: mesageria cere consimtamant
             await websocket.close(code=4403)
             return
         uid = user["user_id"]

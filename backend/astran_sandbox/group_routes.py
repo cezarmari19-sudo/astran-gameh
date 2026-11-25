@@ -25,6 +25,12 @@ Colectiile Mongo:
           group_members + muted (vezi can_speak). Simplu REST (poll), ca restul API-ului
           (nu exista websockets nicaieri in platforma).
 
+AGE SCOPE (protectia Adult<->Minor, vezi group_age.py + contact_policy.py):
+    groups.age_category ("under_18" | "adult_18") se fixeaza LA CREARE din categoria proprietarului (citita din DB) si
+    nu se poate modifica prin nicio ruta. Membri: doar aceeasi categorie (GA.add_member = singura cale de adaugare).
+    Chat: se livreaza doar intre aceeasi categorie. Grupurile mostenite fara categorie sunt INGHETATE (423) pana la
+    rezolvarea cu group_age_migration.py. Varsta necunoscuta => refuz explicit.
+
 Game <-> Group:
     Games tine un camp `group_id` (nullable), setat in server.py DOAR dupa ce tokenul
     privat a fost validat impotriva colectiei `groups` de aici - vezi server.py
@@ -45,6 +51,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from . import age_policy as _AP
+from . import contact_policy as CP
+from . import group_age as GA
 from . import money
 from .chat_core import _INVISIBLE
 from .chat_filter import filter_text, shared_store
@@ -92,6 +101,7 @@ class CreateGroupBody(BaseModel):
 
 
 class UpdateGroupBody(BaseModel):
+    model_config = {"extra": "forbid"}   # un camp necunoscut (ex. age_category) => 422, nu e ignorat in tacere
     name: Optional[str] = Field(default=None, min_length=GROUP_NAME_MIN, max_length=GROUP_NAME_MAX)
     description: Optional[str] = Field(default=None, max_length=GROUP_DESC_MAX)
     logo_url: Optional[str] = None
@@ -122,9 +132,18 @@ def _group_public(g: dict, member_count: int) -> dict:
         "logo_url": g.get("logo_url"),
         "chat_mode": g.get("chat_mode", "everyone"),
         "member_count": member_count,
+        "age_restricted": GA.group_frozen(g),   # True = inghetat pentru revizuire de siguranta; categoria NU se expune
         "created_at": g["created_at"],
         "updated_at": g.get("updated_at", g["created_at"]),
     }
+
+
+_LEGACY_STRING_CODES = frozenset({"banned", "already_member", "group_not_found"})
+
+
+def _age_http(e: "GA.GroupAccessError") -> HTTPException:
+    """Erorile vechi pastreaza detaliul-sir (compatibilitate clienti); cele de varsta au {code, message} stabil."""
+    return HTTPException(status_code=e.status, detail=e.message if e.code in _LEGACY_STRING_CODES else e.detail())
 
 
 def make_group_router(get_current_user, db, user_public) -> APIRouter:
@@ -179,6 +198,12 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
 
         # Tot ce poate esua (generarea tokenului) se face INAINTE de debit: inainte, daca
         # _generate_token ridica 500 dupa debit, taxa de 200 Astrans era luata fara grup si fara refund.
+        # CATEGORIA GRUPULUI = categoria proprietarului, din DB (nu din cerere). Fara categorie cunoscuta nu se creeaza
+        # grup (nu presupunem adult/minor), si asta se decide INAINTE de orice debit.
+        owner_cat = await GA.user_category(db, current["user_id"])
+        if owner_cat is None:
+            GA.audit("create_denied", user_id=current["user_id"], code=CP.CODE_AGE_UNKNOWN)
+            raise _age_http(GA.GroupAccessError(403, CP.CODE_AGE_UNKNOWN))
         token = await _generate_token(db)
         gid = new_id("group_")
         now = now_utc()
@@ -190,6 +215,7 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
             "logo_url": _clean_logo(body.logo_url),
             "token": token,
             "chat_mode": "everyone",
+            "age_category": owner_cat,      # persistent si imuabil: nicio ruta nu il modifica
             "created_at": now,
             "updated_at": now,
         }
@@ -307,7 +333,16 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
 
     @router.get("/{group_id}/members")
     async def list_members(group_id: str, current=Depends(get_current_user)):
-        await get_group_or_404(group_id)
+        g = await get_group_or_404(group_id)
+        # Lista de membri nu se poate folosi ca sa descoperi conturi din cealalta categorie de varsta.
+        if GA.group_frozen(g):
+            await require_membership(group_id, current["user_id"])
+        else:
+            try:
+                GA.check_group_access(g, await GA.user_category(db, current["user_id"]),
+                                      user_id=current["user_id"], event="members_denied")
+            except GA.GroupAccessError as e:
+                raise _age_http(e)
         rows = await db.group_members.find(
             {"group_id": group_id, "status": "active"}, {"_id": 0},
         ).sort("joined_at", 1).to_list(1000)
@@ -324,20 +359,12 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
 
     @router.post("/{group_id}/join")
     async def join_group(group_id: str, current=Depends(get_current_user)):
-        await get_group_or_404(group_id)
-        existing = await get_membership(group_id, current["user_id"])
-        if existing:
-            if existing["status"] == "banned":
-                raise HTTPException(status_code=403, detail="You are banned from this Group")
-            if existing["status"] == "left":
-                await db.group_members.update_one(
-                    {"group_id": group_id, "user_id": current["user_id"]}, {"$set": {"status": "active", "role": "member"}})
-                return {"ok": True}
-            raise HTTPException(status_code=409, detail="Already a member")
-        await db.group_members.insert_one({
-            "group_id": group_id, "user_id": current["user_id"], "role": "member",
-            "status": "active", "muted": False, "joined_at": now_utc(),
-        })
+        # Categoria vine din DB (GA.add_member), niciodata din cerere. Aceeasi functie ruleaza si la REINTRARE
+        # (status "left"), deci verificarea se executa din nou de fiecare data.
+        try:
+            await GA.add_member(db, group_id, current["user_id"])
+        except GA.GroupAccessError as e:
+            raise _age_http(e)
         return {"ok": True}
 
     @router.post("/{group_id}/leave")
@@ -456,8 +483,8 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         return membership["role"] == "owner"  # owner_only
 
     async def _viewer_state(uid: str) -> dict:
-        doc = await db.users.find_one({"user_id": uid}, {"_id": 0, "age_category": 1, "chat_muted_until": 1}) or {}
-        return doc
+        doc = await db.users.find_one({"user_id": uid}, {**_AP.ACCESS_PROJECTION, "chat_muted_until": 1}) or {}
+        return {**doc, "age_category": _AP.effective_category(doc) if doc else None}
 
     async def _blocked_with(uid: str) -> set:
         """Utilizatorii blocati in ORICARE directie fata de `uid` (blocker sau blocat)."""
@@ -468,7 +495,7 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
 
     @router.get("/{group_id}/chat/messages")
     async def list_chat(group_id: str, current=Depends(get_current_user)):
-        await get_group_or_404(group_id)
+        g = await get_group_or_404(group_id)
         await require_membership(group_id, current["user_id"])
         cursor = db.group_chat_messages.find({"group_id": group_id, "moderation_hidden": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).limit(CHAT_PAGE_SIZE)
         msgs = await cursor.to_list(CHAT_PAGE_SIZE)
@@ -480,6 +507,10 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         except Exception:  # noqa: BLE001 - fail closed: nu livram mesaje nefiltrate daca nu putem filtra
             log.warning("group chat: filtrul/blocarile nu au putut fi citite", exc_info=True)
             raise HTTPException(status_code=503, detail="Chat temporarily unavailable")
+        try:
+            msgs = await GA.visible_messages(db, g, current["user_id"], msgs)   # DOAR aceeasi categorie de varsta
+        except GA.GroupAccessError as e:
+            raise _age_http(e)
         out = []
         for m in msgs:
             if m["user_id"] in blocked and m["user_id"] != current["user_id"]:
@@ -492,7 +523,7 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
                 text = raw
             else:
                 text = filter_text(raw, compiled).text
-            out.append({k: v for k, v in m.items() if k != "sender_adult"} | {"text": text})
+            out.append({k: v for k, v in m.items() if k not in ("sender_adult", "sender_age_category")} | {"text": text})
         return {"messages": out}
 
     @router.post("/{group_id}/chat/messages")
@@ -501,6 +532,12 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         m = await get_membership(group_id, current["user_id"])
         if not await can_speak(g, m):
             raise HTTPException(status_code=403, detail="You are not allowed to speak in this Group right now")
+        # Politica Adult<->Minor in chat: expeditorul trebuie sa aiba categoria grupului (din DB) INAINTE de a se salva
+        # sau distribui ceva; varsta necunoscuta => refuz.
+        try:
+            sender_cat = await GA.sender_category_or_deny(db, g, current["user_id"])
+        except GA.GroupAccessError as e:
+            raise _age_http(e)
         try:
             state = await _viewer_state(current["user_id"])
             compiled = await shared_store(db).get_compiled()
@@ -517,14 +554,14 @@ def make_group_router(get_current_user, db, user_public) -> APIRouter:
         text = _INVISIBLE.sub("", text).strip()  # caractere de control / zero-width / bidi
         if not text:
             raise HTTPException(status_code=400, detail="Message is empty")
-        sender_adult = state.get("age_category") == "adult_18"  # DOAR din DB; orice altceva = sub 18
+        sender_adult = sender_cat == CP.ADULT  # DOAR din DB
         doc = {
             "message_id": new_id("gmsg_"), "group_id": group_id, "user_id": current["user_id"],
             "username": current["username"], "text": text, "sender_adult": sender_adult,
-            "created_at": now_utc(),
+            "sender_age_category": sender_cat, "created_at": now_utc(),
         }
         await db.group_chat_messages.insert_one(doc)
         shown = text if sender_adult else filter_text(text, compiled).text
-        return {"message": {k: v for k, v in doc.items() if k not in ("_id", "sender_adult")} | {"text": shown}}
+        return {"message": {k: v for k, v in doc.items() if k not in ("_id", "sender_adult", "sender_age_category")} | {"text": shown}}
 
     return router

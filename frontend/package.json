@@ -9,7 +9,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test:sandbox": "node --experimental-strip-types --import ./src/sandbox/register-alias.mjs --test src/sandbox/runtime.test.mts"
+    "test:sandbox": "node --experimental-strip-types --import ./src/sandbox/register-alias.mjs --test src/sandbox/runtime.test.mts",
+    "test:blocked": "node --experimental-strip-types --test src/friends/blockedStore.test.mts"
   },
   "dependencies": {
     "@expo/metro-runtime": "6.1.2",

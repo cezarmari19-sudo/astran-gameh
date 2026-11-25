@@ -305,7 +305,9 @@ class World:
         if uid not in self.age: return None
         return {"age_category": self.age[uid], "chat_muted_until": self.muted.get(uid)}
 
-    async def recipient_ages(self, ids): return {i: self.age.get(i) == "adult_18" for i in ids}
+    async def recipient_ages(self, ids):
+        # acelasi contract ca realtime.chat_recipient_ages: True=adult, False=minor, None=categorie necunoscuta
+        return {i: (self.age.get(i) == "adult_18" if self.age.get(i) in ("adult_18", "under_18") else None) for i in ids}
 
     async def blocked_with(self, uid, ids):
         if self.fail_blocks: raise RuntimeError("db down")
@@ -362,55 +364,70 @@ class ChatDelivery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b.ws.of("chat")[0]["text"], "you are a badword")
         self.assertEqual(a.ws.of("chat")[0]["text"], "you are a badword")
 
-    async def test_minor_never_receives_unfiltered_text(self):  # cerinta 5
+    # --- POLITICA ADULT<->MINOR (contact_policy): mesajele intre categorii NU se livreaza deloc. Filtrul de cuvinte
+    # ramane pentru minor<->minor; el NU inlocuieste politica de contact.
+    async def test_adult_message_never_reaches_minor(self):  # cerinta 5/7
         w, d, room, (a, m) = setup(("a", ADULT), ("m", MINOR))
+        await d.handle_chat(room, a, {"text": "you are a badword"})
+        self.assertEqual(m.ws.of("chat"), [])
+        self.assertNotIn("badword", json.dumps(m.ws.sent))
+        self.assertEqual(a.ws.of("chat")[0]["text"], "you are a badword")  # expeditorul isi vede ecoul (nu e livrare)
+
+    async def test_minor_message_never_reaches_adult(self):  # cerinta 6/8
+        w, d, room, (m, a) = setup(("m", MINOR), ("a", ADULT))
+        await d.handle_chat(room, m, {"text": "you are a badword"})
+        self.assertEqual(a.ws.of("chat"), [])
+        self.assertEqual(m.ws.of("chat")[0]["text"], "you are a #######")  # ecoul lui ramane filtrat
+
+    async def test_minor_to_minor_is_filtered(self):
+        w, d, room, (a, m) = setup(("a", MINOR), ("m", MINOR))
         await d.handle_chat(room, a, {"text": "you are a badword"})
         self.assertEqual(m.ws.of("chat")[0]["text"], "you are a #######")
         self.assertNotIn("badword", json.dumps(m.ws.sent))
 
-    async def test_minor_sender_is_filtered_for_everyone_including_adults(self):
-        w, d, room, (m, a) = setup(("m", MINOR), ("a", ADULT))
-        await d.handle_chat(room, m, {"text": "you are a badword"})
-        self.assertEqual(a.ws.of("chat")[0]["text"], "you are a #######")
-        self.assertEqual(m.ws.of("chat")[0]["text"], "you are a #######")  # si el isi vede mesajul filtrat
-
     async def test_sentence_rule_for_minor_hides_whole_message(self):
-        w, d, room, (a, m) = setup(("a", ADULT), ("m", MINOR))
+        w, d, room, (a, m) = setup(("a", MINOR), ("m", MINOR))
         await d.handle_chat(room, a, {"text": "say another badword now"})
         self.assertEqual(set(m.ws.of("chat")[0]["text"]), {"#"})
-        self.assertEqual(a.ws.of("chat")[0]["text"], "say another badword now")
 
     async def test_multiple_banned_words_each_rule_applied(self):
-        w, d, room, (a, m) = setup(("a", ADULT), ("m", MINOR))
+        w, d, room, (a, m) = setup(("a", MINOR), ("m", MINOR))
         await d.handle_chat(room, a, {"text": "badword plus another expression, fine"})
         self.assertEqual(m.ws.of("chat")[0]["text"], "####### plus ##################, fine")
 
     async def test_client_cannot_forge_identity_or_age(self):  # cerinta 5
-        w, d, room, (a, b) = setup(("a", MINOR), ("b", ADULT))
+        w, d, room, (a, b, c) = setup(("a", MINOR), ("b", MINOR), ("c", ADULT))
         await d.handle_chat(room, a, {"t": "chat", "text": "you are a badword", "user_id": "b", "username": "ADMIN",
                                       "age_category": ADULT, "is_adult": True, "adult": True, "ts": 1, "id": "x", "safe": "raw"})
         got = b.ws.of("chat")[0]
         self.assertEqual((got["user_id"], got["username"]), ("a", "a"))
         self.assertEqual(got["text"], "you are a #######")  # varsta = cea din DB (minor), nu cea pretinsa
         self.assertNotEqual(got["ts"], 1); self.assertNotEqual(got["id"], "x")
+        self.assertEqual(c.ws.of("chat"), [])  # a pretinde ca e adult; DB spune minor => adultul nu primeste nimic
 
     async def test_age_is_rechecked_from_db_not_cached_connect_value(self):
         w, d, room, (a, b) = setup(("a", ADULT), ("b", ADULT))
         w.age["b"] = MINOR   # b a trecut pe sub 18 dupa conectare; Member.is_adult e inca True
         self.assertTrue(b.is_adult)
         await d.handle_chat(room, a, {"text": "badword"})
-        self.assertEqual(b.ws.of("chat")[0]["text"], "#######")
+        self.assertEqual(b.ws.of("chat"), [])     # categoria din DB (acum), nu cea cache-uita la conectare
         w.age["a"] = MINOR   # si expeditorul e reverificat la fiecare mesaj
         a.chat_limiter = cc.ChatLimiter(mono=Clock())
         w.age["b"] = ADULT
         await d.handle_chat(room, a, {"text": "badword again"})
-        self.assertEqual(b.ws.of("chat")[-1]["text"], "####### again")
+        self.assertEqual(b.ws.of("chat"), [])
 
-    async def test_unknown_or_missing_age_is_treated_as_minor(self):
-        w, d, room, (a, b) = setup(("a", ADULT), ("b", ADULT))
-        w.age["b"] = None
+    async def test_unknown_or_missing_age_cannot_receive_or_send(self):
+        w, d, room, (a, b, c) = setup(("a", ADULT), ("b", ADULT), ("c", MINOR))
+        w.age["b"] = None            # categorie necunoscuta: nu e presupus nici adult, nici minor
         await d.handle_chat(room, a, {"text": "badword"})
-        self.assertEqual(b.ws.of("chat")[0]["text"], "#######")
+        self.assertEqual(b.ws.of("chat"), [])
+        await d.handle_chat(room, c, {"text": "salut"})
+        self.assertEqual(b.ws.of("chat"), [])
+        await d.handle_chat(room, b, {"text": "salut"})   # necunoscutul nu poate trimite
+        self.assertEqual(b.ws.of("chat_error")[0]["code"], "age_restricted")
+        self.assertEqual([x for x in a.ws.of("chat") if x["user_id"] == "b"], [])
+        self.assertEqual([x for x in c.ws.of("chat") if x["user_id"] == "b"], [])
 
     async def test_blocked_users_do_not_exchange_messages(self):
         w, d, room, (a, b, c) = setup(("a", ADULT), ("b", ADULT), ("c", ADULT))
@@ -497,31 +514,43 @@ class ChatHistoryAndRemote(unittest.IsolatedAsyncioTestCase):
     async def test_history_on_join_is_per_recipient_and_respects_blocks(self):
         w, d, room, (a, b) = setup(("a", ADULT), ("b", ADULT))
         await d.handle_chat(room, a, {"text": "old badword message"})
-        w.age["m"] = MINOR; w.age["x"] = ADULT; w.age["blocker"] = ADULT
-        minor = Member("m"); adult = Member("x", adult=True); blocker = Member("blocker", adult=True)
+        w.age["m"] = MINOR; w.age["x"] = ADULT; w.age["blocker"] = ADULT; w.age["u"] = None
+        minor = Member("m"); adult = Member("x", adult=True); blocker = Member("blocker", adult=True); unknown = Member("u")
         w.blocks.add(("blocker", "a"))
-        for mem in (minor, adult, blocker):
+        for mem in (minor, adult, blocker, unknown):
             await d.on_join(room, mem)
         self.assertEqual(minor.ws.of("chat_info")[0]["mode"], MINOR)
         self.assertEqual(adult.ws.of("chat_info")[0]["mode"], ADULT)
-        self.assertEqual(minor.ws.of("chat_history")[0]["messages"][0]["text"], "old ####### message")
+        self.assertEqual(unknown.ws.of("chat_info")[0]["mode"], "restricted")
+        self.assertEqual(minor.ws.of("chat_history")[0]["messages"], [])      # istoricul adultilor NU ajunge la minori
         self.assertEqual(adult.ws.of("chat_history")[0]["messages"][0]["text"], "old badword message")
         self.assertEqual(blocker.ws.of("chat_history")[0]["messages"], [])
-        self.assertNotIn("badword", json.dumps(minor.ws.sent))
+        self.assertEqual(unknown.ws.of("chat_history")[0]["messages"], [])    # varsta necunoscuta: fara istoric
+        self.assertNotIn("badword", json.dumps(minor.ws.sent) + json.dumps(unknown.ws.sent))
+
+    async def test_history_on_join_minor_sees_only_minor_messages_filtered(self):
+        w, d, room, (m1, m2) = setup(("m1", MINOR), ("m2", MINOR))
+        await d.handle_chat(room, m1, {"text": "old badword message"})
+        w.age["a"] = ADULT; w.age["m3"] = MINOR
+        adult = Member("a", adult=True); minor = Member("m3")
+        await d.on_join(room, adult); await d.on_join(room, minor)
+        self.assertEqual(adult.ws.of("chat_history")[0]["messages"], [])       # adultul nu vede istoricul minorilor
+        self.assertEqual(minor.ws.of("chat_history")[0]["messages"][0]["text"], "old ####### message")
 
     async def test_remote_message_is_delivered_per_recipient(self):
         w, d, room, (a, m) = setup(("a", ADULT), ("m", MINOR))
         payload = {"t": "chat_x", "id": "r1", "ts": 5, "uid": "far", "un": "far", "adult": True, "raw": "badword", "safe": "#######"}
         await d.relay_remote(room, payload)
         self.assertEqual(a.ws.of("chat")[0]["text"], "badword")
-        self.assertEqual(m.ws.of("chat")[0]["text"], "#######")
+        self.assertEqual(m.ws.of("chat"), [])          # mesaj remote de la un adult: minorul nu primeste nimic
         await d.relay_remote(room, payload)            # duplicat ignorat
         self.assertEqual(len(a.ws.of("chat")), 1)
 
     async def test_remote_message_from_minor_never_has_raw(self):
-        w, d, room, (a,) = setup(("a", ADULT))
+        w, d, room, (a, m) = setup(("a", ADULT), ("m", MINOR))
         await d.relay_remote(room, {"t": "chat_x", "id": "r2", "ts": 5, "uid": "far", "un": "far", "adult": False, "raw": "badword", "safe": "#######"})
-        self.assertEqual(a.ws.of("chat")[0]["text"], "#######")
+        self.assertEqual(a.ws.of("chat"), [])          # de la un minor: adultul nu primeste nimic
+        self.assertEqual(m.ws.of("chat")[0]["text"], "#######")
 
     async def test_malformed_remote_payloads_are_dropped(self):
         w, d, room, (a,) = setup(("a", ADULT))
@@ -533,7 +562,7 @@ class ChatHistoryAndRemote(unittest.IsolatedAsyncioTestCase):
 
 class ReportTests(unittest.IsolatedAsyncioTestCase):
     async def test_report_is_stored_once_with_server_side_context(self):
-        w, d, room, (a, b) = setup(("a", MINOR), ("b", ADULT))
+        w, d, room, (a, b) = setup(("a", MINOR), ("b", MINOR))
         await d.handle_chat(room, a, {"text": "you badword"})
         mid = b.ws.of("chat")[0]["id"]
         await d.handle_report(room, b, {"t": "chat_report", "id": mid, "reason": "harassment", "text": "FORGED", "sender_id": "zzz"})

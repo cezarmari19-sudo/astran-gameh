@@ -45,6 +45,7 @@ import realtime  # noqa: E402
 
 if _STUBBED:  # nu lasam stub-ul in sys.modules: ar strica alte teste din acelasi proces (ex. project_security)
     del sys.modules["fastapi"]
+from astran_sandbox import test_support_age as AGE
 from astran_sandbox import chat_filter as cf  # noqa: E402
 
 
@@ -78,7 +79,7 @@ class Col:
 
 class FakeDb:
     def __init__(self):
-        for n in ("users", "blocks", "instance_players", "game_instances", "reports", "platform_config"):
+        for n in ("users", "blocks", "instance_players", "game_instances", "reports", "platform_config", "games"):
             setattr(self, n, Col())
 
 
@@ -107,11 +108,12 @@ class RealtimeChatIntegration(unittest.IsolatedAsyncioTestCase):
         self.db = FakeDb()
         self.tokens = {}
         for uid, age in (("u1", "under_18"), ("u2", "under_18"), ("u3", "adult_18"), ("u4", "adult_18")):
-            doc = {"user_id": uid, "username": f"name_{uid}", "age_category": age}
+            doc = {"user_id": uid, "username": f"name_{uid}", **AGE.fields(uid, age)}
             self.db.users.docs.append(doc)
             self.tokens[f"tok_{uid}"] = doc
             self.db.instance_players.docs.append({"instance_id": "i1", "user_id": uid})
         self.db.game_instances.docs.append({"instance_id": "i1", "game_id": "g1"})
+        self.db.games.docs.append({"game_id": "g1", "age_category": "under_18", "owner_id": "owner"})   # joc pentru toate varstele
         self.db.instance_players.docs.append({"instance_id": "other", "user_id": "u9"})
 
         async def resolver(token): return self.tokens.get(token)
@@ -141,28 +143,34 @@ class RealtimeChatIntegration(unittest.IsolatedAsyncioTestCase):
         a.push({"t": "chat", "text": "mesaj vechi"}); await settle()
         late = await self.connect("u1")
         self.assertEqual(late.of("chat_info")[0]["mode"], "under_18")
-        self.assertEqual([m["text"] for m in late.of("chat_history")[0]["messages"]], ["mesaj vechi"])
+        self.assertEqual(late.of("chat_history")[0]["messages"], [])        # istoricul adultilor nu ajunge la un minor
+        same = await self.connect("u4")
+        self.assertEqual([m["text"] for m in same.of("chat_history")[0]["messages"]], ["mesaj vechi"])
 
     async def test_adult_mode_free_minor_mode_filtered_with_shipped_rules(self):
-        adult1, adult2, minor = await self.connect("u3"), await self.connect("u4"), await self.connect("u1")
+        adult1, adult2, minor1, minor2 = [await self.connect(u) for u in ("u3", "u4", "u1", "u2")]
         adult1.push({"t": "chat", "text": "this is a shit game"}); await settle()
         self.assertEqual(adult2.of("chat")[0]["text"], "this is a shit game")
-        self.assertEqual(minor.of("chat")[0]["text"], "this is a #### game")
-        self.assertNotIn("shit", json.dumps(minor.sent))
+        self.assertEqual(minor1.of("chat"), [])                       # adult -> minor: nu se livreaza deloc
+        minor1.push({"t": "chat", "text": "this is a shit game"}); await settle()
+        self.assertEqual(minor2.of("chat")[0]["text"], "this is a #### game")   # minor -> minor: filtrat
+        self.assertNotIn("shit", json.dumps(minor1.sent) + json.dumps(minor2.sent))
+        self.assertEqual(adult2.of("chat")[-1]["text"], "this is a shit game")  # minorul nu ajunge la adult
 
     async def test_minor_cannot_claim_adult_status(self):
-        minor, adult = await self.connect("u1"), await self.connect("u3")
+        minor, minor2, adult = await self.connect("u1"), await self.connect("u2"), await self.connect("u3")
         minor.push({"t": "chat", "text": "fuck this", "age_category": "adult_18", "adult": True, "mode": "adult_18"}); await settle()
-        self.assertEqual(adult.of("chat")[0]["text"], "#### this")
+        self.assertEqual(minor2.of("chat")[0]["text"], "#### this")   # varsta = cea din DB, nu cea pretinsa
+        self.assertEqual(adult.of("chat"), [])                        # si pretinzand "adult", un minor nu ajunge la adulti
 
     async def test_age_change_in_db_applies_immediately_without_reconnect(self):
         adult1, adult2 = await self.connect("u3"), await self.connect("u4")
-        next(d for d in self.db.users.docs if d["user_id"] == "u4")["age_category"] = "under_18"
+        AGE.set(next(d for d in self.db.users.docs if d["user_id"] == "u4"), "under_18")
         adult1.push({"t": "chat", "text": "fuck"}); await settle()
-        self.assertEqual(adult2.of("chat")[0]["text"], "####")
+        self.assertEqual(adult2.of("chat"), [])        # categoria din DB se aplica imediat, fara reconectare
 
     async def test_new_rule_without_touching_chat_code(self):  # cerinta 6/8
-        minor, adult = await self.connect("u1"), await self.connect("u3")
+        minor, adult = await self.connect("u1"), await self.connect("u2")      # doi minori (filtrul se aplica intre ei)
         adult.push({"t": "chat", "text": "a zorbaword here"}); await settle()
         self.assertEqual(minor.of("chat")[-1]["text"], "a zorbaword here")   # inca nu e interzis
         store = cf.shared_store(self.db)
@@ -178,8 +186,9 @@ class RealtimeChatIntegration(unittest.IsolatedAsyncioTestCase):
         a, b, c = await self.connect("u3"), await self.connect("u4"), await self.connect("u1")
         self.db.blocks.docs.append({"blocker_id": "u4", "blocked_id": "u3"})
         a.push({"t": "chat", "text": "hello"}); await settle()
-        self.assertEqual(b.of("chat"), [])
-        self.assertEqual(len(c.of("chat")), 1)
+        self.assertEqual(b.of("chat"), [])             # blocat
+        self.assertEqual(c.of("chat"), [])             # minor: adultul nu ajunge la el
+        self.assertEqual(len(a.of("chat")), 1)         # doar ecoul propriu
 
     async def test_spam_and_oversize_and_empty(self):
         a, b = await self.connect("u3"), await self.connect("u4")
@@ -243,7 +252,11 @@ class RealtimeChatIntegration(unittest.IsolatedAsyncioTestCase):
         await realtime.hub.relay_remote("i1", {"t": "chat_x", "id": "rr1", "ts": 1, "uid": "far", "un": "far",
                                                 "adult": True, "raw": "fuck yes", "safe": "#### yes"})
         self.assertEqual(adult.of("chat")[-1]["text"], "fuck yes")
-        self.assertEqual(minor.of("chat")[-1]["text"], "#### yes")
+        self.assertEqual(minor.of("chat"), [])          # de la un adult de pe alt proces: minorul nu primeste nimic
+        await realtime.hub.relay_remote("i1", {"t": "chat_x", "id": "rr2", "ts": 2, "uid": "far2", "un": "far2",
+                                                "adult": False, "raw": None, "safe": "#### no"})
+        self.assertEqual(minor.of("chat")[-1]["text"], "#### no")
+        self.assertEqual(len(adult.of("chat")), 1)
         await realtime.hub.relay_remote("i1", {"t": "state", "user_id": "far", "x": 1})   # state: relay brut, ca inainte
         self.assertEqual(adult.of("state")[-1]["x"], 1)
 

@@ -1,551 +1,146 @@
+// GENERAT din backend/legal/privacy_policy/1.1.ro.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
 export const PRIVACY_POLICY_RO = `ASTRAN GAME — POLITICA DE CONFIDENȚIALITATE
 
-Versiune: 1.0
-Data intrării în vigoare: [DATA — ÎNLOCUIEȘTE CÂND ESTE DISPONIBILĂ]
-Operator: [NUMELE LEGAL AL COMPANIEI — ÎNLOCUIEȘTE CÂND ÎL AI]
-E-mail pentru confidențialitate: [EMAIL — ÎNLOCUIEȘTE CÂND ÎL AI]
-Website: [WEBSITE — ÎNLOCUIEȘTE CÂND ÎL AI]
+Versiune: 1.1
+Stare: CIORNĂ — NECESITĂ COMPLETARE (vezi marcajele [DE COMPLETAT] de mai jos; acest document nu trebuie prezentat ca final cât timp există un marcaj)
+Data intrării în vigoare: [DE COMPLETAT: data intrării în vigoare]
+Operator: [DE COMPLETAT: denumirea legală, nr. de înregistrare și sediul operatorului]
+E-mail pentru confidențialitate: [DE COMPLETAT: adresa de e-mail pentru confidențialitate]
 
 
-1. DESPRE ACEASTĂ POLITICĂ DE CONFIDENȚIALITATE
+1. CINE SUNTEM ȘI CE ACOPERĂ ACEASTĂ POLITICĂ
 
-Astran Game („Astran", „noi", „nouă" sau „platforma") este o platformă destinată creării, publicării, descoperirii și utilizării jocurilor și a altui conținut creat de utilizatori.
+Astran Game („Astran”, „noi”) este o platformă pentru crearea, publicarea și jucarea de jocuri și alt conținut generat de utilizatori. Această politică explică ce date personale prelucrează aplicația Astran și serverele ei, de ce, pe ce temei juridic, cine le primește, cât timp se păstrează și ce drepturi ai (Regulamentul (UE) 2016/679, „GDPR”, art. 5 și 12-14).
 
-Această Politică de Confidențialitate explică:
+Astran nu folosește publicitate, profilare comportamentală, SDK-uri de analiză sau de raportare a erorilor, nu antrenează modele de inteligență artificială pe datele utilizatorilor și nu vinde și nu licențiază date personale. Dacă acest lucru se schimbă, politica va fi actualizată înainte ca schimbarea să intre în vigoare.
 
-- ce informații putem colecta;
-- cum putem utiliza informațiile;
-- cum putem analiza informațiile;
-- cum putem utiliza informațiile pentru moderare și securitate;
-- cum putem utiliza informațiile pentru dezvoltarea și antrenarea sistemelor AI;
-- cum putem utiliza informațiile pentru publicitate și personalizare;
-- cum putem transmite informațiile către furnizori și parteneri;
-- când și în ce condiții putem comercializa, licenția sau transmite anumite date către terți;
-- unde pot fi procesate datele;
-- ce se poate întâmpla cu datele după ștergerea unui cont.
 
-Astran poate opera la nivel internațional, iar datele utilizatorilor pot fi procesate în țări diferite de țara în care utilizatorul locuiește.
+2. DATELE PRELUCRATE, SCOPURI ȘI TEMEI JURIDIC
 
+2.1. Cont și autentificare
+Date: adresa de e-mail, numele de utilizator, numele afișat, parola (stocată doar ca hash cu sare), limba preferată, ID-ul contului, datele de creare și actualizare, starea verificării e-mailului, referința imaginii de profil, soldul de Astrans, tokenuri de sesiune (valabile 7 zile), coduri de resetare a parolei și de verificare a e-mailului (de scurtă durată) și, dacă înregistrezi autentificarea cu passkey/biometrie (WebAuthn), cheia publică și numele credențialului (amprenta sau fața rămân pe dispozitivul tău și nu ajung la noi). Dacă te autentifici cu Google, primim e-mailul, numele și poza de profil printr-un broker de autentificare (vezi secțiunea 4).
+Scop: crearea și securizarea contului, autentificare, furnizarea serviciului.
+Temei: executarea contractului (art. 6 alin. (1) lit. b); securitatea serviciului (art. 6 alin. (1) lit. f).
 
-2. CATEGORIILE DE UTILIZATORI
+2.2. Vârstă și acord parental
+Date: data nașterii (stocată criptat), banda/categoria de vârstă, dacă s-a finalizat verificarea vârstei; pentru utilizatorii sub 16 ani, e-mailul părintelui sau tutorelui (stocat criptat), decizia parentală, data ei și înregistrări tehnice ale pașilor de verificare; linkurile de unică folosință trimise părintelui se stochează doar ca hash-uri cu cheie și expiră. Evenimentele legate de vârstă și acord parental se păstrează într-un jurnal de audit care evidențiază modificările, cu identificatori pseudonimizați (fără data nașterii, e-mail sau IP).
+Scop: aplicarea protecțiilor adecvate vârstei, obținerea și dovedirea acordului parental unde este cerut.
+Temei: obligație legală și protecția minorilor (art. 6 alin. (1) lit. c/f); consimțământul titularului răspunderii părintești (art. 8 GDPR).
+Furnizori opționali: dacă este configurat un furnizor extern pentru verificarea vârstei 18+ sau a calității de părinte, ești redirecționat către el, iar noi primim doar un rezultat semnat. [DE COMPLETAT: numele furnizorului/furnizorilor folosiți efectiv sau confirmarea că nu se folosește niciunul]
 
-La crearea contului, utilizatorul trebuie să selecteze una dintre următoarele categorii:
+2.3. Jocuri, avatar și creații
+Date: jocuri, scripturi, resurse, modele 3D, configurația avatarului și a hainelor, obiecte publicate sau cumpărate, jocuri jucate recent, roluri de colaborator/tester și prezența într-o sesiune de joc (expiră automat după aproximativ 60 de secunde de inactivitate). Mișcarea și evenimentele din joc sunt transmise în timp real celorlalți jucători din aceeași sesiune.
+Scop: funcționarea jocurilor multiplayer, a Studio și a magazinului.
+Temei: contract (art. 6 alin. (1) lit. b).
 
+2.4. Chat și mesaje
+- Chatul din joc este transmis jucătorilor din aceeași sesiune și păstrat doar într-o memorie tampon scurtă; se stochează doar dacă este raportat.
+- Mesajele din chatul de grup și mesajele private între prieteni sunt stocate pe serverele noastre. Pentru expeditorii sub 18 ani, textul nefiltrat al mesajelor private nu se stochează.
+- Pentru utilizatorii sub 18 ani, mesajele sunt filtrate automat după reguli fixe de cuvinte/expresii (fără IA); minorii primesc textul filtrat.
+- Mesajele pot fi examinate de moderatori când sunt raportate.
+Scop: mesagerie, protecția minorilor, moderarea abuzurilor.
+Temei: contract (art. 6 alin. (1) lit. b); interes legitim de siguranță (art. 6 alin. (1) lit. f); obligații legale (Regulamentul privind serviciile digitale).
 
-2.1. SUB 18 ANI
+2.5. Prieteni, grupuri și funcții sociale
+Date: lista de prieteni și cererile, utilizatori blocați, grupuri, calitatea de membru, roluri, stare de mute.
+Scop și temei: furnizarea funcțiilor sociale (art. 6 alin. (1) lit. b).
 
-Această categorie este destinată persoanelor cu vârsta între 0 și 17 ani.
+2.6. Rapoarte și moderare
+Date: rapoartele trimise de tine sau care te privesc, contextul mesajelor și dovezile atașate unui raport, deciziile moderatorilor și expunerile de motive, contestațiile și notificările, înregistrări de audit ale acțiunilor moderatorilor și mesajele trimise prin formularul de contact (nume, e-mail, subiect, mesaj). Deciziile de moderare sunt luate de oameni; instrumentele automate pot doar ajuta la detectarea conținutului.
+Scop: tratarea rapoartelor, aplicarea regulilor, motivarea și contestarea deciziilor, răspunsul la solicitări.
+Temei: obligație legală (art. 6 alin. (1) lit. c); interes legitim pentru o platformă sigură (art. 6 alin. (1) lit. f).
 
-În funcție de țara utilizatorului și de legislația aplicabilă, Astran poate solicita acordul unui părinte sau tutore înainte ca utilizatorul să poată utiliza anumite funcții sau platforma.
+2.7. Achiziții și monedă virtuală
+Date: tranzacții cu Astrans (registru), achiziții de obiecte din magazin/haine, achiziții de pachete de Astrans (referință furnizor, sumă, stare), cereri și decizii de rambursare, evidențe privind drepturile consumatorului. Nu primim și nu stocăm numere complete de card: plățile sunt procesate de Google Play, Apple sau Stripe, iar noi primim identificatori și stare și trimitem tokenul/chitanța achiziției furnizorului pentru verificare.
+Scop: procesarea plăților, prevenirea fraudei, contabilitate, rambursări, drepturile consumatorului.
+Temei: contract (art. 6 alin. (1) lit. b); obligații legale, de ex. contabile (art. 6 alin. (1) lit. c); prevenirea fraudei (art. 6 alin. (1) lit. f).
 
-Atunci când este necesar acordul parental, Astran poate solicita adresa de e-mail a părintelui sau tutorelui și poate procesa informațiile necesare pentru verificarea și înregistrarea acordului parental.
+2.8. Securitate, jurnale și prevenirea abuzurilor
+Date: adresa IP în înregistrările de evenimente de securitate (de ex. resetarea parolei, ștergerea sau recuperarea unui proiect) și pentru limitarea ratei de cereri; contoare de încercări eșuate; înregistrări de tokenuri revocate; jurnale de server cu date tehnice ale cererilor (tokenurile de acces sunt mascate).
+Scop: protejarea conturilor, detectarea abuzurilor și fraudei.
+Temei: interes legitim (art. 6 alin. (1) lit. f).
 
-Astran poate aplica restricții suplimentare anumitor categorii de vârstă în cadrul grupului de utilizatori sub 18 ani, în funcție de legislația aplicabilă, de funcțiile platformei și de măsurile de siguranță implementate.
+2.9. Dovada consimțământului și consimțământul opțional pentru marketing
+Stocăm dovada versiunii Termenilor și a acestei Politici pe care le-ai acceptat sau citit (versiune, dată, amprenta textului; fără IP sau date despre dispozitiv). Utilizatorii de la 16 ani pot da consimțământ opțional pentru e-mailuri de marketing; nu este necesar pentru a folosi Astran și poate fi retras oricând în Setări. Temei: obligație legală / interes legitim de a dovedi conformitatea (art. 6 alin. (1) lit. c/f); consimțământ pentru marketing (art. 6 alin. (1) lit. a).
 
+2.10. Date pe care nu le colectăm
+Astran nu cere acces la microfon, cameră sau locație, nu folosește identificatori publicitari ai dispozitivului, notificări push, SDK-uri de analiză sau de publicitate și nu oferă chat vocal sau video.
 
-2.2. 18+
 
-Această categorie este destinată persoanelor care au împlinit cel puțin 18 ani.
+3. DECIZII AUTOMATE
 
-Astran poate aplica reguli, funcții, restricții și mecanisme de verificare diferite în funcție de categoria de vârstă și de legislația aplicabilă.
+Astran nu ia decizii bazate exclusiv pe prelucrare automată care produc efecte juridice sau similar de semnificative asupra ta (art. 22 GDPR). Filtrul automat de chat pentru utilizatorii sub 18 ani maschează cuvinte sau mesaje după reguli fixe; poți contesta un rezultat prin formularul de contact.
 
-Selectarea categoriei de vârstă nu înlocuiește verificările sau consimțământul parental care pot fi necesare conform legislației aplicabile.
 
+4. DESTINATARI
 
-3. DATELE PE CARE LE PUTEM COLECTA
+Nu vindem și nu licențiem date personale. Datele sunt divulgate doar către:
+- furnizori de infrastructură care găzduiesc serverele, baza de date și (dacă este activat) memoria cache pentru mesageria în timp real [DE COMPLETAT: nume și locații];
+- un broker de autentificare și Google, pentru „Sign in with Google” (serviciul de autentificare Emergent și Google);
+- Google Play, Apple și Stripe, pentru verificarea plăților, rambursări și anulări;
+- un furnizor de livrare e-mail pentru e-mailurile de verificare, resetare a parolei și cele către părinți [DE COMPLETAT: furnizor];
+- furnizori de verificare a vârstei și a calității de părinte, doar dacă sunt configurați (vezi 2.2);
+- părinții sau tutorii utilizatorilor sub 16 ani, pentru datele necesare deciziei lor;
+- autorități competente, instanțe și alte părți, când legea o cere;
+- alți utilizatori, pentru conținutul pe care alegi să-l faci vizibil (nume de utilizator, nume afișat, avatar, jocuri, mesaje de chat).
+Furnizorii acționează ca persoane împuternicite, conform instrucțiunilor noastre, cu excepția cazurilor în care acționează ca operatori independenți (de ex. Google, Apple, Stripe pentru propriile servicii).
 
-În funcție de modul în care este utilizată platforma și de funcțiile disponibile, Astran poate colecta următoarele categorii de informații.
 
+5. TRANSFERURI INTERNAȚIONALE
 
-3.1. DATE DESPRE CONT
+Unii destinatari (de ex. Google, Apple, Stripe, furnizori de găzduire) pot prelucra date în afara SEE. [DE COMPLETAT: pentru fiecare transfer, garanția folosită — decizie de adecvare, clauze contractuale standard sau alta — și cum se poate obține o copie.]
 
-Putem colecta:
 
-- adresa de e-mail;
-- numele de utilizator;
-- numele afișat;
-- parola;
-- categoria de vârstă;
-- data nașterii sau alte informații privind vârsta, atunci când sunt necesare;
-- ID-ul contului;
-- data creării contului;
-- setările contului;
-- preferințele contului.
+6. PĂSTRAREA DATELOR
 
-Parolele nu sunt destinate stocării în format text simplu și trebuie protejate prin metode criptografice adecvate, cum ar fi hashing-ul cu un algoritm modern.
+Datele se păstrează cât timp există contul, cu excepția cazurilor în care este indicată o perioadă mai scurtă. Perioade tehnice actuale:
+- sesiuni: 7 zile; coduri de resetare a parolei și de verificare e-mail: până la expirare; prezența într-un joc: aproximativ 60 de secunde;
+- arhivele de export de date: șterse automat după 24 de ore;
+- elementele din coșul de proiecte: șterse definitiv după 30 de zile;
+- sesiunile de verificare a vârstei: șterse automat în maximum 24 de ore; linkurile parentale de unică folosință expiră (7 zile pentru decizie, 30 de zile pentru revendicare);
+- înregistrările de securitate ale conturilor active nu sunt în prezent șterse după un termen fix.
+După ștergerea contului, datele care trebuie păstrate sunt pseudonimizate și eliminate la expirarea termenului: evidențele achizițiilor cu bani reali 5 ani (contabilitate/anti-fraudă), dovada consimțământului 3 ani, rapoartele de moderare 365 de zile, înregistrările de securitate 365 de zile (fără IP). Aceste perioade sunt setările actuale ale platformei. [DE COMPLETAT: operatorul confirmă aceste perioade și justificarea lor legală]
+Copii de rezervă: [DE COMPLETAT: perioada de păstrare a copiilor de rezervă]
 
-Parolele nu vor fi comercializate sau furnizate unor terți în forma lor originală.
 
+7. ȘTERGEREA CONTULUI
 
-4. DATE DESPRE DISPOZITIV ȘI CONEXIUNE
+Îți poți șterge contul din Setări (cu re-autentificare și confirmare explicită). Sesiunile sunt revocate; prietenii, blocările, setările, avatarul, jocurile deținute, modelele, colaborările și jocurile recente sunt șterse; proprietatea grupurilor este transferată sau grupul este eliminat; mesajele directe sunt șterse sau partea ta este pseudonimizată; obiectele din magazin cumpărate de alții sunt retrase din vânzare și anonimizate; evidențele din secțiunea 6 sunt pseudonimizate și păstrate pe perioadele indicate. Mesajele tale din grupuri raportate moderatorilor pot fi păstrate pseudonimizat până la sfârșitul perioadei de moderare.
 
-Astran poate colecta:
 
-- adresa IP;
-- tipul dispozitivului;
-- producătorul și modelul dispozitivului;
-- versiunea sistemului de operare;
-- versiunea aplicației;
-- identificatori ai dispozitivului;
-- identificatori ai aplicației;
-- informații despre rețea;
-- informații despre browser, dacă platforma este accesată prin browser;
-- informații despre performanță;
-- crash-uri;
-- erori;
-- log-uri tehnice;
-- evenimente de securitate;
-- informații necesare pentru prevenirea fraudelor și abuzurilor.
+8. COPII ȘI MINORI
 
-Astran nu colectează în mod intenționat locația aproximativă a utilizatorului, cu excepția cazului în care acest lucru este modificat ulterior și este comunicat corespunzător utilizatorilor.
+- Utilizatorii introduc data nașterii la înregistrare; banda de vârstă nu poate fi ridicată ulterior fără un rezultat de verificare a vârstei.
+- Sub 16 ani: contul rămâne restricționat până când un părinte sau tutore își dă acordul prin fluxul de verificare; părinții pot consulta, retrage acordul și cere acțiuni asupra datelor prin panoul parental.
+- Sub 18 ani: chat filtrat, fără stocarea textului nefiltrat al mesajelor private, contact restricționat cu adulții și fără prelucrări opționale bazate pe consimțământ sub 16 ani.
+- Accesul 18+ cere verificarea vârstei de către un furnizor extern; fără furnizor, funcțiile 18+ rămân blocate.
 
 
-5. DATE DESPRE AVATAR ȘI IDENTITATEA DIN JOC
-
-Astran poate colecta și procesa:
-
-- avatarul utilizatorului;
-- hainele avatarului;
-- accesorii;
-- modele de personaje;
-- animații;
-- modificări ale avatarului;
-- obiecte deținute;
-- obiecte create;
-- obiecte publicate;
-- configurația avatarului;
-- istoricul modificărilor;
-- identificatorii obiectelor asociate contului.
-
-Aceste date pot fi utilizate pentru funcționarea platformei, afișarea profilului și a avatarului, multiplayer, personalizare, moderare, analiză, dezvoltarea produsului și alte scopuri descrise în această politică.
-
-
-6. DATE DESPRE JOCURI ȘI ACTIVITATEA UTILIZATORULUI
-
-Atunci când utilizatorul folosește Astran Game, putem colecta informații despre activitatea sa.
-
-Acestea pot include:
-
-- jocurile accesate;
-- jocurile jucate;
-- durata sesiunilor;
-- timpul petrecut în fiecare joc;
-- acțiunile efectuate în joc;
-- mișcările personajului;
-- poziția personajului în lumea jocului;
-- direcția de deplasare;
-- viteza;
-- săriturile;
-- interacțiunile cu obiectele;
-- obiectele utilizate;
-- obiectele colectate;
-- evenimentele din joc;
-- istoricul jocurilor;
-- interacțiunile multiplayer;
-- acțiunile efectuate în Studio;
-- acțiunile efectuate în editor;
-- jocurile create;
-- modificările efectuate asupra jocurilor;
-- modelele create;
-- avatarurile create;
-- conținutul publicat;
-- conținutul șters;
-- informații privind performanța jocurilor.
+9. DREPTURILE TALE ȘI CUM LE EXERCIȚI
 
-Astran poate decide ca anumite categorii de date să fie păstrate pentru o anumită perioadă, anonimizate, agregate, șterse sau să nu fie păstrate deloc, în funcție de necesitățile platformei, funcției și cerințele legale.
+Ai dreptul de acces, rectificare, ștergere, restricționare, portabilitate și opoziție, precum și dreptul de a-ți retrage oricând consimțământul, fără a afecta prelucrările anterioare (art. 15-21 și 7 alin. (3) GDPR).
+- Acces și portabilitate: Setări › Confidențialitate și securitate › Datele tale › Download Your Data (arhivă ZIP).
+- Ștergere: Setări › Confidențialitate și securitate (ștergerea contului).
+- Rectificare și preferințe: profil și Setări; gestionarea consimțămintelor în Setări.
+- Orice altceva: scrie-ne la adresa de e-mail de confidențialitate de mai sus. Răspundem în cel mult o lună (prelungibilă cu două luni pentru cereri complexe).
+Poți depune o plângere la Autoritatea Națională de Supraveghere a Prelucrării Datelor cu Caracter Personal (ANSPDCP, www.dataprotection.ro) sau la autoritatea din țara ta de reședință. Furnizarea datelor de la 2.1 și 2.2 este necesară pentru crearea unui cont; fără ele nu putem furniza serviciul.
 
 
-7. CHAT TEXT
+10. COOKIE-URI ȘI STOCARE LOCALĂ
 
-Astran poate procesa mesajele și alte comunicări text realizate prin platformă.
+Aplicația mobilă nu folosește cookie-uri. Stochează tokenul de sesiune și setările pe dispozitivul tău (stocare securizată / stocare locală) pentru a te menține autentificat și a reține preferințele. Versiunea web folosește stocarea locală a browserului în același scop. Nu se folosesc cookie-uri sau tehnologii similare de urmărire ori publicitate.
 
-Acestea pot include:
 
-- chat-ul din joc;
-- chat-ul public;
-- mesaje private;
-- mesaje între prieteni;
-- comunicări între utilizatori;
-- conținut transmis prin funcțiile sociale ale platformei.
+11. MODIFICĂRI
 
-Mesajele pot fi:
+Modificările materiale se publică ca versiune nouă; ți se poate cere să o citești și să o accepți din nou.
 
-- analizate automat;
-- analizate de sisteme AI;
-- moderate;
-- raportate;
-- stocate;
-- păstrate pentru perioade diferite;
-- șterse;
-- anonimizate;
-- utilizate pentru securitate;
-- utilizate pentru îmbunătățirea serviciilor;
-- utilizate pentru cercetare și dezvoltare;
-- utilizate pentru dezvoltarea și antrenarea sistemelor AI, atunci când există un temei legal corespunzător;
-- utilizate în alte scopuri permise de legislația aplicabilă.
 
-În funcție de funcție și de necesitățile platformei, anumite conversații pot să nu fie păstrate deloc, în timp ce altele pot fi păstrate pentru o perioadă mai lungă.
+12. CONTACT
 
+Operator: [DE COMPLETAT: denumirea legală și adresa]
+E-mail: [DE COMPLETAT: e-mail de confidențialitate]
+Responsabil cu protecția datelor (dacă a fost desemnat): [DE COMPLETAT: nume/contact sau „nu a fost desemnat”]
 
-8. VOICE CHAT ȘI DATE AUDIO
-
-Dacă utilizatorul acordă aplicației permisiunea de a accesa microfonul și utilizează o funcție care necesită microfonul, Astran poate procesa date audio și voce.
-
-Acestea pot include:
-
-- vocea utilizatorului;
-- înregistrări audio;
-- transmisii audio;
-- conversații vocale;
-- metadate asociate comunicării vocale;
-- informații tehnice despre transmisia audio.
-
-În funcție de funcție, setări și necesități, anumite comunicații audio pot:
-
-- să nu fie înregistrate;
-- să fie procesate temporar;
-- să fie păstrate;
-- să fie șterse după o anumită perioadă;
-- să fie analizate pentru moderare;
-- să fie utilizate pentru securitate;
-- să fie utilizate pentru dezvoltarea serviciului;
-- să fie utilizate pentru dezvoltarea sau antrenarea sistemelor AI, atunci când acest lucru este permis de lege și de baza juridică aplicabilă;
-- să fie utilizate în alte scopuri permise de legislația aplicabilă.
-
-Dacă utilizatorul nu acordă permisiunea sistemului de operare pentru microfon, Astran nu poate accesa microfonul prin funcția respectivă.
-
-
-9. CAMERĂ ȘI DATE VIDEO
-
-Dacă Astran introduce în viitor funcții care necesită acces la cameră, aplicația poate solicita permisiunea sistemului de operare.
-
-Dacă utilizatorul acordă permisiunea și utilizează funcția respectivă, Astran poate procesa:
-
-- imagini;
-- video;
-- transmisii video;
-- înregistrări;
-- informații tehnice asociate;
-- conținut generat prin cameră.
-
-În funcție de funcție, aceste date pot fi procesate temporar, înregistrate, păstrate, analizate, moderate, utilizate pentru dezvoltarea serviciului sau utilizate în alte scopuri permise de legislația aplicabilă.
-
-Fără permisiunea necesară a sistemului de operare, Astran nu poate accesa camera prin funcția respectivă.
-
-
-10. PRIETENI ȘI INTERACȚIUNI SOCIALE
-
-Putem colecta informații despre:
-
-- lista de prieteni;
-- cereri de prietenie;
-- utilizatori blocați;
-- utilizatori raportați;
-- utilizatori dezactivați sau mutați;
-- interacțiuni între utilizatori;
-- grupuri;
-- roluri;
-- administratori;
-- membri;
-- activitatea socială asociată contului.
-
-
-11. RAPOARTE, BLOCĂRI ȘI MODERARE
-
-Dacă un utilizator raportează, blochează sau dezactivează un alt utilizator, putem colecta și păstra informațiile necesare pentru:
-
-- investigarea raportului;
-- aplicarea regulilor;
-- prevenirea abuzului;
-- securitate;
-- detectarea fraudelor;
-- soluționarea disputelor;
-- aplicarea sancțiunilor;
-- protejarea utilizatorilor.
-
-
-12. ACHIZIȚII ȘI INFORMAȚII FINANCIARE
-
-Astran poate colecta:
-
-- istoricul achizițiilor;
-- produsele cumpărate;
-- monedele virtuale cumpărate;
-- abonamente;
-- tranzacții;
-- rambursări;
-- informații despre metoda de plată;
-- identificatori de tranzacție;
-- informații furnizate de procesatorii de plăți.
-
-Datele complete ale cardului sau alte date financiare sensibile pot fi procesate de procesatori de plăți specializați, în funcție de metoda de plată utilizată.
-
-Astran nu intenționează să comercializeze date precum numărul complet al cardului sau parolele.
-
-În schimb, putem transmite informațiile necesare procesatorilor de plăți și altor furnizori autorizați.
-
-
-13. DATE FURNIZATE DE PĂRINȚI SAU TUTORI
-
-Dacă este necesar consimțământul parental, Astran poate colecta de la părintele sau tutorele:
-
-- adresa de e-mail;
-- numele, dacă este necesar;
-- informații necesare verificării consimțământului;
-- data și momentul acordării consimțământului;
-- informații privind relația cu minorul, atunci când este necesar;
-- informații tehnice și administrative asociate procesului de verificare.
-
-Aceste date pot fi utilizate pentru verificarea, documentarea și gestionarea consimțământului parental.
-
-
-14. CUM PUTEM UTILIZA DATELE
-
-În măsura permisă de legislația aplicabilă și în funcție de baza juridică relevantă, Astran poate utiliza datele pentru:
-
-- furnizarea platformei;
-- funcționarea jocurilor;
-- multiplayer;
-- conturi;
-- autentificare;
-- securitate;
-- prevenirea fraudelor;
-- prevenirea abuzului;
-- moderare;
-- aplicarea regulilor;
-- suport;
-- rezolvarea problemelor;
-- dezvoltarea produsului;
-- analiză;
-- statistici;
-- cercetare;
-- personalizare;
-- recomandări;
-- publicitate;
-- marketing;
-- măsurarea performanței;
-- dezvoltarea de noi funcții;
-- dezvoltarea și antrenarea sistemelor AI;
-- evaluarea sistemelor AI;
-- îmbunătățirea sistemelor AI;
-- detectarea conținutului problematic;
-- detectarea comportamentului automatizat sau fraudulos;
-- protejarea platformei;
-- respectarea obligațiilor legale;
-- alte scopuri permise de legislația aplicabilă.
-
-
-15. UTILIZAREA PENTRU AI
-
-Astran poate utiliza anumite date colectate prin platformă pentru:
-
-- dezvoltarea modelelor AI;
-- antrenarea modelelor AI;
-- evaluarea modelelor AI;
-- testarea modelelor AI;
-- îmbunătățirea modelelor AI;
-- cercetare;
-- dezvoltarea unor produse sau servicii bazate pe AI.
-
-Aceste date pot include, în funcție de funcție și de temeiul juridic aplicabil:
-
-- date despre jocuri;
-- comportament în joc;
-- conversații text;
-- interacțiuni;
-- conținut creat;
-- date audio;
-- voce;
-- alte date tehnice.
-
-Astran poate utiliza datele direct sau prin furnizori, parteneri, cercetători sau alte organizații autorizate.
-
-
-16. RESTRICȚIE PRIVIND ANUMITE UTILIZĂRI AI ALE VOCII
-
-Deși Astran poate permite utilizarea anumitor date pentru dezvoltarea sistemelor AI, Astran nu autorizează utilizarea datelor vocale, a stilului vocal sau a altor date asociate vocii pentru dezvoltarea unor sisteme AI destinate în mod specific:
-
-- generării de conținut pornografic;
-- generării de deepfake-uri sexuale;
-- simulării sexuale a unei persoane;
-- imitării sexuale neconsensuale a unei persoane;
-- creării unei simulări romantice sau intime prezentate ca o relație cu utilizatorul;
-- altor utilizări similare pe care Astran le interzice prin contract sau politică.
-
-Această restricție poate fi inclusă în acordurile contractuale cu destinatarii datelor pentru a impune respectarea ei.
-
-
-17. COMERCIALIZAREA ȘI LICENȚIEREA DATELOR
-
-În măsura permisă de lege și în baza juridică aplicabilă, Astran poate licenția, transmite, pune la dispoziție sau comercializa anumite date și informații către terți.
-
-Acești terți pot include:
-
-- companii;
-- furnizori;
-- parteneri comerciali;
-- cercetători;
-- dezvoltatori;
-- organizații;
-- instituții;
-- alte entități;
-- în anumite situații, persoane fizice.
-
-Datele pot fi furnizate pentru scopuri precum:
-
-- analiză;
-- cercetare;
-- publicitate;
-- marketing;
-- personalizare;
-- AI;
-- dezvoltare software;
-- securitate;
-- statistică;
-- cercetare comercială;
-- dezvoltarea de produse;
-- servicii comerciale;
-- alte scopuri permise de legislația aplicabilă.
-
-
-18. TRANSMITEREA ULTERIOARĂ DE CĂTRE DESTINATARI
-
-În măsura permisă de lege și de acordurile aplicabile, un destinatar al datelor poate utiliza datele primite și le poate transmite sau licenția mai departe.
-
-Astfel, datele pot circula între mai multe organizații sau persoane.
-
-Acolo unde Astran impune contractual restricții privind anumite utilizări, destinatarii trebuie să respecte respectivele restricții.
-
-Astran nu poate garanta modul în care un terț va utiliza ulterior datele după ce transferul a fost efectuat, dacă legea și contractele aplicabile permit acea utilizare.
-
-
-19. DATE SENSIBILE ȘI DATE CU RISC RIDICAT
-
-Astran nu intenționează să comercializeze în mod obișnuit anumite date extrem de sensibile, cum ar fi:
-
-- parole;
-- numere complete de card;
-- chei de autentificare;
-- token-uri secrete;
-- alte credențiale de securitate.
-
-Pentru alte categorii de date personale, posibilitatea de transmitere, licențiere sau comercializare va depinde de legislația aplicabilă, baza juridică și consimțământul necesar.
-
-
-20. PROCESAREA INTERNAȚIONALĂ
-
-Astran poate utiliza furnizori și infrastructură aflate în:
-
-- Europa;
-- America de Nord;
-- America de Sud;
-- Asia;
-- Africa;
-- Australia și Oceania;
-- alte regiuni.
-
-Prin urmare, datele pot fi transferate sau procesate pe alte continente decât cel în care locuiește utilizatorul.
-
-Pentru transferurile internaționale, Astran va aplica mecanismele juridice necesare atunci când acestea sunt cerute de legislația aplicabilă.
-
-
-21. CÂT TIMP PĂSTRĂM DATELE
-
-Astran poate păstra diferite categorii de date pentru perioade diferite.
-
-Unele date pot fi:
-
-- șterse rapid;
-- păstrate temporar;
-- păstrate atât timp cât sunt necesare funcției;
-- păstrate pentru securitate;
-- păstrate pentru obligații legale;
-- anonimizate;
-- agregate;
-- păstrate în sisteme de backup pentru o anumită perioadă.
-
-Perioada de păstrare poate varia în funcție de tipul datelor, scopul pentru care au fost colectate, funcția utilizată, obligațiile legale și alte circumstanțe relevante.
-
-Astran nu garantează că toate datele sunt șterse imediat după încetarea utilizării unei funcții.
-
-
-22. CE SE ÎNTÂMPLĂ CÂND ȘTERGI CONTUL
-
-Ștergerea contului nu înseamnă automat că fiecare copie a fiecărei informații asociate contului este imediat eliminată din toate sistemele sau de la toți destinatarii.
-
-Detaliile privind acest lucru vor fi prezentate într-o Politică separată privind ștergerea contului și păstrarea datelor.
-
-În funcție de legislația aplicabilă, anumite date pot rămâne necesare pentru:
-
-- obligații legale;
-- securitate;
-- prevenirea fraudelor;
-- soluționarea disputelor;
-- evidențe financiare;
-- backup-uri;
-- respectarea obligațiilor contractuale;
-- date deja anonimizate sau agregate;
-- date care au fost deja transmise unui terț în condițiile permise de lege.
-
-Ștergerea contului oprește utilizarea contului ca serviciu activ și, în funcție de funcție și de legislația aplicabilă, poate opri colectarea unor date noi asociate contului.
-
-Datele colectate anterior pot continua să existe în sistemele Astran sau în sistemele terților atunci când acest lucru este permis de lege și de acordurile aplicabile.
-
-Drepturile obligatorii de ștergere și alte drepturi prevăzute de legislația aplicabilă vor fi respectate.
-
-
-23. MODIFICAREA ACESTEI POLITICI
-
-Astran poate modifica această Politică de Confidențialitate.
-
-Dacă modificările sunt importante, Astran poate solicita utilizatorului să revizuiască și, atunci când este necesar, să accepte noua versiune înainte de a continua utilizarea anumitor servicii.
-
-Pentru prelucrările pentru care este necesar un consimțământ nou sau separat, Astran va solicita consimțământul corespunzător.
-
-
-24. UTILIZATORII MINORI
-
-Astran aplică măsuri suplimentare atunci când utilizatorul este minor.
-
-Acestea pot include:
-
-- verificarea vârstei;
-- solicitarea e-mailului unui părinte sau tutore;
-- obținerea consimțământului parental;
-- limitarea anumitor funcții;
-- limitarea anumitor tipuri de publicitate;
-- limitarea anumitor tipuri de transmitere a datelor;
-- mecanisme suplimentare de siguranță.
-
-Pentru utilizatorii copii, anumite forme de comercializare sau divulgare a datelor pot necesita consimțământ parental separat sau pot fi restricționate de lege.
-
-Regulile aplicabile minorilor pot varia în funcție de țara în care utilizatorul se află.
-
-
-25. RESPECTAREA LEGISLAȚIEI
-
-Nicio prevedere din această Politică de Confidențialitate nu trebuie interpretată ca permițând Astran să efectueze o prelucrare care este interzisă de legislația aplicabilă.
-
-Dacă o lege locală acordă utilizatorului protecții suplimentare, Astran va respecta aceste cerințe în măsura în care sunt aplicabile.
-
-În special, pentru utilizatorii din UE și SEE, Astran va ține cont de cerințele legislației privind protecția datelor, inclusiv principiile privind legalitatea, transparența, limitarea scopului, minimizarea datelor, securitatea și limitarea stocării.
-
-
-26. CONTACT
-
-Pentru întrebări privind această Politică de Confidențialitate:
-
-Operator:
-[NUMELE LEGAL AL COMPANIEI — ÎNLOCUIEȘTE CÂND ÎL AI]
-
-E-mail:
-[EMAIL DE CONFIDENȚIALITATE — ÎNLOCUIEȘTE CÂND ÎL AI]
-
-Website:
-[WEBSITE — ÎNLOCUIEȘTE CÂND ÎL AI]
-
-Adresă:
-[ADRESA LEGALĂ — ÎNLOCUIEȘTE CÂND ESTE DISPONIBILĂ]
-
-
-SFÂRȘITUL POLITICII DE CONFIDENȚIALITATE`;
+SFÂRȘITUL POLITICII DE CONFIDENȚIALITATE
+`;

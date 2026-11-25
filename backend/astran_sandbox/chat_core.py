@@ -48,8 +48,10 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from astran_sandbox.chat_filter import CompiledRule, filter_text
 
+from astran_sandbox import contact_policy as CP
 from astran_sandbox.ws_fanout import send_safely
 log = logging.getLogger("astran.chat")
+CP_LOG = logging.getLogger("astran.chat.age_scope")
 
 MAX_CHAT_LEN = 200          # caractere (code points), dupa curatare
 MAX_RAW_LEN = 1000          # mai mult de atat, nici nu mai procesam
@@ -229,30 +231,48 @@ class ChatDispatcher:
         if not others:
             return set(), {}
         blocked = await self._blocked_with(author_id, others)
-        ages: dict = {}
-        if author_adult:
-            # raw se trimite doar adultilor; verificam varsta lor ACUM, nu cea de la conectare
-            candidates = [m.user_id for m in members if m.user_id != author_id and m.is_adult]
-            if candidates:
-                ages = await self._recipient_ages(candidates)
+        # POLITICA ADULT<->MINOR: categoria FIECARUI destinatar se citeste ACUM din DB (nu cea de la conectare) -
+        # o folosim si pentru ce text vede (raw/filtrat), si pentru DACA primeste mesajul (vezi `_may_receive`).
+        ages = await self._recipient_ages(others)
         return set(blocked), ages
+
+    @staticmethod
+    def _may_receive(sender_adult: bool, ages: dict, uid: str) -> bool:
+        """Politica de contact Adult<->Minor (contact_policy), aplicata PE SERVER inainte de orice livrare.
+        `ages[uid]` este True (adult) / False (minor) / None sau lipsa (categorie necunoscuta => NU primeste)."""
+        flag = ages.get(uid)
+        if not isinstance(flag, bool):
+            return False
+        return CP.chat_allowed(CP.ADULT if sender_adult else CP.MINOR, CP.ADULT if flag else CP.MINOR)
 
     # ---------------------------------------------------------------- conectare
     async def on_join(self, room: Any, member: Any) -> None:
-        await self._send(member, {"t": "chat_info", "mode": ADULT if member.is_adult else "under_18", "max_len": MAX_CHAT_LEN})
+        try:
+            me = (await self._recipient_ages([member.user_id])).get(member.user_id)   # categoria ACUM, din DB
+        except Exception:  # noqa: BLE001 - fail closed
+            log.warning("chat: categoria utilizatorului nu a putut fi citita", exc_info=True)
+            me = None
+        if not isinstance(me, bool):
+            # varsta necunoscuta: nu presupunem nimic; fara chat (nici istoric, nici trimitere)
+            await self._send(member, {"t": "chat_info", "mode": "restricted", "max_len": MAX_CHAT_LEN})
+            await self._send(member, {"t": "chat_history", "messages": []})
+            return
+        await self._send(member, {"t": "chat_info", "mode": ADULT if me else "under_18", "max_len": MAX_CHAT_LEN})
         recs = list(room.chat_buffer)[-HISTORY_ON_JOIN:]
         messages: list = []
         if recs:
             try:
                 authors = sorted({r.user_id for r in recs if r.user_id != member.user_id})
                 blocked = await self._blocked_with(member.user_id, authors) if authors else set()
-                ages = await self._recipient_ages([member.user_id]) if member.is_adult else {}
             except Exception:  # noqa: BLE001
                 log.warning("chat: istoricul nu a putut fi pregatit", exc_info=True)
-                recs, blocked, ages = [], set(), {}
-            adult = bool(ages.get(member.user_id, False))
+                recs, blocked = [], set()
+            adult = me
             for r in recs:
                 if r.user_id in blocked:
+                    continue
+                # istoricul vine DOAR de la autori din aceeasi categorie (mesajul retine categoria autorului)
+                if r.user_id != member.user_id and bool(r.sender_adult) != adult:
                     continue
                 messages.append(self._public(r, text_for(r, adult)))
         await self._send(member, {"t": "chat_history", "messages": messages})
@@ -285,7 +305,12 @@ class ChatDispatcher:
             await self.error(member, "muted", cid, muted_until - self._clock())
             return
 
-        sender_adult = state.get("age_category") == ADULT   # DOAR din DB; orice altceva = sub 18
+        sender_cat = CP.category_of(state.get("age_category"))   # DOAR din DB; necunoscuta => refuz (nu presupunem)
+        if sender_cat is None:
+            CP_LOG.warning("chat_denied code=%s", CP.CODE_AGE_UNKNOWN)
+            await self.error(member, "age_restricted", cid)
+            return
+        sender_adult = sender_cat == ADULT
         safe = filter_text(text, compiled).text
         rec = ChatRecord(
             id=uuid.uuid4().hex[:16], ts=int(self._clock() * 1000), user_id=member.user_id,
@@ -315,7 +340,7 @@ class ChatDispatcher:
             if m.user_id == rec.user_id:
                 sends.append(self._send(m, self._public(rec, text_for(rec, bool(rec.sender_adult)), echo_cid)))  # expeditorul isi vede propriul text
                 continue
-            if m.user_id in blocked:
+            if m.user_id in blocked or not self._may_receive(bool(rec.sender_adult), ages, m.user_id):
                 continue
             sends.append(self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False))))))
         if sends:
@@ -346,7 +371,7 @@ class ChatDispatcher:
             return
         room.chat_buffer.append(rec)
         sends = [self._send(m, self._public(rec, text_for(rec, bool(ages.get(m.user_id, False)))))
-                 for m in members if m.user_id not in blocked]
+                 for m in members if m.user_id not in blocked and self._may_receive(adult, ages, m.user_id)]
         if sends:
             await asyncio.gather(*sends)
 
