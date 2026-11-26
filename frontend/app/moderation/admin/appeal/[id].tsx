@@ -13,7 +13,8 @@ export default function AdminAppeal() {
   const aid = String(id);
   const { lang } = useI18n();
   const { data, error, loading, reload } = useLoad(() => modApi.adminAppeal(aid), [aid]);
-  const [outcome, setOutcome] = useState<"maintain" | "reverse">("maintain");
+  const [outcome, setOutcome] = useState<"maintain" | "reverse" | "modify">("maintain");
+  const [days, setDays] = useState("7"); const [scope, setScope] = useState<"chat" | "full">("full");
   const [reasoning, setReasoning] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -41,13 +42,23 @@ export default function AdminAppeal() {
         <Body dim>{ms(lang, "adm_decision_by")} {d.moderator_id} · {fmt(d.created_at)}</Body>
         <Body>{d.reasoning}</Body>
         {sor ? <Body dim>{ms(lang, "dec_sor")}: {sor.sor_id}</Body> : null}
+        {a.timing ? <Body dim>{ms(lang, "appeal_timing")}: {fmt(a.timing.submitted_at)} · {ms(lang, "appeal_review_started")}: {fmt(a.timing.review_started_at)} · {ms(lang, "appeal_resolved_at")}: {fmt(a.timing.resolved_at)}</Body> : null}
+        <Body dim>{ms(lang, "appeal_no_deadline")}</Body>
       </Card>
       {open ? (
         <Card>
           {a.status === "received" ? <Btn kind="ghost" label={ms(lang, "adm_start_review")} disabled={busy} onPress={() => act(() => modApi.startReview(aid))} testID="appeal-start" /> : null}
-          <Chips value={outcome} onChange={setOutcome} options={[{ value: "maintain", label: ms(lang, "appeal_maintain") }, { value: "reverse", label: ms(lang, "appeal_reverse") }]} />
+          <Chips value={outcome} onChange={setOutcome} options={[{ value: "maintain", label: ms(lang, "appeal_maintain") }, { value: "reverse", label: ms(lang, "appeal_reverse") },
+            ...(["restrict_account_temporary", "suspend_account_permanent"].includes(d.action) ? [{ value: "modify" as const, label: ms(lang, "appeal_modify") }] : [])]} />
+          {outcome === "modify" ? (
+            <>
+              <Input testID="appeal-modify-days" label={ms(lang, "appeal_modify_days")} value={days} onChangeText={setDays} keyboardType="numeric" maxLength={3} />
+              <Chips label={ms(lang, "appeal_modify_scope")} value={scope} onChange={setScope} options={[{ value: "chat", label: "chat" }, { value: "full", label: "full" }]} />
+            </>
+          ) : null}
           <Input testID="appeal-resolve-reasoning" label={ms(lang, "appeal_reasoning")} value={reasoning} onChangeText={setReasoning} multiline maxLength={4000} />
-          <Btn testID="appeal-resolve" label={ms(lang, "adm_resolve")} disabled={busy || reasoning.trim().length < 20} onPress={() => act(() => modApi.resolveAppeal(aid, outcome, reasoning))} />
+          <Btn testID="appeal-resolve" label={ms(lang, "adm_resolve")} disabled={busy || reasoning.trim().length < 20 || (outcome === "modify" && !(parseInt(days, 10) >= 1))}
+            onPress={() => act(() => modApi.resolveAppeal(aid, outcome, reasoning, outcome === "modify" ? { days: parseInt(days, 10), scope } : undefined))} />
         </Card>
       ) : null}
       <H>{ms(lang, "adm_history")}</H>

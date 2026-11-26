@@ -269,6 +269,8 @@ from astran_sandbox import parental_consent as parental_consent
 from astran_sandbox.age_routes import make_age_router
 from astran_sandbox import moderation_service as MOD    # DSA: moderare, Art. 16/17/20 (vezi moderation_service.py)
 from astran_sandbox.moderation_routes import make_moderation_router, make_contact_router
+from astran_sandbox.dsa_routes import make_dsa_router     # DSA Art. 9/10/15/16/24(5): notificari publice, ordine, transparenta, TDB
+from astran_sandbox import dsa_migrations as DSA_MIG, dsa_delivery as DSA_DL, dsa_tdb as DSA_TDB, authority_orders as DSA_AO, dsa_public_notices as DSA_PN
 from astran_sandbox.media_validation import clean_image_ref
 from astran_sandbox.scene_validation import clean_scene
 
@@ -699,6 +701,15 @@ async def startup():
     app.state.google_voided_task = asyncio.create_task(_google_voided_loop())
     await db.reports.create_index("report_id", unique=True)
     await MOD.ensure_indexes(db)   # DSA: colectii de moderare (aditiv, nu schimba datele existente)
+    try:
+        applied = await DSA_MIG.migrate_up(db)      # DSA remediation: indexuri/constrangeri versionate (vezi dsa_migrations.py)
+        if applied:
+            log.info("DSA migrations applied: %s", applied)
+    except Exception:  # noqa: BLE001
+        log.exception("DSA migration failed - DSA queues/orders may be unavailable until fixed")
+    app.state.dsa_delivery_task = asyncio.create_task(DSA_DL.delivery_worker(db))   # emailuri Art. 17/20/16 cu reincercari
+    app.state.dsa_tdb_task = asyncio.create_task(DSA_TDB.tdb_worker(db))            # inactiv pana la configurare + statut juridic stabilit
+    app.state.dsa_retention_task = asyncio.create_task(_dsa_retention_loop())
     await db.recently_played.create_index([("user_id", 1), ("played_at", -1)])
     # Server instances: mai multe "camere" pentru acelasi joc, fiecare cu propriul plafon de jucatori.
     await db.game_instances.create_index("instance_id", unique=True)
@@ -786,8 +797,26 @@ async def startup():
     log.info("Astran API ready. DB=%s", DB_NAME)
 
 
+async def _dsa_retention_loop():
+    """Retentie DSA: ordine inchise expirate, metadate anti-abuz, livrari terminale vechi. Ruleaza o data la 6 ore."""
+    while True:
+        try:
+            await DSA_AO.purge_expired(db)
+            await DSA_PN.purge_abuse_metadata(db, int(os.environ.get("ASTRAN_ABUSE_RETENTION_DAYS", "30")))
+            await DSA_DL.purge_old(db, int(os.environ.get("ASTRAN_DELIVERY_RETENTION_DAYS", "90")))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("DSA retention iteration failed")
+        await asyncio.sleep(6 * 3600)
+
+
 @app.on_event("shutdown")
 async def shutdown():
+    for _name in ("dsa_delivery_task", "dsa_tdb_task", "dsa_retention_task"):
+        _t = getattr(app.state, _name, None)
+        if _t is not None:
+            _t.cancel()
     task = getattr(app.state, "money_recovery_task", None)
     if task is not None:
         task.cancel()
@@ -3543,6 +3572,7 @@ api.include_router(make_age_router(
 # DSA: /api/moderation/* (rapoarte, notificari Art. 16, decizii Art. 17, plangeri Art. 20, panou staff) si /api/contact/*
 api.include_router(make_moderation_router(get_current_user, db, target_exists=_moderation_target_exists))
 api.include_router(make_contact_router(db, client_ip=_client_ip))
+api.include_router(make_dsa_router(get_current_user, db, target_exists=_moderation_target_exists, client_ip=_client_ip))
 
 app.include_router(api)
 

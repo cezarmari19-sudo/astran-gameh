@@ -31,7 +31,7 @@ export const modApi = {
   appeal: (decisionId: string, body: { grounds: string; evidence_text?: string; evidence_urls?: string[] }) =>
     api<any>(`/moderation/me/decisions/${encodeURIComponent(decisionId)}/appeals`, j(body)),
   myAppeals: () => api<{ appeals: any[] }>("/moderation/me/appeals"),
-  role: () => api<{ role: "admin" | "moderator" | null }>("/moderation/me/role"),
+  role: () => api<{ role: "admin" | "moderator" | null; orders?: boolean }>("/moderation/me/role"),
   // contact (public)
   contactInfo: () => api<any>("/contact/info"),
   contactSend: (body: { channel: string; name?: string; email: string; subject: string; message: string }) =>
@@ -50,6 +50,7 @@ export const modApi = {
   adminAppeals: (status?: string) => api<{ appeals: any[] }>(`/moderation/admin/appeals${qs({ status })}`),
   adminAppeal: (id: string) => api<any>(`/moderation/admin/appeals/${encodeURIComponent(id)}`),
   startReview: (id: string) => api(`/moderation/admin/appeals/${encodeURIComponent(id)}/start-review`, { method: "POST" }),
-  resolveAppeal: (id: string, outcome: "maintain" | "reverse", reasoning: string) => api(`/moderation/admin/appeals/${encodeURIComponent(id)}/resolve`, j({ outcome, reasoning })),
+  resolveAppeal: (id: string, outcome: "maintain" | "reverse" | "modify", reasoning: string, modification?: { days: number; scope: "chat" | "full" }) =>
+    api(`/moderation/admin/appeals/${encodeURIComponent(id)}/resolve`, j({ outcome, reasoning, ...(modification ? { modification } : {}) })),
   contactMessages: () => api<{ messages: any[] }>("/moderation/admin/contact-messages"),
 };

@@ -52,7 +52,9 @@ export default function DecisionScreen() {
               {sor.basis.legal_ground ? <KV k={ms(lang, "dec_legal_ground")} v={sor.basis.legal_ground} /> : null}
               {sor.basis.tos_provision ? <KV k={ms(lang, "dec_tos")} v={`${sor.basis.tos_provision} (${sor.basis.tos_document})`} /> : null}
               <KV k={ms(lang, "dec_automated")} v={sor.automated_means.used_for_detection ? ms(lang, "dec_automated_detect") : ms(lang, "dec_automated_no")} />
+              {sor.initiated_by ? <KV k={ms(lang, "dec_initiated")} v={ms(lang, ("dec_init_" + sor.initiated_by) as any)} /> : null}
               <KV k={ms(lang, "dec_issued")} v={fmt(sor.issued_at)} />
+              {d.delivery ? <KV k={ms(lang, "dec_delivery")} v={ms(lang, ({ sent: "del_user_sent", pending: "del_user_pending", not_sent: "del_user_not_sent", no_email_on_file: "del_user_no_email" } as any)[d.delivery.status] ?? "del_user_pending")} /> : null}
             </Card>
           ) : <Body dim>{ms(lang, "dec_no_statement")}</Body>}
         </>
@@ -81,13 +83,17 @@ export default function DecisionScreen() {
         </Card>
       ) : null}
 
+      {d.decision?.status === "modified" ? <Body dim>{ms(lang, "dec_modified_note")}</Body> : null}
       <H>{ms(lang, "appeal_title")}</H>
+      <Body dim>{ms(lang, "appeal_how")}</Body>
       {ap ? (
         <Card>
           <Badge label={label(lang, "appeal_", ap.status)} tone={tone(ap.status)} />
           <Text />
           <KV k={ms(lang, "appeal_grounds")} v={ap.grounds} />
           <KV k={ms(lang, "appeal_sent")} v={fmt(ap.created_at)} />
+          {ap.review_started_at ? <KV k={ms(lang, "appeal_review_started")} v={fmt(ap.review_started_at)} /> : null}
+          {ap.resolved_at ? <KV k={ms(lang, "appeal_resolved_at")} v={fmt(ap.resolved_at)} /> : null}
           {ap.outcome ? <KV k={ms(lang, "appeal_reasoning")} v={ap.outcome_reasoning} /> : null}
         </Card>
       ) : (

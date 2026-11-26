@@ -80,9 +80,15 @@ class CorrectionBody(_Strict):
     text: str = Field(min_length=1, max_length=MS.MAX_TEXT)
 
 
+class ModificationBody(_Strict):
+    days: int = Field(ge=1, le=365)
+    scope: Literal["chat", "full"] = "full"
+
+
 class ResolveAppealBody(_Strict):
-    outcome: Literal["maintain", "reverse"]
+    outcome: Literal["maintain", "reverse", "modify"]
     reasoning: str = Field(min_length=1, max_length=MS.MAX_TEXT)
+    modification: Optional[ModificationBody] = None      # doar pentru outcome="modify" (restrictii/suspendari de cont)
 
 
 class ModeratorBody(_Strict):
@@ -188,13 +194,14 @@ def make_moderation_router(get_current_user, db, *, target_exists: Callable[[str
     @router.get("/me/role")
     async def my_role(current: dict = Depends(get_current_user)):
         """Doar pentru a afisa/ascunde meniul in UI; autorizarea reala se face la fiecare ruta /admin."""
-        return {"role": MS.role_of(current)}
+        from . import authority_orders as _AO   # doar afiseaza/ascunde intrarea in UI; ordinele raman protejate pe server
+        return {"role": MS.role_of(current), "orders": bool(_AO.order_role(current))}
 
     # ------------------------------------------------------------------ personal autorizat
     @router.get("/admin/reports")
     async def admin_reports(_s: dict = Depends(staff), status: Optional[str] = None, category: Optional[str] = None,
                             target_type: Optional[Literal["user", "game", "message"]] = None,
-                            kind: Optional[Literal["rule_violation", "illegal_content_notice"]] = None,
+                            kind: Optional[Literal["rule_violation", "illegal_content_notice", "own_initiative", "authority_order"]] = None,
                             assigned_to: Optional[str] = Query(default=None, max_length=64),
                             date_from: Optional[datetime] = None, date_to: Optional[datetime] = None,
                             q: Optional[str] = Query(default=None, max_length=100),
@@ -253,7 +260,8 @@ def make_moderation_router(get_current_user, db, *, target_exists: Callable[[str
 
     @router.post("/admin/appeals/{appeal_id}/resolve")
     async def admin_resolve(appeal_id: str, body: ResolveAppealBody, s: dict = Depends(staff)):
-        return await run(MS.resolve_appeal(db, s, appeal_id, outcome=body.outcome, reasoning=body.reasoning))
+        return await run(MS.resolve_appeal(db, s, appeal_id, outcome=body.outcome, reasoning=body.reasoning,
+                                                  modification=body.modification.model_dump() if body.modification else None))
 
     @router.post("/admin/moderators")
     async def admin_set_moderator(body: ModeratorBody, s: dict = Depends(staff)):

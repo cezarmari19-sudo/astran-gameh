@@ -63,7 +63,12 @@
     "account_deletions": "6/7",
     "privacy_codes": "6/7",
     "privacy_export_jobs": "6/7",
-    "privacy_exports": "6/7"
+    "privacy_exports": "6/7",
+    "moderation_deliveries": "2.6",
+    "tdb_submissions": "2.6",
+    "authority_orders": "2.6",
+    "authority_order_attachments": "2.6",
+    "transparency_reports": "2.6"
   },
   "outbound_hosts": {
     "api.stripe.com": "2.7 / 4 - verificare plati, rambursari",

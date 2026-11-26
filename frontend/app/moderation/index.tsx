@@ -23,6 +23,8 @@ export default function ModerationHub() {
     { icon: "gavel", key: "mod_decisions", go: () => router.push("/moderation/decisions"), id: "mod-decisions" },
     { icon: "message-alert-outline", key: "mod_appeals", go: () => router.push("/moderation/appeals"), id: "mod-appeals" },
     { icon: "file-document-outline", key: "mod_terms", go: () => setTerms(true), id: "mod-terms" },
+    { icon: "alert-octagon-outline", key: "mod_report_illegal", go: () => router.push("/moderation/report-illegal"), id: "mod-report-illegal" },
+    { icon: "chart-box-outline", key: "mod_transparency", go: () => router.push("/moderation/transparency"), id: "mod-transparency" },
     { icon: "email-outline", key: "mod_contact", go: () => router.push("/moderation/contact"), id: "mod-contact" },
   ];
   return (

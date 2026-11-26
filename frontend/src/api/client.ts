@@ -96,6 +96,11 @@ export async function api<T = any>(
   return data as T;
 }
 
+// URL absolut catre un endpoint PUBLIC (fara autentificare), pentru linkuri de descarcare (ex. rapoarte de transparenta JSON/CSV).
+export function publicApiUrl(path: string): string {
+  return BASE_VALID ? `${BASE}/api${path}` : "";
+}
+
 // Pentru descarcari binare (ZIP-ul GDPR): api() citeste raspunsul ca text/JSON, deci nu merge pentru fisiere.
 // Intoarce URL-ul absolut + antetul Authorization. Tokenul NU intra niciodata in URL.
 export async function authedRequestInfo(path: string): Promise<{ url: string; headers: Record<string, string> }> {

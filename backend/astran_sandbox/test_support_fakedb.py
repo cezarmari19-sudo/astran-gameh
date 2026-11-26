@@ -212,9 +212,25 @@ class Collection:
 
     async def create_index(self, spec, unique=False, **kw):
         await asyncio.sleep(0)
-        if unique:
-            fields = (spec,) if isinstance(spec, str) else tuple(x[0] for x in spec)
+        fields = (spec,) if isinstance(spec, str) else tuple(x[0] for x in spec)
+        name = kw.get("name") or "_".join(fields) + "_idx"
+        if not hasattr(self, "indexes"):
+            self.indexes = {}
+        self.indexes[name] = (fields, bool(unique))
+        if unique and fields not in self.unique:
             self.unique.append(fields)
+
+    async def drop_index(self, name):
+        await asyncio.sleep(0)
+        idx = getattr(self, "indexes", {})
+        if name not in idx:
+            raise KeyError(f"index not found with name [{name}]")
+        fields, unique = idx.pop(name)
+        if unique and not any(u and f == fields for f, u in idx.values()):
+            self.unique = [u for u in self.unique if u != fields]
+
+    async def index_information(self):
+        return {n: {"key": list(f), "unique": u} for n, (f, u) in getattr(self, "indexes", {}).items()}
 
     async def insert_one(self, doc):
         await asyncio.sleep(0)
@@ -298,6 +314,10 @@ class FakeDB:
         if name not in self._c:
             self._c[name] = Collection(name)
         return self._c[name]
+
+    async def drop_collection(self, name):
+        await asyncio.sleep(0)
+        self._c.pop(name, None)
 
     def all_docs(self):
         for name, c in self._c.items():

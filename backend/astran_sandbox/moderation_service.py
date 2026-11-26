@@ -42,6 +42,17 @@ OPEN_STATUSES = (STATUS_PENDING, LEGACY_OPEN, STATUS_REVIEW)
 
 KIND_RULE = "rule_violation"              # raport obisnuit (incalcare a regulilor platformei) - NU este notificare Art. 16
 KIND_NOTICE = "illegal_content_notice"    # notificare de continut presupus ilegal (Art. 16)
+KIND_OWN = "own_initiative"               # caz deschis de Astran din proprie initiativa (nu exista notificator)
+KIND_ORDER = "authority_order"            # caz deschis la executarea unui ordin Art. 9 (vezi authority_orders.py)
+KINDS = (KIND_RULE, KIND_NOTICE, KIND_OWN, KIND_ORDER)
+# Valori `decision.source` (folosite si de raportul de transparenta Art. 15)
+SRC_NOTICE, SRC_TERMS_REPORT, SRC_OWN, SRC_ORDER = "art16_notice", "terms_report", "own_initiative", "authority_order"
+KIND_TO_SOURCE = {KIND_NOTICE: SRC_NOTICE, KIND_RULE: SRC_TERMS_REPORT, KIND_OWN: SRC_OWN, KIND_ORDER: SRC_ORDER}
+# evenimentele de audit legate de ordine ale autoritatilor: vizibile doar personalului cu rol juridic (nu tuturor moderatorilor)
+ORDER_EVENT_TYPES = ("order_received", "order_supplemented", "order_attachment_added", "order_attachment_downloaded",
+                     "order_authenticity_set", "order_validated", "order_legal_review", "order_executed", "order_execution_failed",
+                     "order_information_prepared", "order_recipient_notice", "order_response_recorded", "order_response_delivery",
+                     "order_closed", "order_purged", "order_legal_role_changed")
 CATEGORIES = ("illegal_content", "child_safety", "harassment", "hate_speech", "violence", "sexual_content",
               "self_harm", "scam_fraud", "ip_infringement", "spam", "other")
 CSAM_CATEGORY = "child_safety"            # singura categorie pentru care identitatea notificatorului poate lipsi (Art. 16(2)(c))
@@ -65,6 +76,8 @@ ADMIN_ONLY_ACTIONS = (ACTION_SUSPEND,)    # suspendarea permanenta cere platform
 
 DEC_APPLYING, DEC_IN_EFFECT, DEC_REVERSED, DEC_FAILED = "applying", "in_effect", "reversed", "failed"
 APPEAL_RECEIVED, APPEAL_REVIEW, APPEAL_MAINTAINED, APPEAL_REVERSED = "received", "under_review", "decision_maintained", "decision_reversed"
+APPEAL_MODIFIED = "decision_modified"
+DEC_MODIFIED = "modified"                 # decizie inlocuita de una noua in urma unei plangeri (ramane in istoric)
 APPEAL_OPEN = (APPEAL_RECEIVED, APPEAL_REVIEW)
 
 COMPLAINT_PERIOD_MONTHS = 6               # Art. 20(1): cel putin 6 luni de la decizie
@@ -257,8 +270,13 @@ async def verify_audit_chain(db) -> dict:
     return {"ok": True, "checked": len(docs), "broken_at_seq": None}
 
 
-async def audit_history(db, *, report_id: Optional[str] = None, decision_id: Optional[str] = None, limit: int = 500) -> list[dict]:
+async def audit_history(db, *, report_id: Optional[str] = None, decision_id: Optional[str] = None, limit: int = 500,
+                        include_orders: bool = False) -> list[dict]:
+    """`include_orders=False` (implicit) ascunde evenimentele despre ordinele autoritatilor: ele sunt sensibile si le vede doar
+    personalul cu rol juridic (rutele /orders). Filtrarea se face in interogare, nu dupa limita."""
     flt: dict = {}
+    if not include_orders:
+        flt["event_type"] = {"$nin": list(ORDER_EVENT_TYPES)}
     if report_id:
         flt["report_id"] = report_id
     if decision_id:
@@ -377,6 +395,11 @@ async def register_report(db, doc: dict, *, kind: str = KIND_RULE, category: Opt
     category = category if category in CATEGORIES else ("illegal_content" if kind == KIND_NOTICE else "other")
     if kind == KIND_NOTICE:
         doc["notice"] = validate_notice(notice or {}, category)
+        if doc.get("reporter_id"):
+            rep_user = await db.users.find_one({"user_id": doc["reporter_id"]}, {"_id": 0, "is_trusted_flagger": 1})
+            doc["notice"]["trusted_flagger"] = bool((rep_user or {}).get("is_trusted_flagger"))   # statut atribuit DOAR de un admin
+        else:
+            doc["notice"]["trusted_flagger"] = False
     ev = await capture_evidence(db, doc["target_type"], doc["target_id"])
     doc.update({"report_kind": kind, "category": category, "status": STATUS_PENDING,
                 "reported_user_id": await resolve_reported_user(db, doc["target_type"], doc["target_id"]),
@@ -391,9 +414,15 @@ async def register_report(db, doc: dict, *, kind: str = KIND_RULE, category: Opt
                 new_status=STATUS_PENDING, action="submit_notice" if kind == KIND_NOTICE else "submit_report",
                 details={"kind": kind, "category": category, "target_type": doc["target_type"]})
     receipt = build_receipt(doc, ev)
-    n = await notify(db, doc["reporter_id"], "report_receipt", ref={"report_id": doc["report_id"]},
-                     message="We received your notice." if kind == KIND_NOTICE else "We received your report.")
-    await db.reports.update_one({"report_id": doc["report_id"]}, {"$push": {"notifications_sent": n["notification_id"]}})
+    if doc.get("reporter_id"):
+        n = await notify(db, doc["reporter_id"], "report_receipt", ref={"report_id": doc["report_id"]},
+                         message="We received your notice." if kind == KIND_NOTICE else "We received your report.")
+        await db.reports.update_one({"report_id": doc["report_id"]}, {"$push": {"notifications_sent": n["notification_id"]}})
+    if kind == KIND_NOTICE and (doc.get("notice") or {}).get("reporter_email"):
+        # Art. 16(4): confirmare de primire pe email cand notificarea contine date de contact electronice (si pentru notificatori anonimi)
+        from . import dsa_delivery as DL
+        await DL.enqueue(db, kind="notice_receipt", dedupe_key=f"receipt:{doc['report_id']}", recipient={"report_id": doc["report_id"]},
+                         ref={"report_id": doc["report_id"]})
     return receipt
 
 
@@ -656,8 +685,10 @@ def build_statement(decision: dict, report: dict, evidence: dict, tos_ref: str) 
         "content": {"target_type": decision["target_type"], "target_id": decision["target_id"], "summary": _summary(evidence)},
         "facts_and_circumstances": decision["reasoning"],
         "basis": {**decision["basis"], "tos_document": tos_ref},
-        "source": {"type": "notice" if report.get("report_kind") == KIND_NOTICE else "report",
+        "source": {"type": {KIND_NOTICE: "notice", KIND_OWN: "own_initiative", KIND_ORDER: "authority_order"}.get(report.get("report_kind"), "report"),
                    "notice_received": report.get("report_kind") == KIND_NOTICE},   # identitatea notificatorului NU se include (Art. 17(3)(b))
+        "initiated_by": {KIND_NOTICE: "user_notice", KIND_OWN: "astran", KIND_ORDER: "authority_order"}.get(report.get("report_kind"), "user_report"),
+        "order_reference": report.get("order_ref") if report.get("report_kind") == KIND_ORDER else None,
         "automated_means": {"used_for_detection": bool(decision.get("automated_detection")), "used_for_decision": False},
         "redress": _redress(decision["created_at"]),
         "illegal_content_decision": basis_illegal,
@@ -742,6 +773,8 @@ async def decide(db, actor: dict, report_id: str, body: dict) -> dict:
             "notifier_id": r.get("reporter_id") if kind == KIND_NOTICE else None,
             "reasoning": reasoning, "notifier_reasoning": clean_text(body.get("notifier_reasoning"), field="notifier_reasoning", max_len=2000),
             "basis": basis, "automated_detection": bool(body.get("automated_detection")), "automated_decision": False,
+            "source": KIND_TO_SOURCE.get(kind, SRC_TERMS_REPORT), "order_ref": r.get("order_ref") if kind == KIND_ORDER else None,
+            "notification_withheld": body.get("_notify_affected") is False,
             "supersedes": r.get("reopened_from_decision"), "status": DEC_APPLYING, "created_at": now, "effect": None, "statement_id": None}
         await db.moderation_decisions.insert_one(dict(decision))
         prev_status = norm_status(r.get("status"))
@@ -768,17 +801,28 @@ async def decide(db, actor: dict, report_id: str, body: dict) -> dict:
                                                                          "decided_at": now, "decision_id": decision["decision_id"]},
                                                               "$unset": {"reopened_from_decision": ""}})
         sent: list[str] = []
-        if decision["affected_user_id"]:
+        if decision["affected_user_id"] and not decision["notification_withheld"]:
             kindn = "moderation_decision" if sor else "moderation_warning"
             n = await notify(db, decision["affected_user_id"], kindn, ref={"decision_id": decision["decision_id"]},
                              message="A moderation decision affects your account or content. Open it to read the statement of reasons."
                              if sor else "You received a warning from the moderation team.")
             sent.append(n["notification_id"])
+            if sor:   # Art. 17: si pe email, daca exista adresa; livrarea e urmarita si reincercata (dsa_delivery), nu marcata ca trimisa pe ghicite
+                from . import dsa_delivery as DL
+                await DL.enqueue(db, kind="statement_of_reasons", dedupe_key=f"sor:{sor['sor_id']}", recipient={"user_id": decision["affected_user_id"]},
+                                 ref={"sor_id": sor["sor_id"], "decision_id": decision["decision_id"]})
+        if sor:
+            from . import dsa_tdb as TDB     # Art. 24(5): se pune in coada DOAR daca statutul juridic o cere (vezi dsa_applicability)
+            await TDB.maybe_enqueue(db, sor, decision)
         if r.get("reporter_id"):
             n = await notify(db, r["reporter_id"], "notice_outcome" if kind == KIND_NOTICE else "report_outcome",
                              ref={"report_id": report_id, "decision_id": decision["decision_id"]},
                              message="A decision was taken on your notice." if kind == KIND_NOTICE else "Your report was reviewed.")
             sent.append(n["notification_id"])
+        if kind == KIND_NOTICE and not r.get("reporter_id") and (r.get("notice") or {}).get("reporter_email"):
+            from . import dsa_delivery as DL     # notificator neinregistrat: Art. 16(5) - rezultatul se comunica pe email
+            await DL.enqueue(db, kind="notice_outcome", dedupe_key=f"outcome:{decision['decision_id']}", recipient={"report_id": report_id},
+                             ref={"report_id": report_id, "decision_id": decision["decision_id"]})
         await audit(db, event_type="decision_made", actor_id=actor["user_id"], actor_role=role, report_id=report_id,
                     decision_id=decision["decision_id"], previous_status=prev_status, new_status=new_status, action=action,
                     reasoning=reasoning, details={"statement_id": decision["statement_id"], "notifications": sent,
@@ -818,7 +862,8 @@ def user_decision_view(d: dict) -> dict:
     """Fara moderator_id, fara note interne, fara identitatea notificatorului."""
     return {"decision_id": d["decision_id"], "action": d["action"], "created_at": d["created_at"], "status": d["status"],
             "target_type": d["target_type"], "target_id": d["target_id"], "has_statement": bool(d.get("statement_id")),
-            "restriction_until": d.get("restriction_until")}
+            "restriction_until": d.get("restriction_until"), "supersedes": d.get("supersedes"),
+            "complaint_deadline": add_months(aware(d["created_at"]), COMPLAINT_PERIOD_MONTHS) if aware(d.get("created_at")) else None}
 
 
 async def my_decision(db, user_id: str, decision_id: str) -> dict:
@@ -829,8 +874,10 @@ async def my_decision(db, user_id: str, decision_id: str) -> dict:
     appeal = await db.moderation_appeals.find_one({"decision_id": decision_id, "user_id": user_id}, {"_id": 0})
     if d.get("affected_user_id") == user_id:
         sor = await db.statements_of_reasons.find_one({"decision_id": decision_id}, {"_id": 0})
+        from . import dsa_delivery as DL
+        delivery = await DL.public_status(db, f"sor:{sor['sor_id']}") if sor else None   # doar canal+stare; fara eroare tehnica / adresa
         return {"role": "affected", "decision": user_decision_view(d), "statement_of_reasons": sor, "corrections": corr,
-                "appeal": _appeal_view(appeal) if appeal else None, "redress": _redress(d["created_at"])}
+                "delivery": delivery, "appeal": _appeal_view(appeal) if appeal else None, "redress": _redress(d["created_at"])}
     return {"role": "notifier", "outcome": notifier_outcome(d), "corrections": corr,
             "appeal": _appeal_view(appeal) if appeal else None}
 
@@ -838,7 +885,7 @@ async def my_decision(db, user_id: str, decision_id: str) -> dict:
 # ------------------------------------------------------------------------------------------------ plangeri Art. 20
 def _appeal_view(a: dict) -> dict:
     return {k: a.get(k) for k in ("appeal_id", "decision_id", "status", "grounds", "evidence_text", "evidence_urls", "created_at",
-                                  "resolved_at", "outcome", "outcome_reasoning")}
+                                  "review_started_at", "resolved_at", "outcome", "outcome_reasoning", "modification", "new_decision_id")}
 
 
 async def submit_appeal(db, user: dict, decision_id: str, *, grounds: Any, evidence_text: Any = None, evidence_urls: Any = None) -> dict:
@@ -846,6 +893,8 @@ async def submit_appeal(db, user: dict, decision_id: str, *, grounds: Any, evide
     d = await db.moderation_decisions.find_one({"decision_id": decision_id}, {"_id": 0})
     if not d or uid not in (d.get("affected_user_id"), d.get("notifier_id")) or d["status"] == DEC_FAILED:
         raise ModerationError(404, "not_found")
+    if d["status"] in (DEC_REVERSED, DEC_MODIFIED) and d.get("affected_user_id") == uid:
+        raise ModerationError(409, "decision_not_appealable", "this decision was already reversed or replaced")
     grounds = clean_text(grounds, field="grounds", min_len=20)
     evidence_text = clean_text(evidence_text, field="evidence_text", max_len=MAX_TEXT)
     urls = clean_urls(evidence_urls)
@@ -882,9 +931,35 @@ async def my_appeal(db, user_id: str, appeal_id: str) -> dict:
     return _appeal_view(a)
 
 
+def internal_target_days(var: str, env: Optional[dict] = None) -> Optional[int]:
+    """Obiectiv INTERN optional (zile). Art. 20(4) NU fixeaza un termen universal ("in timp util, in mod nediscriminatoriu, diligent si
+    nearbitrar") si nici Art. 16(6) pentru notificari: nu se inventeaza niciun termen. Daca variabila nu e setata, nu exista obiectiv."""
+    raw = (os.environ if env is None else env).get(var)
+    try:
+        v = int(raw) if raw not in (None, "") else None
+    except ValueError:
+        return None
+    return v if v and v > 0 else None
+
+
+def appeal_timing(a: dict, now: Optional[datetime] = None, env: Optional[dict] = None) -> dict:
+    now = now or now_utc()
+    created, resolved = aware(a.get("created_at")), aware(a.get("resolved_at"))
+    end = resolved or now
+    age_days = round(((end - created).total_seconds() / 86400), 2) if created else None
+    target = internal_target_days("ASTRAN_APPEAL_TARGET_DAYS", env)
+    return {"submitted_at": created, "review_started_at": aware(a.get("review_started_at")), "resolved_at": resolved, "age_days": age_days,
+            "internal_target_days": target, "internal_target_exceeded": (age_days is not None and target is not None and age_days > target),
+            "legal_deadline": None,    # Art. 20 nu prevede un numar fix de zile; vezi comentariul de mai sus
+            "legal_standard": "timely, non-discriminatory, diligent and non-arbitrary (Art. 20(4)); outcome without undue delay (Art. 20(5))"}
+
+
 async def list_appeals(db, *, status: Optional[str] = None, limit: int = 100) -> list[dict]:
     flt = {"status": status} if status else {}
-    return await db.moderation_appeals.find(flt, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    rows = await db.moderation_appeals.find(flt, {"_id": 0}).sort("created_at", 1).limit(limit).to_list(limit)   # cele mai vechi primele: ordine de tratare
+    for a in rows:
+        a["timing"] = appeal_timing(a)
+    return rows
 
 
 async def appeal_detail(db, appeal_id: str) -> dict:
@@ -893,6 +968,7 @@ async def appeal_detail(db, appeal_id: str) -> dict:
         raise ModerationError(404, "not_found")
     d = await db.moderation_decisions.find_one({"decision_id": a["decision_id"]}, {"_id": 0})
     sor = await db.statements_of_reasons.find_one({"decision_id": a["decision_id"]}, {"_id": 0})
+    a["timing"] = appeal_timing(a)
     return {"appeal": a, "decision": d, "statement_of_reasons": sor, "history": await audit_history(db, decision_id=a["decision_id"])}
 
 
@@ -910,7 +986,7 @@ async def start_appeal_review(db, actor: dict, appeal_id: str) -> dict:
     d = await db.moderation_decisions.find_one({"decision_id": a["decision_id"]}, {"_id": 0})
     _check_independent(actor, d)
     res = await db.moderation_appeals.update_one({"appeal_id": appeal_id, "status": APPEAL_RECEIVED},
-                                                 {"$set": {"status": APPEAL_REVIEW, "reviewer_id": actor["user_id"]}})
+                                                 {"$set": {"status": APPEAL_REVIEW, "reviewer_id": actor["user_id"], "review_started_at": now_utc()}})
     if not res.matched_count:
         raise ModerationError(409, "appeal_not_receivable")
     await audit(db, event_type="appeal_review_started", actor_id=actor["user_id"], actor_role=role_of(actor), report_id=d["report_id"],
@@ -918,8 +994,67 @@ async def start_appeal_review(db, actor: dict, appeal_id: str) -> dict:
     return {"appeal_id": appeal_id, "status": APPEAL_REVIEW}
 
 
-async def resolve_appeal(db, actor: dict, appeal_id: str, *, outcome: str, reasoning: Any) -> dict:
-    if outcome not in ("maintain", "reverse"):
+def _validate_modification(a: dict, d: dict, modification: Any) -> dict:
+    """`modify` e permis DOAR pentru restrictii/suspendari de cont ale persoanei afectate (se inlocuieste cu o restrictie temporara).
+    Pentru continut (eliminare/restrictionare) alternativele sunt `maintain` / `reverse` - limitare documentata."""
+    if a["as_role"] != "affected" or d["status"] != DEC_IN_EFFECT or d["action"] not in (ACTION_RESTRICT_ACCOUNT, ACTION_SUSPEND):
+        raise ModerationError(422, "modify_not_supported", "only account restrictions/suspensions in effect can be modified")
+    m = modification if isinstance(modification, dict) else {}
+    days, scope = m.get("days"), (m.get("scope") or "full")
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365 or scope not in ("chat", "full"):
+        raise ModerationError(422, "restriction_invalid", "days (1-365) and scope (chat|full) are required for a modification")
+    return {"days": days, "scope": scope}
+
+
+async def _apply_modification(db, actor: dict, a: dict, d: dict, reasoning: str, params: dict) -> dict:
+    """Inlocuieste decizia cu una NOUA (restrictie temporara), cu propria expunere de motive; originalul ramane in istoric."""
+    r = await db.reports.find_one({"report_id": d["report_id"]}, {"_id": 0}) or {"report_id": d["report_id"], "target_type": d["target_type"],
+                                                                                   "target_id": d["target_id"]}
+    old_sor = await db.statements_of_reasons.find_one({"decision_id": d["decision_id"]}, {"_id": 0}) or {}
+    tos_ref = (old_sor.get("basis") or {}).get("tos_document") or "terms_of_service@unknown"
+    await _revert_effect(db, d)
+    now = now_utc()
+    new = {"decision_id": new_id("dec_"), "report_id": d["report_id"], "moderator_id": actor["user_id"], "moderator_role": role_of(actor),
+           "action": ACTION_RESTRICT_ACCOUNT, "scope": params["scope"], "restriction_until": now + timedelta(days=params["days"]),
+           "target_type": d["target_type"], "target_id": d["target_id"], "affected_user_id": d["affected_user_id"], "notifier_id": None,
+           "reasoning": f"Modified after complaint {a['appeal_id']}: {reasoning}", "notifier_reasoning": None,
+           "basis": dict(d.get("basis") or {}), "automated_detection": False, "automated_decision": False, "source": d.get("source"),
+           "order_ref": d.get("order_ref"), "supersedes": d["decision_id"], "appeal_id": a["appeal_id"], "status": DEC_APPLYING,
+           "created_at": now, "effect": None, "statement_id": None}
+    await db.moderation_decisions.insert_one(dict(new))
+    try:
+        new["effect"] = await _apply_effect(db, ACTION_RESTRICT_ACCOUNT, r, new, params)
+        ev = (await db.report_evidence.find_one({"report_id": d["report_id"]}, {"_id": 0}) or {}).get("content") or {}
+        sor = build_statement(new, r, ev, tos_ref)
+        await db.statements_of_reasons.insert_one(dict(sor))
+        new["statement_id"] = sor["sor_id"]
+        await db.moderation_decisions.update_one({"decision_id": new["decision_id"]}, {"$set": {
+            "status": DEC_IN_EFFECT, "effect": new["effect"], "statement_id": sor["sor_id"]}})
+    except Exception as e:  # noqa: BLE001
+        await db.moderation_decisions.update_one({"decision_id": new["decision_id"]}, {"$set": {"status": DEC_FAILED}})
+        await audit(db, event_type="decision_failed", actor_id=actor["user_id"], actor_role=role_of(actor), report_id=d["report_id"],
+                    decision_id=new["decision_id"], appeal_id=a["appeal_id"], action=ACTION_RESTRICT_ACCOUNT, details={"error": type(e).__name__})
+        raise
+    await db.moderation_decisions.update_one({"decision_id": d["decision_id"]}, {"$set": {
+        "status": DEC_MODIFIED, "modified_at": now, "modified_by_appeal": a["appeal_id"], "replaced_by": new["decision_id"]}})
+    await audit(db, event_type="decision_modified", actor_id=actor["user_id"], actor_role=role_of(actor), report_id=d["report_id"],
+                decision_id=d["decision_id"], appeal_id=a["appeal_id"], previous_status=DEC_IN_EFFECT, new_status=DEC_MODIFIED, action="modify",
+                reasoning=reasoning, details={"new_decision_id": new["decision_id"], "statement_id": sor["sor_id"], "days": params["days"],
+                                              "scope": params["scope"]})
+    n = await notify(db, d["affected_user_id"], "moderation_decision", ref={"decision_id": new["decision_id"]},
+                     message="Your restriction was modified after your complaint. Open the new decision to read its statement of reasons.")
+    from . import dsa_delivery as DL
+    await DL.enqueue(db, kind="statement_of_reasons", dedupe_key=f"sor:{sor['sor_id']}", recipient={"user_id": d["affected_user_id"]},
+                     ref={"sor_id": sor["sor_id"], "decision_id": new["decision_id"]})
+    from . import dsa_tdb as TDB
+    await TDB.maybe_enqueue(db, sor, new)
+    return {"new_decision_id": new["decision_id"], "notification_id": n["notification_id"]}
+
+
+async def resolve_appeal(db, actor: dict, appeal_id: str, *, outcome: str, reasoning: Any, modification: Any = None) -> dict:
+    """Art. 20(4): decizia o ia un OM calificat (rol de personal), independent de autorul deciziei initiale - niciodata automat.
+    Rezultate: `maintain` (confirma), `reverse` (anuleaza), `modify` (inlocuieste cu o restrictie mai usoara, doar pentru conturi)."""
+    if outcome not in ("maintain", "reverse", "modify"):
         raise ModerationError(422, "outcome_invalid")
     reasoning = clean_text(reasoning, field="reasoning", min_len=20)
     a = await db.moderation_appeals.find_one({"appeal_id": appeal_id}, {"_id": 0})
@@ -929,13 +1064,18 @@ async def resolve_appeal(db, actor: dict, appeal_id: str, *, outcome: str, reaso
     _check_independent(actor, d)
     if a["status"] == APPEAL_REVIEW and a.get("reviewer_id") not in (None, actor["user_id"]):
         raise ModerationError(403, "assigned_to_other_reviewer")
-    final = APPEAL_REVERSED if outcome == "reverse" else APPEAL_MAINTAINED
+    mod_params = _validate_modification(a, d, modification) if outcome == "modify" else None   # inainte de revendicare: nu lasam o plangere "inchisa" fara efect
+    final = {"reverse": APPEAL_REVERSED, "modify": APPEAL_MODIFIED}.get(outcome, APPEAL_MAINTAINED)
     claim = await db.moderation_appeals.update_one({"appeal_id": appeal_id, "status": {"$in": list(APPEAL_OPEN)}},
                                                    {"$set": {"status": final, "reviewer_id": actor["user_id"], "outcome": outcome,
-                                                             "outcome_reasoning": reasoning, "resolved_at": now_utc()}})
+                                                             "outcome_reasoning": reasoning, "resolved_at": now_utc(),
+                                                             "reviewed_by_human": True, "modification": mod_params}})
     if not claim.matched_count:
         raise ModerationError(409, "appeal_already_resolved")
-    if outcome == "reverse":
+    if outcome == "modify":
+        res = await _apply_modification(db, actor, a, d, reasoning, mod_params)
+        await db.moderation_appeals.update_one({"appeal_id": appeal_id}, {"$set": {"new_decision_id": res["new_decision_id"]}})
+    elif outcome == "reverse":
         if a["as_role"] == "affected" and d["status"] == DEC_IN_EFFECT:
             await _revert_effect(db, d)
             await db.moderation_decisions.update_one({"decision_id": d["decision_id"]}, {"$set": {"status": DEC_REVERSED, "reversed_at": now_utc(),
@@ -957,6 +1097,9 @@ async def resolve_appeal(db, actor: dict, appeal_id: str, *, outcome: str, reaso
                 reasoning=reasoning, outcome=outcome)
     await notify(db, a["user_id"], "appeal_outcome", ref={"appeal_id": appeal_id, "decision_id": d["decision_id"]},
                  message="Your complaint was decided. Open it to read the decision and its reasoning.")
+    from . import dsa_delivery as DL     # Art. 20(5): rezultatul motivat + informatii despre solutionarea extrajudiciara, fara intarziere nejustificata
+    await DL.enqueue(db, kind="appeal_outcome", dedupe_key=f"appeal:{appeal_id}", recipient={"user_id": a["user_id"]},
+                     ref={"appeal_id": appeal_id, "decision_id": d["decision_id"]})
     return {"appeal_id": appeal_id, "status": final, "outcome": outcome}
 
 
@@ -970,6 +1113,54 @@ async def set_moderator(db, actor: dict, user_id: str, enabled: bool) -> dict:
     await audit(db, event_type="moderator_role_changed", actor_id=actor["user_id"], actor_role="admin", action="set_moderator",
                 new_status="enabled" if enabled else "disabled", details={"user_id": user_id})
     return {"user_id": user_id, "is_moderator": bool(enabled)}
+
+
+STAFF_FLAGS = {"legal_officer": "is_legal_officer", "trusted_flagger": "is_trusted_flagger"}
+
+
+async def set_flag(db, actor: dict, user_id: str, flag: str, enabled: bool) -> dict:
+    """Roluri/statute suplimentare acordate DOAR de un platform admin: `legal_officer` (ordine Art. 9/10) si `trusted_flagger`
+    (statut atribuit de coordonatorul serviciilor digitale, Art. 22 - Astran doar il inregistreaza dupa ce este atribuit)."""
+    if role_of(actor) != "admin":
+        raise ModerationError(403, "admin_required")
+    if flag not in STAFF_FLAGS:
+        raise ModerationError(422, "flag_invalid")
+    res = await db.users.update_one({"user_id": user_id}, {"$set": {STAFF_FLAGS[flag]: bool(enabled)}})
+    if not res.matched_count:
+        raise ModerationError(404, "user_not_found")
+    await audit(db, event_type="order_legal_role_changed" if flag == "legal_officer" else "moderator_role_changed", actor_id=actor["user_id"],
+                actor_role="admin", action=f"set_{flag}", new_status="enabled" if enabled else "disabled", details={"user_id": user_id})
+    return {"user_id": user_id, flag: bool(enabled)}
+
+
+async def open_own_initiative_case(db, actor: dict, *, target_type: str, target_id: str, category: str, summary: Any,
+                                   automated_detection: bool = False, kind: str = KIND_OWN, order_ref: Optional[str] = None) -> dict:
+    """Caz deschis de Astran (personal) din proprie initiativa, fara notificator. Decizia se ia apoi prin decide(), deci primeste
+    aceeasi expunere de motive, notificare, audit si drept de plangere ca orice alta decizie. Nu clasifica nimic ca ilegal."""
+    if not role_of(actor):
+        raise ModerationError(403, "forbidden")
+    if target_type not in ("user", "game", "message"):
+        raise ModerationError(422, "target_invalid")
+    summary = clean_text(summary, field="summary", min_len=10, max_len=MAX_TEXT)
+    if category not in CATEGORIES:
+        raise ModerationError(422, "category_invalid")
+    rid = new_id("rep_")
+    doc = {"report_id": rid, "reporter_id": None, "target_type": target_type, "target_id": target_id, "reason": "own_initiative",
+           "details": summary, "status": STATUS_PENDING, "created_at": now_utc(), "opened_by": actor["user_id"],
+           "report_kind": kind, "category": category, "automated_detection": bool(automated_detection)}
+    if kind == KIND_ORDER:
+        doc["order_ref"] = order_ref       # doar referinta ordinului; continutul ordinului ramane in authority_orders (acces restrictionat)
+    ev = await capture_evidence(db, target_type, target_id)
+    if not ev:
+        raise ModerationError(404, "target_not_found")
+    doc.update({"reported_user_id": await resolve_reported_user(db, target_type, target_id), "assigned_to": None, "reviewed_at": None})
+    await db.reports.insert_one(doc)
+    await db.report_evidence.insert_one({"report_id": rid, "captured_at": now_utc(), "content": ev,
+                                         "sha256": hashlib.sha256(json.dumps(ev, sort_keys=True, default=str).encode()).hexdigest()})
+    await audit(db, event_type="report_received", actor_id=actor["user_id"], actor_role=role_of(actor), report_id=rid, new_status=STATUS_PENDING,
+                action="open_own_initiative" if kind == KIND_OWN else "open_order_case", details={"kind": kind, "category": category, "target_type": target_type,
+                                                       "automated_detection": bool(automated_detection)})
+    return {"report_id": rid, "status": STATUS_PENDING, "kind": kind}
 
 
 CONTACT_CHANNELS = ("user", "authority", "commission_or_dsc", "trusted_flagger", "other")
@@ -991,3 +1182,27 @@ async def submit_contact_message(db, *, channel: Any, name: Any, email: Any, sub
 
 async def list_contact_messages(db, limit: int = 100) -> list[dict]:
     return await db.contact_messages.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+
+# ------------------------------------------------------------------------------------------------ referinte de continut (URL / ID / cont)
+_ID = r"[A-Za-z0-9_-]{1,64}"
+_REF_PATTERNS = (
+    (re.compile(rf"^astran://(game|user|message)/({_ID})/?$"), None),
+    (re.compile(rf"^https://[A-Za-z0-9.-]{{3,253}}(?::\d{{2,5}})?/(?:game|games|play)/({_ID})/?(?:[?#].*)?$"), "game"),
+    (re.compile(rf"^https://[A-Za-z0-9.-]{{3,253}}(?::\d{{2,5}})?/(?:user|users|profile)/({_ID})/?(?:[?#].*)?$"), "user"),
+    (re.compile(rf"^https://[A-Za-z0-9.-]{{3,253}}(?::\d{{2,5}})?/(?:message|messages)/({_ID})/?(?:[?#].*)?$"), "message"),
+)
+
+
+def parse_content_reference(ref: Any) -> Optional[tuple]:
+    """URL de continut / referinta interna -> (target_type, target_id) sau None. Fara cereri de retea (nu urmarim linkuri)."""
+    if not isinstance(ref, str):
+        return None
+    r = ref.strip()
+    if not r or len(r) > 600:
+        return None
+    for rx, fixed in _REF_PATTERNS:
+        m = rx.match(r)
+        if m:
+            return (fixed, m.group(1)) if fixed else (m.group(1), m.group(2))
+    return None
