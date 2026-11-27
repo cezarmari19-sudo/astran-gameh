@@ -3,7 +3,7 @@
   "documents": {
     "privacy_policy": {
       "legal_basis": "information_notice",
-      "current": "1.1",
+      "current": "1.2",
       "versions": [
         {
           "version": "1.1",
@@ -24,12 +24,32 @@
               "sha256": "912fc5c8d7e69329265a13aac194b8f4621a8d3572dabfe327e6b51ca5328def"
             }
           }
+        },
+        {
+          "version": "1.2",
+          "effective_date": null,
+          "status": "draft_needs_completion",
+          "requires_reacceptance": false,
+          "summary": {
+            "ro": "Adaugă prelucrările noi: schimbarea e-mailului, corectarea datei nașterii, recomandări personalizate opționale, date ale vânzătorilor/comercianților și evidența incidentelor (ciornă, necesită revizuire juridică).",
+            "en": "Adds the new processing: e-mail change, date-of-birth correction, optional personalized recommendations, seller/trader details and security incident records (draft, needs legal review)."
+          },
+          "files": {
+            "ro": {
+              "path": "privacy_policy/1.2.ro.txt",
+              "sha256": "da273bf8d78a3149b2063a54c0671cc5b5b78669a768d1f993ff06d5ff8817fc"
+            },
+            "en": {
+              "path": "privacy_policy/1.2.en.txt",
+              "sha256": "fd397ff6cdcbc6f6cc7660969e3dee034bef81bc03bd04bcd3aabc5d77975d6a"
+            }
+          }
         }
       ]
     },
     "terms_of_service": {
       "legal_basis": "contract",
-      "current": "1.1",
+      "current": "1.2",
       "versions": [
         {
           "version": "1.0",
@@ -66,6 +86,25 @@
             "en": {
               "path": "terms_of_service/1.1.en.txt",
               "sha256": "95b3a16c427723cdf30b477c9b7cc73facda1326ed6f37a9b0f46272c9670e18"
+            }
+          }
+        },
+        {
+          "version": "1.2",
+          "effective_date": null,
+          "requires_reacceptance": false,
+          "summary": {
+            "ro": "Adaugă parametrii sistemului de recomandare și opțiunile utilizatorului (DSA Art. 27), regulile pentru vânzătorii din Shop (statut, date comerciant) și corectarea datelor personale (ciornă, neverificată juridic).",
+            "en": "Adds the recommender system parameters and user options (DSA Art. 27), rules for Shop sellers (status, trader details) and personal data correction (draft, not legally reviewed)."
+          },
+          "files": {
+            "ro": {
+              "path": "terms_of_service/1.2.ro.txt",
+              "sha256": "e8ef96a6750cda727f62737443c53f63129564bc971e574a2cd6858604f9a015"
+            },
+            "en": {
+              "path": "terms_of_service/1.2.en.txt",
+              "sha256": "4c9575e5ce004f9d944e7109e795c506fc1cfd8ca6b650c84d2affaa95f591c2"
             }
           }
         }

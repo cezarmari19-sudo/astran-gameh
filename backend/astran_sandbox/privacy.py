@@ -145,7 +145,7 @@ async def ensure_indexes(db) -> None:
     await db[EXPORT_COLLECTION].create_index([("user_id", 1), ("created_at", -1)])
     await db[REAUTH_CODE_COLLECTION].create_index("user_id", unique=True)
     await db[REAUTH_CODE_COLLECTION].create_index("expires_at", expireAfterSeconds=0)
-    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events"):
+    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events", "merchant_profiles", "merchant_audit"):
         await db[coll].create_index([("account_deleted", 1), ("retain_until", 1)])
 
 
@@ -446,9 +446,27 @@ async def _step_catalog(db, uid: str, pseud: str) -> None:
     await db.studio_models.delete_many({"owner_id": uid})
 
 
+def merchant_retention_days() -> int:
+    """DSA Art. 30(4): informatiile comerciantului se pastreaza 6 luni dupa incheierea relatiei contractuale, apoi se sterg."""
+    return _env_int("PRIVACY_MERCHANT_RETENTION_DAYS", 183)
+
+
 async def _step_profile_data(db, uid: str, pseud: str) -> None:
     await db.user_settings.delete_many({"user_id": uid})
     await db.user_avatars.delete_many({"user_id": uid})
+    # GDPR Art. 16 / DSA Art. 30-32 (adaugate la remedierea de conformitate): cereri de schimbare e-mail,
+    # corectii ale datei nasterii si jurnalul de date personale se sterg odata cu contul.
+    for coll in ("email_change_requests", "dob_corrections", "personal_data_audit"):
+        await db[coll].delete_many({"user_id": uid})
+    # Profil de vanzator: non-comerciantii se sterg; datele COMERCIANTILOR se pastreaza pseudonimizate 6 luni (Art. 30(4)), apoi sweep_retention
+    prof = await db.merchant_profiles.find_one({"user_id": uid}, {"_id": 0, "seller_status": 1, "trader": 1})
+    retain = _now() + timedelta(days=merchant_retention_days())
+    if prof and prof.get("seller_status") == "trader" and prof.get("trader"):
+        await db.merchant_profiles.update_one({"user_id": uid}, {"$set": {"user_id": pseud, "account_deleted": True, "retain_until": retain}})
+        await db.merchant_audit.update_many({"user_id": uid}, {"$set": {"user_id": pseud, "account_deleted": True, "retain_until": retain}})
+    else:
+        await db.merchant_profiles.delete_many({"user_id": uid})
+        await db.merchant_audit.delete_many({"user_id": uid})
 
 
 async def _step_records(db, uid: str, pseud: str) -> None:
@@ -483,7 +501,7 @@ async def sweep_retention(db, now: Optional[datetime] = None) -> int:
     """Elimina definitiv datele pseudonimizate al caror termen de pastrare a expirat."""
     now = now or _now()
     total = 0
-    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events"):
+    for coll in ("astran_ledger", "reports", "security_audit_log", "group_chat_messages", "consent_events", "merchant_profiles", "merchant_audit"):
         res = await db[coll].delete_many({"account_deleted": True, "retain_until": {"$lte": now}})
         total += getattr(res, "deleted_count", 0) or 0
     res = await db[DELETION_COLLECTION].delete_many({"status": "completed", "expires_at": {"$lte": now}})
@@ -566,6 +584,23 @@ async def build_export(db, user_id: str) -> dict:
         "as_tester": [{**r, "game_title": titles.get(r.get("game_id"))} for r in testers],
     }
     out["recently_played"] = await _rows(db, "recently_played", {"user_id": user_id})
+    # GDPR Art. 15/16/20: corectiile de date personale si profilul de vanzator (adaugate la remedierea de conformitate)
+    from . import age_policy as _ap
+    corr = []
+    for r in await _rows(db, "dob_corrections", {"user_id": user_id}, sort=("requested_at", -1)):
+        old_d, new_d = _ap.decrypt_dob(r.get("old_dob_enc", "")), _ap.decrypt_dob(r.get("new_dob_enc", ""))
+        corr.append({**_pick(r, ("request_id", "requested_at", "applied_at", "status", "direction", "reason_code", "reason_text", "reauth_method")),
+                     "old_date_of_birth": old_d.isoformat() if old_d else None, "new_date_of_birth": new_d.isoformat() if new_d else None})
+    out["date_of_birth_corrections"] = corr
+    out["email_change_requests"] = [_pick(r, ("request_id", "old_email", "new_email", "status", "created_at", "confirmed_at", "reauth_method"))
+                                    for r in await _rows(db, "email_change_requests", {"user_id": user_id}, sort=("created_at", -1))]
+    out["personal_data_audit"] = await _rows(db, "personal_data_audit", {"user_id": user_id}, sort=("ts", -1))
+    seller = await db.merchant_profiles.find_one({"user_id": user_id}, {"_id": 0})
+    if seller:
+        seller = {k: v for k, v in seller.items() if k != "reclassified_by"}
+        if isinstance(seller.get("verification"), dict):
+            seller["verification"] = {k: v for k, v in seller["verification"].items() if k != "reviewed_by"}
+    out["seller_profile"] = seller
     from . import consent as _consent
     out["consent_history"] = await _consent.export_rows(db, user_id)
 

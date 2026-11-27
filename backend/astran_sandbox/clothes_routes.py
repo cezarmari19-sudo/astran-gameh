@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from . import consumer as CONS
+from . import merchants as MER
 from . import money
 from .studio_routes import shape_count, summary_object, validate_parts, MAX_PARTS as STUDIO_MAX_PARTS
 
@@ -172,8 +173,8 @@ def _preview(doc: dict) -> dict:
     return preview
 
 
-def _public_item(doc: dict, owned: bool) -> dict:
-    return {
+def _public_item(doc: dict, owned: bool, seller: Optional[dict] = None) -> dict:
+    out = {
         "item_id": doc["item_id"],
         "owner_id": doc["owner_id"],
         "owner_username": doc["owner_username"],
@@ -190,6 +191,9 @@ def _public_item(doc: dict, owned: bool) -> dict:
         "has_content": bool(doc.get("model") or doc.get("texture_url")),
         "preview": _preview(doc),
     }
+    if seller is not None:
+        out["seller"] = seller      # informatii publice ale vanzatorului (DSA Art. 30(7)), vezi merchants.public_seller_info
+    return out
 
 
 def _owner_content(doc: dict) -> dict:
@@ -237,6 +241,13 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         if it["owner_id"] != current["user_id"] and not current.get("is_platform_admin"):
             raise HTTPException(status_code=403, detail="Not the owner")
         return it
+
+    async def seller_gate(seller_id: str) -> None:
+        """DSA Art. 30: vanzarea comerciala (pret > 0, public) cere statut de vanzator declarat si, pentru comercianti, datele complete."""
+        try:
+            await MER.require_sale_eligibility(db, seller_id)
+        except MER.MerchantError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail())
 
     async def owns(user_id: str, item: dict) -> bool:
         if item["owner_id"] == user_id:
@@ -288,7 +299,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         ).limit(50)
         docs = await cursor.to_list(50)
         owned = await owned_set(current["user_id"], docs)
-        return {"items": [_public_item(d, d["item_id"] in owned) for d in docs]}
+        sellers = await MER.seller_info_for_items(db, [d["owner_id"] for d in docs])
+        return {"items": [_public_item(d, d["item_id"] in owned, sellers.get(d["owner_id"])) for d in docs]}
 
     # ---------- creare (draft) ----------
 
@@ -370,6 +382,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             updates["is_public"] = body.is_public
         if body.thumbnail_url is not None:
             updates["thumbnail_url"] = _clean_thumbnail(body.thumbnail_url)
+        if ("price" in updates or "is_public" in updates) and updates.get("price", existing_item["price"]) > 0 and updates.get("is_public", existing_item["is_public"]):
+            await seller_gate(existing_item["owner_id"])
         if updates:
             updates["updated_at"] = now_utc()
             await db.clothes_items.update_one({"item_id": item_id}, {"$set": updates})
@@ -385,6 +399,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
         if not has_content:
             kind_hint = "geometry (build it in the item editor)" if it["render_kind"] == "geometry" else "a texture"
             raise HTTPException(status_code=400, detail=f"Add {kind_hint} before publishing")
+        if body.price > 0 and body.is_public:
+            await seller_gate(it["owner_id"])
         await db.clothes_items.update_one(
             {"item_id": item_id},
             {"$set": {"price": body.price, "is_public": body.is_public, "updated_at": now_utc()}},
@@ -403,7 +419,7 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=404, detail="Item not found")   # retras: doar cumparatorii il mai vad
         if not is_owned and not visible(it, current):
             raise HTTPException(status_code=403, detail="This item is private")
-        result = _public_item(it, is_owned)
+        result = _public_item(it, is_owned, (await MER.seller_info_for_items(db, [it["owner_id"]])).get(it["owner_id"]))
         if is_owned:
             result.update(_owner_content(it))
         return {"item": result}
@@ -439,6 +455,8 @@ def make_clothes_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=403, detail="This item is private")
 
         price = it["price"]
+        if price > 0:
+            await seller_gate(it["owner_id"])      # vanzator fara statut/date complete: achizitia nu se poate face
         purchase_row = {"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()}
         # autorul trebuie sa existe si sa nu fie in curs de stergere: altfel creditul s-ar pierde
         author = await db.users.find_one({"user_id": it["owner_id"]}, {"_id": 0, "deletion_state": 1})

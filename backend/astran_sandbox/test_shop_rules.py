@@ -63,6 +63,12 @@ class Coll:
 class DB:
     def __init__(self):
         self.shop_items, self.shop_purchases, self.studio_models = Coll(), Coll(), Coll()
+        # DSA Art. 30: vanzarea cu pret cere statut de vanzator declarat (vezi merchants.py). Autorii din teste declara "nu sunt comercianti".
+        self.merchant_profiles, self.app_config = Coll(), Coll()
+        self.merchant_profiles.docs += [{"user_id": u, "seller_status": "non_trader"} for u in ("A", "B", "C")]
+
+    def __getitem__(self, name):
+        return getattr(self, name)
 
 
 def _parts(n, seed=0):

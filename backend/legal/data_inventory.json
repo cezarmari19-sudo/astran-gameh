@@ -68,7 +68,15 @@
     "tdb_submissions": "2.6",
     "authority_orders": "2.6",
     "authority_order_attachments": "2.6",
-    "transparency_reports": "2.6"
+    "transparency_reports": "2.6",
+    "security_incidents": "2.8",
+    "security_incident_audit": "2.8",
+    "app_config": "2.8",
+    "email_change_requests": "2.1",
+    "personal_data_audit": "2.1",
+    "dob_corrections": "2.2",
+    "merchant_profiles": "2.7",
+    "merchant_audit": "2.7"
   },
   "outbound_hosts": {
     "api.stripe.com": "2.7 / 4 - verificare plati, rambursari",

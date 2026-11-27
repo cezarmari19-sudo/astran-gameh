@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from . import consumer as CONS
+from . import merchants as MER
 from . import money
 from .shop_integrity import files_hash, parts_hash
 from .studio_routes import make_studio_router, shape_count, summary_object, validate_parts
@@ -117,9 +118,10 @@ def _model_preview(doc: dict) -> dict:
     return preview
 
 
-def _public_item(doc: dict, owned: bool) -> dict:
-    """Ce vede oricine in lista/cautare. Continutul (files/parts) se da doar la detaliu, daca e gratis/detinut."""
-    return {
+def _public_item(doc: dict, owned: bool, seller: Optional[dict] = None) -> dict:
+    """Ce vede oricine in lista/cautare. Continutul (files/parts) se da doar la detaliu, daca e gratis/detinut.
+    `seller` = informatiile publice ale vanzatorului (DSA Art. 30(7) / informarea consumatorilor), vezi merchants.public_seller_info."""
+    out = {
         "item_id": doc["item_id"],
         "kind": doc["kind"],
         "owner_id": doc["owner_id"],
@@ -134,6 +136,9 @@ def _public_item(doc: dict, owned: bool) -> dict:
         "owned": owned,
         "preview": (_model_preview(doc) if doc["kind"] == "model" else {"file_count": len(doc.get("files", []))}),
     }
+    if seller is not None:
+        out["seller"] = seller
+    return out
 
 
 def _owner_content(doc: dict) -> dict:
@@ -172,6 +177,13 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         if not it:
             raise HTTPException(status_code=404, detail="Item not found")
         return it
+
+    async def seller_gate(seller_id: str) -> None:
+        """DSA Art. 30: vanzarea comerciala (pret > 0, public) cere statut de vanzator declarat si, pentru comercianti, datele complete."""
+        try:
+            await MER.require_sale_eligibility(db, seller_id)
+        except MER.MerchantError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail())
 
     async def owns(user_id: str, item: dict) -> bool:
         """Detine efectiv continutul: autorul, oricine daca e gratis SI public, sau cine l-a cumparat."""
@@ -245,7 +257,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
         ).limit(50)
         docs = await cursor.to_list(50)
         owned = await owned_set(current["user_id"], docs)
-        return [_public_item(d, d["item_id"] in owned) for d in docs]
+        sellers = await MER.seller_info_for_items(db, [d["owner_id"] for d in docs])
+        return [_public_item(d, d["item_id"] in owned, sellers.get(d["owner_id"])) for d in docs]
 
     async def publish(kind: str, owner_id: str, owner_username: str, name: str, description: str, price: int, is_public: bool, extra: dict) -> dict:
         await ensure_indexes()
@@ -274,6 +287,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
 
     @router.post("/models")
     async def publish_model(body: PublishModelBody, current=Depends(get_current_user)):
+        if body.price > 0 and body.is_public:
+            await seller_gate(current["user_id"])
         thumb = _clean_thumbnail(body.thumbnail_url)
         extra = await snapshot_from_studio(body.model_id, current)
         await assert_not_copy(extra.get("content_hash"), current)
@@ -293,6 +308,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
 
     @router.post("/scripts")
     async def publish_script(body: PublishScriptBody, current=Depends(get_current_user)):
+        if body.price > 0 and body.is_public:
+            await seller_gate(current["user_id"])
         names = [f.name for f in body.files]
         if len(set(names)) != len(names):
             raise HTTPException(status_code=400, detail="Duplicate script names")
@@ -319,7 +336,7 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=404, detail="Item not found")   # retras: doar cumparatorii il mai vad
         if not is_owned and not visible(it, current):
             raise HTTPException(status_code=403, detail="This item is private")
-        result = _public_item(it, is_owned)
+        result = _public_item(it, is_owned, (await MER.seller_info_for_items(db, [it["owner_id"]])).get(it["owner_id"]))
         if is_owned:
             result.update(_owner_content(it))
             if it["owner_id"] != current["user_id"] and it["price"] > 0:   # inceputul furnizarii continutului (informativ pentru rambursari)
@@ -363,6 +380,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             updates["content_hash"] = files_hash(updates["files"])
             await assert_not_copy(updates["content_hash"], current, ignore_item_id=item_id)
 
+        if ("price" in updates or "is_public" in updates) and updates.get("price", it["price"]) > 0 and updates.get("is_public", it["is_public"]):
+            await seller_gate(it["owner_id"])
         if updates:
             updates["updated_at"] = now_utc()
             await db.shop_items.update_one({"item_id": item_id}, {"$set": updates})
@@ -402,6 +421,8 @@ def make_shop_router(get_current_user, db) -> APIRouter:
             raise HTTPException(status_code=403, detail="This item is private")
 
         price = it["price"]
+        if price > 0:
+            await seller_gate(it["owner_id"])      # vanzator fara statut/date complete: achizitia nu se poate face
         purchase_row = {"user_id": current["user_id"], "item_id": item_id, "purchased_at": now_utc()}
         # autorul trebuie sa existe si sa nu fie in curs de stergere: altfel creditul s-ar pierde
         author = await db.users.find_one({"user_id": it["owner_id"]}, {"_id": 0, "deletion_state": 1})

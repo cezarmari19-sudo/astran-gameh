@@ -29,6 +29,8 @@ export type User = {
   language: string;
   is_platform_owner: boolean;
   is_platform_admin: boolean;
+  is_legal_officer?: boolean;   // indicii de UI; autorizarea reala e pe server
+  is_security_officer?: boolean;
   // false = cont Google (fara parola de cont): fluxurile de securitate a proiectelor nu cer parola contului
   has_password?: boolean;
   created_at: string;

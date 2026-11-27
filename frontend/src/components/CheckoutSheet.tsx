@@ -6,6 +6,8 @@ import { useI18n } from "@/src/i18n";
 import { cr, crErr } from "@/src/i18n/consumerStrings";
 import { consumerApi, type Checkout, type ProductType } from "@/src/api/consumer";
 import { Check } from "@/src/components/modUi";
+import SellerInfoCard from "@/src/components/SellerInfoCard";
+import { cs } from "@/src/i18n/complianceStrings";
 import ConsumerDocModal from "@/src/components/ConsumerDocModal";
 import LegalDocModal from "@/src/components/LegalDocModal";
 
@@ -56,6 +58,12 @@ export function CheckoutSheet({ visible, productType, productId, onClose, onConf
               <>
                 <Row k={cr(lang, "product")} v={co.product.name} bold />
                 <Row k={cr(lang, "description")} v={co.product.description} />
+                {co.product.seller_info ? (
+                  <View style={{ marginBottom: 12 }} testID="checkout-seller-info">
+                    <Text style={s.k}>{cs(lang, "si_title")}</Text>
+                    <SellerInfoCard seller={co.product.seller_info} />
+                  </View>
+                ) : null}
                 <Row k={cr(lang, "price")} v={`${co.product.price} ${co.product.currency}`} bold />
                 <Row k={cr(lang, "fees")} v={cr(lang, "fees_none")} />
                 <Row k={cr(lang, "delivery")} v={co.delivery_note} />

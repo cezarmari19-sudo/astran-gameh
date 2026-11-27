@@ -57,13 +57,13 @@ export function Btn({ label, onPress, disabled, kind, testID }: { label: string;
     </Pressable>
   );
 }
-export function Input({ label, value, onChangeText, multiline, placeholder, testID, keyboardType, maxLength }:
-  { label?: string; value: string; onChangeText: (v: string) => void; multiline?: boolean; placeholder?: string; testID?: string; keyboardType?: any; maxLength?: number }) {
+export function Input({ label, value, onChangeText, multiline, placeholder, testID, keyboardType, maxLength, secure }:
+  { label?: string; value: string; onChangeText: (v: string) => void; multiline?: boolean; placeholder?: string; testID?: string; keyboardType?: any; maxLength?: number; secure?: boolean }) {
   return (
     <View style={{ marginBottom: 12 }}>
       {label ? <Text style={s.k}>{label}</Text> : null}
       <TextInput testID={testID} value={value} onChangeText={onChangeText} multiline={multiline} placeholder={placeholder} maxLength={maxLength}
-        placeholderTextColor={colors.onSurface3} keyboardType={keyboardType} autoCapitalize="none"
+        placeholderTextColor={colors.onSurface3} keyboardType={keyboardType} autoCapitalize="none" secureTextEntry={secure} autoCorrect={secure ? false : undefined}
         style={[s.input, multiline && { minHeight: 96, textAlignVertical: "top" }]} />
     </View>
   );

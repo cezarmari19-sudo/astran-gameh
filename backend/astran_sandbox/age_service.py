@@ -30,7 +30,7 @@ async def ensure_indexes(db) -> None:
 
 AGE_FIELDS = ("age_category", "age_band", "age_locked", "age_assurance", "age_info_required", "date_of_birth", "dob",
               "dob_enc", "parental", "age_source", "consent_eligibility", "limited", "age_seal",
-              "legacy_declared_age_category")
+              "legacy_declared_age_category", "dob_correction_pending")
 
 
 def strip_age_fields(provided: dict) -> tuple[dict, list[str]]:
@@ -109,6 +109,12 @@ def allowed_thresholds(info: AP.AccessInfo, user: dict) -> tuple:
     """Pragurile pe care utilizatorul poate cere sa le verifice, decise DE SERVER din starea contului (nu din cerere):
       * 16-17 declarat -> 16;  * 18+ declarat -> 18 (si 16 daca atestarea de 18 a esuat: poate fi minor);
       * sub 16 declarat / varsta necunoscuta -> nimic (acord parental, respectiv introducerea datei)."""
+    # Corectie a datei de nastere in asteptare (GDPR Art. 16, vezi dob_correction.py): pragul care trebuie atestat decurge din
+    # banda DORITA, ca sa se poata verifica varsta chiar daca data declarata curenta e mai restrictiva.
+    from . import dob_correction as DC
+    pend = DC.pending_target(user)
+    if pend is not None:
+        return (pend["required_threshold"],)
     if info.band == AP.BAND_16_17:
         return (16,)
     if info.band == AP.BAND_ADULT:
@@ -121,7 +127,8 @@ async def start_assurance(db, user: dict, provider: AgeAssuranceProvider, *, thr
                           now: Optional[datetime] = None) -> dict:
     now = now or _now()
     info = AP.evaluate_access(user, now.date())
-    if info.restricted:
+    from . import dob_correction as DC
+    if info.restricted and DC.pending_target(user) is None:
         raise AssuranceError("account_restricted", 403)
     allowed = allowed_thresholds(info, user)
     if not allowed:
@@ -205,6 +212,13 @@ async def apply_assurance_result(db, user: dict, res: AssuranceResult, *, now: O
     await db.users.update_one({"user_id": user["user_id"]}, {"$set": patch})
     await AU.record(db, AU.AGE_ASSURANCE_VERIFIED, subject_user_id=user["user_id"], actor="provider",
                     details={"provider": res.provider, "method": res.method, "threshold": res.threshold}, now=now)
+    # Corectia datei de nastere care astepta aceasta atestare devine efectiva acum (vezi dob_correction.finalize_after_assurance).
+    try:
+        from . import dob_correction as DC
+        await DC.finalize_after_assurance(db, user["user_id"], now=now)
+    except Exception:  # noqa: BLE001 - atestarea ramane valida; corectia poate fi reluata de utilizator
+        import logging
+        logging.getLogger("astran.age").warning("dob correction finalize failed", exc_info=True)
     return {"status": AP.ASSURANCE_VERIFIED, "threshold": res.threshold}
 
 

@@ -1,7 +1,7 @@
-// GENERAT din backend/legal/privacy_policy/1.1.ro.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
+// GENERAT din backend/legal/privacy_policy/1.2.ro.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
 export const PRIVACY_POLICY_RO = `ASTRAN GAME — POLITICA DE CONFIDENȚIALITATE
 
-Versiune: 1.1
+Versiune: 1.2
 Stare: CIORNĂ — NECESITĂ COMPLETARE (vezi marcajele [DE COMPLETAT] de mai jos; acest document nu trebuie prezentat ca final cât timp există un marcaj)
 Data intrării în vigoare: [DE COMPLETAT: data intrării în vigoare]
 Operator: [DE COMPLETAT: denumirea legală, nr. de înregistrare și sediul operatorului]
@@ -22,16 +22,22 @@ Date: adresa de e-mail, numele de utilizator, numele afișat, parola (stocată d
 Scop: crearea și securizarea contului, autentificare, furnizarea serviciului.
 Temei: executarea contractului (art. 6 alin. (1) lit. b); securitatea serviciului (art. 6 alin. (1) lit. f).
 
+Schimbarea e-mailului (din 1.2): când îți schimbi adresa de e-mail păstrăm cererea în curs (adresa nouă, amprentele linkurilor de confirmare și anulare, datele) până la finalizare sau expirare, precum și o înregistrare de audit care conține doar adrese mascate. Un link de confirmare se trimite la adresa nouă și o notificare la cea veche. Adresa se schimbă numai după ce o confirmi. Temei: contract (Art. 6(1)(b)); securitate (Art. 6(1)(f)); corectarea datelor inexacte (Art. 16). [DE COMPLETAT: perioada de păstrare]
+
 2.2. Vârstă și acord parental
 Date: data nașterii (stocată criptat), banda/categoria de vârstă, dacă s-a finalizat verificarea vârstei; pentru utilizatorii sub 16 ani, e-mailul părintelui sau tutorelui (stocat criptat), decizia parentală, data ei și înregistrări tehnice ale pașilor de verificare; linkurile de unică folosință trimise părintelui se stochează doar ca hash-uri cu cheie și expiră. Evenimentele legate de vârstă și acord parental se păstrează într-un jurnal de audit care evidențiază modificările, cu identificatori pseudonimizați (fără data nașterii, e-mail sau IP).
 Scop: aplicarea protecțiilor adecvate vârstei, obținerea și dovedirea acordului parental unde este cerut.
 Temei: obligație legală și protecția minorilor (art. 6 alin. (1) lit. c/f); consimțământul titularului răspunderii părintești (art. 8 GDPR).
 Furnizori opționali: dacă este configurat un furnizor extern pentru verificarea vârstei 18+ sau a calității de părinte, ești redirecționat către el, iar noi primim doar un rezultat semnat. [DE COMPLETAT: numele furnizorului/furnizorilor folosiți efectiv sau confirmarea că nu se folosește niciunul]
 
+Corectarea datei nașterii (din 1.2): dacă îți corectezi data nașterii păstrăm data veche și cea nouă (criptate), momentul, motivul indicat, modul în care ți-ai confirmat identitatea (parolă sau cod pe e-mail) și rezultatul. Nu cerem și nu stocăm copii ale documentelor de identitate pentru aceasta; unde este nevoie de verificarea vârstei, un furnizor extern returnează doar un rezultat. Corectările repetate sunt limitate pentru a preveni ocolirea regulilor de vârstă. Temei: protecția minorilor și obligații legale (Art. 6(1)(c)); interes legitim de a preveni abuzul (Art. 6(1)(f)); corectarea datelor inexacte (Art. 16). [DE COMPLETAT: perioada de păstrare]
+
 2.3. Jocuri, avatar și creații
 Date: jocuri, scripturi, resurse, modele 3D, configurația avatarului și a hainelor, obiecte publicate sau cumpărate, jocuri jucate recent, roluri de colaborator/tester și prezența într-o sesiune de joc (expiră automat după aproximativ 60 de secunde de inactivitate). Mișcarea și evenimentele din joc sunt transmise în timp real celorlalți jucători din aceeași sesiune.
 Scop: funcționarea jocurilor multiplayer, a Studio și a magazinului.
 Temei: contract (art. 6 alin. (1) lit. b).
+
+Recomandări (din 1.2): implicit, ordinea jocurilor din Descoperă se bazează pe popularitate (porniri, aprecieri) și data publicării, nu pe un profil al tău. Dacă activezi „Recomandări personalizate” în Setări (dezactivat implicit), categoriile ultimelor 50 de jocuri jucate sunt folosite pentru ordonarea listei „Pentru tine”; nu se creează un profil separat. Temei: consimțământ (Art. 6(1)(a)), pe care îl poți retrage oricând în Setări; poți șterge și istoricul „Jucate recent”.
 
 2.4. Chat și mesaje
 - Chatul din joc este transmis jucătorilor din aceeași sesiune și păstrat doar într-o memorie tampon scurtă; se stochează doar dacă este raportat.
@@ -55,10 +61,14 @@ Date: tranzacții cu Astrans (registru), achiziții de obiecte din magazin/haine
 Scop: procesarea plăților, prevenirea fraudei, contabilitate, rambursări, drepturile consumatorului.
 Temei: contract (art. 6 alin. (1) lit. b); obligații legale, de ex. contabile (art. 6 alin. (1) lit. c); prevenirea fraudei (art. 6 alin. (1) lit. f).
 
+Vânzători (din 1.2): dacă vinzi obiecte contra unui preț, păstrăm declarația ta de statut de vânzător și răspunsurile la un scurt chestionar. Dacă declari că acționezi ca și comerciant, păstrăm și numele, adresa, telefonul, e-mailul de contact, datele de înregistrare, codul de TVA (opțional), declarația de conformitate cu dreptul UE, starea verificării și notele revizorului. Pentru comercianți, numele, adresa, telefonul, e-mailul și datele de înregistrare sunt afișate cumpărătorilor pe pagina produsului și înainte de achiziție. Pentru vânzătorii care nu sunt comercianți se afișează doar acest statut. Nu stocăm copii ale documentelor de identitate pentru aceasta. Temei: obligație legală (Digital Services Act, Art. 6(1)(c)); contract (Art. 6(1)(b)). [DE COMPLETAT: perioada de păstrare]
+
 2.8. Securitate, jurnale și prevenirea abuzurilor
 Date: adresa IP în înregistrările de evenimente de securitate (de ex. resetarea parolei, ștergerea sau recuperarea unui proiect) și pentru limitarea ratei de cereri; contoare de încercări eșuate; înregistrări de tokenuri revocate; jurnale de server cu date tehnice ale cererilor (tokenurile de acces sunt mascate).
 Scop: protejarea conturilor, detectarea abuzurilor și fraudei.
 Temei: interes legitim (art. 6 alin. (1) lit. f).
+
+Evidența incidentelor de securitate (din 1.2): păstrăm evidența incidentelor de securitate și a încălcărilor securității datelor personale (tip, categorii de date, număr estimat de persoane, măsuri luate, deciziile privind notificarea autorității și a persoanelor vizate, istoric de audit). Conține numere și categorii, nu liste de persoane, și este accesibilă numai personalului autorizat. Temei: obligație legală (GDPR Art. 33-34, Art. 6(1)(c)); interes legitim de securitate (Art. 6(1)(f)). [DE COMPLETAT: perioada de păstrare]
 
 2.9. Dovada consimțământului și consimțământul opțional pentru marketing
 Stocăm dovada versiunii Termenilor și a acestei Politici pe care le-ai acceptat sau citit (versiune, dată, amprenta textului; fără IP sau date despre dispozitiv). Utilizatorii de la 16 ani pot da consimțământ opțional pentru e-mailuri de marketing; nu este necesar pentru a folosi Astran și poate fi retras oricând în Setări. Temei: obligație legală / interes legitim de a dovedi conformitatea (art. 6 alin. (1) lit. c/f); consimțământ pentru marketing (art. 6 alin. (1) lit. a).

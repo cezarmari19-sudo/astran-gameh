@@ -20,6 +20,9 @@ import * as ImagePicker from "expo-image-picker";
 import { api } from "@/src/api/client";
 import { CheckoutSheet } from "@/src/components/CheckoutSheet";
 import { RefundPolicyLink } from "@/src/components/ConsumerDocModal";
+import SellerInfoCard from "@/src/components/SellerInfoCard";
+import { cs, csErr } from "@/src/i18n/complianceStrings";
+import { useI18n } from "@/src/i18n";
 import { colors, radius, spacing } from "@/src/theme";
 import ScriptEditor, { ScriptFile } from "@/src/components/ScriptEditor";
 
@@ -368,6 +371,7 @@ function ItemDetailModal({ itemId, myId, onClose, onChanged, onEdit }: {
               </View>
 
               {item.description ? <Text style={styles.detailDesc}>{item.description}</Text> : null}
+              {item.seller ? <View style={{ marginVertical: 8 }} testID="shop-seller-info"><SellerInfoCard seller={item.seller} /></View> : null}
 
               <View style={styles.detailMetaRow}>
                 <Text style={styles.detailMetaText}>{item.downloads} downloads</Text>
@@ -464,6 +468,8 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
   onDone: () => void;
 }) {
   const router = useRouter();
+  const { lang } = useI18n();
+  const [needsSeller, setNeedsSeller] = useState(false);
   const editing = !!editItem;
   const kind: Kind = editItem ? editItem.kind : kindProp;
 
@@ -623,7 +629,10 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
       }
       onDone();
     } catch (e: any) {
-      setErr(e?.message || "Publish failed");
+      // DSA Art. 30: vanzarea cu pret cere statut de vanzator declarat / date de comerciant complete -> trimitem la ecranul dedicat
+      if (e?.code === "seller_status_required" || e?.code === "trader_details_required" || e?.code === "trader_verification_required") {
+        setErr(csErr(lang, e)); setNeedsSeller(true);
+      } else setErr(e?.message || "Publish failed");
     } finally {
       setBusy(false);
     }
@@ -758,6 +767,11 @@ function PublishModal({ visible, kind: kindProp, editItem, presetModelId, onClos
           </Pressable>
 
           {err ? <Text style={[styles.errText, { marginTop: 10 }]}>{err}</Text> : null}
+          {needsSeller ? (
+            <Pressable testID="publish-open-seller" onPress={() => { onClose(); router.push("/seller"); }} style={{ marginTop: 8 }}>
+              <Text style={{ color: colors.brand, fontWeight: "700" }}>{cs(lang, "sl_open")}</Text>
+            </Pressable>
+          ) : null}
 
           <Pressable testID="publish-submit" onPress={submit} disabled={busy} style={styles.buyBtn}>
             {busy ? <ActivityIndicator size="small" color={colors.onBrand} /> : <Text style={styles.buyText}>{editing ? "Save changes" : "Publish"}</Text>}

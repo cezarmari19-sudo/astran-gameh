@@ -259,6 +259,7 @@ from astran_sandbox import consumer as CONS            # drepturile consumatoril
 from astran_sandbox import refunds as REFUNDS          # cereri de rambursare + panou admin
 from astran_sandbox.consumer_routes import make_consumer_router
 from astran_sandbox import email_verification as emailver
+from astran_sandbox import age_entitlement_service as ENT   # matrice centralizata de acces (varsta/consimtamant/scopuri)
 from astran_sandbox import age_policy as AP            # varsta: DOB, benzi, acces 18+ (decis pe server)
 from astran_sandbox import age_service as age_service  # inregistrare cu DOB, assurance, migrare
 from astran_sandbox import age_guard                   # poarta de acces 18+ pentru jocuri/functii
@@ -271,6 +272,12 @@ from astran_sandbox import moderation_service as MOD    # DSA: moderare, Art. 16
 from astran_sandbox.moderation_routes import make_moderation_router, make_contact_router
 from astran_sandbox.dsa_routes import make_dsa_router     # DSA Art. 9/10/15/16/24(5): notificari publice, ordine, transparenta, TDB
 from astran_sandbox import dsa_migrations as DSA_MIG, dsa_delivery as DSA_DL, dsa_tdb as DSA_TDB, authority_orders as DSA_AO, dsa_public_notices as DSA_PN
+from astran_sandbox import compliance_migrations as COMPLIANCE_MIG   # GDPR Art. 16/33-34 + DSA Art. 27/30-32: colectii + indexuri versionate
+from astran_sandbox import recommendations as REC                      # DSA Art. 27: parametrii sistemului de recomandari (sursa unica)
+from astran_sandbox import personal_data as PERSONAL_DATA              # GDPR Art. 16: schimbare e-mail
+from astran_sandbox.personal_data_routes import make_personal_data_router
+from astran_sandbox.incident_routes import make_incident_router        # GDPR Art. 33-34: incidente de securitate (doar personal autorizat)
+from astran_sandbox.merchant_routes import make_merchant_router        # DSA Art. 30-32: statut vanzator / date comerciant
 from astran_sandbox.media_validation import clean_image_ref
 from astran_sandbox.scene_validation import clean_scene
 
@@ -595,7 +602,8 @@ async def resolve_user_from_token(token: str) -> Optional[dict]:
 
 
 MOD_ALLOWED_WHEN_SUSPENDED = ("/api/auth/me", "/api/auth/logout", "/api/moderation/me/", "/api/moderation/notices", "/api/legal/",
-                              "/api/contact/", "/api/consent/", "/api/privacy/", "/api/account/data-export")
+                              "/api/contact/", "/api/consent/", "/api/privacy/", "/api/account/data-export",
+                              "/api/account/personal-data", "/api/account/email-change", "/api/account/dob-correction")
 
 
 def MOD_PATH_ALLOWED(path: str) -> bool:
@@ -628,10 +636,18 @@ async def get_current_user(request: Request, authorization: Optional[str] = Head
                                                      "next_action": info.next_action})
     # Cont LIMITAT (varsta DECLARATA, neverificata): functiile care cer consimtamant digital sunt refuzate pe backend,
     # indiferent de ce trimite clientul. Restul (explorare, joc, setari, confidentialitate, DSA, refund) raman.
-    if info.limited and AP.path_requires_consent_features(request.url.path, request.method):
-        raise HTTPException(status_code=403, detail={"code": "age_verification_required", "account_state": info.account_state,
-                                                     "next_action": info.next_action,
-                                                     "parental_option": info.parental_option})
+    # Serviciul central de entitlement-uri decide per FUNCTIE (friends, DM, grupuri, wallet, shop, bani reali, transfer,
+    # publicare, monetizare, 18+), cu scopuri parentale separate. Regula veche (cont limitat => functii care cer
+    # consimtamant) ramane ca plasa de siguranta pentru orice cale nemapata inca.
+    ent = ENT.check_request(user, request.url.path, request.method)
+    if ent is None and info.limited and AP.path_requires_consent_features(request.url.path, request.method):
+        ent = ENT.evaluate(user, ENT.F_SHOP_BROWSE)
+    if ent is not None:
+        await age_guard.record_denied(db, user, "feature_" + ent.feature)
+        raise HTTPException(status_code=403, detail={
+            "code": "age_verification_required" if ent.reason in (ENT.R_VERIFY_AGE, ENT.R_AGE_INFO) else "feature_not_available",
+            "feature": ent.feature, "reason": ent.reason, "scope": ent.scope, "account_state": info.account_state,
+            "next_action": ent.next_action or info.next_action, "parental_option": info.parental_option})
     return user
 
 
@@ -701,6 +717,12 @@ async def startup():
     app.state.google_voided_task = asyncio.create_task(_google_voided_loop())
     await db.reports.create_index("report_id", unique=True)
     await MOD.ensure_indexes(db)   # DSA: colectii de moderare (aditiv, nu schimba datele existente)
+    try:
+        _applied = await COMPLIANCE_MIG.migrate_up(db)   # indexuri/colectii pentru incidente, corectii de date si comercianti (idempotent)
+        if _applied:
+            log.info("compliance migrations applied: %s", _applied)
+    except Exception:  # noqa: BLE001 - nu blocam pornirea; functiile noi ramân fail-closed daca indexurile lipsesc
+        log.exception("compliance migrations failed")
     try:
         applied = await DSA_MIG.migrate_up(db)      # DSA remediation: indexuri/constrangeri versionate (vezi dsa_migrations.py)
         if applied:
@@ -860,6 +882,9 @@ def _user_public_base(user: dict) -> dict:
         "language": user.get("language", "ro"),
         "is_platform_owner": user.get("is_platform_owner", False),
         "is_platform_admin": user.get("is_platform_admin", False),
+        # doar indicii de UI (afisarea linkurilor din panoul de administrare); autorizarea reala se verifica pe server la fiecare cerere
+        "is_legal_officer": user.get("is_legal_officer") is True,
+        "is_security_officer": user.get("is_security_officer") is True,
         "created_at": user.get("created_at", now_utc()),
         "online": True,
     }
@@ -2343,21 +2368,18 @@ async def discover(section: str = "for_you", current=Depends(get_current_user)):
     # fail-closed: doar un cont cu age assurance verificat vede jocuri 18+ (altfel: DOAR jocuri explicit pentru toate varstele)
     if not AP.can_access_adult_content(current):
         q["age_category"] = "under_18"
-    sort_map = {
-        "for_you": [("total_plays", -1), ("likes", -1)],
-        # NOTA: "trending" sorta dupa games.player_count, care nu mai e actualizat (vezi
-        # _attach_live_player_counts) - ar fi fost mereu 0 pentru toate jocurile, deci sortarea
-        # nu facea nimic. total_plays e proxy-ul real disponibil pentru "activitate recenta".
-        "trending": [("total_plays", -1), ("likes", -1)],
-        "new": [("created_at", -1)],
-        "popular": [("likes", -1), ("total_plays", -1)],
-    }
-    sort = sort_map.get(section, sort_map["for_you"])
-    cursor = db.games.find(q, {"_id": 0, "script": 0}).sort(sort).limit(30)
-    games = await _attach_live_player_counts(
-        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(30)])
-    )
-    return {"section": section, "games": games}
+    # Parametrii de ordonare (popularitate, recenta) si personalizarea OPT-IN sunt definiti in astran_sandbox/recommendations.py
+    # si descrisi in Termeni (DSA Art. 27). NOTA: "trending" sorta dupa games.player_count, care nu mai e actualizat (vezi
+    # _attach_live_player_counts); total_plays e proxy-ul real disponibil pentru "activitate recenta".
+    async def _attach(rows):
+        return await _attach_live_player_counts(await _attach_group_info([_game_defaults(g) for g in rows]))
+    return await REC.discover_games(db, current["user_id"], section, q, attach=_attach)
+
+
+@api.get("/games/recommendation-info")
+async def recommendation_info():
+    """Public: parametrii principali ai ordonarii/recomandarilor si optiunile utilizatorului (DSA Art. 27)."""
+    return REC.public_info()
 
 
 @api.get("/games/mine")
@@ -2370,6 +2392,13 @@ async def my_games(current=Depends(get_current_user)):
     games = await _attach_live_player_counts(        await _attach_group_info([_game_defaults(g) for g in await cursor.to_list(100)])
     )
     return {"games": games}
+
+
+@api.delete("/games/recently-played")
+async def clear_recently_played(current=Depends(get_current_user)):
+    """Sterge istoricul \"jucate recent\" al utilizatorului (inclusiv semnalul folosit de personalizarea opt-in)."""
+    res = await db.recently_played.delete_many({"user_id": current["user_id"]})
+    return {"ok": True, "deleted": res.deleted_count}
 
 
 @api.get("/games/recently-played")
@@ -2812,6 +2841,14 @@ async def transfer_astrans(body: TransferBody, current=Depends(get_current_user)
     recipient = await db.users.find_one({"user_id": body.recipient_user_id})
     if not recipient or recipient.get("deletion_state"):
         raise HTTPException(status_code=404, detail="Recipient not found")
+    # Transfer intre utilizatori: expeditor adult verificat, destinatar eligibil (nu restrans/limitat/suspendat/minor).
+    # Verificat pe server inainte de orice miscare de sold; refuzul nu spune de ce destinatarul nu e eligibil.
+    _td = ENT.transfer_allowed(current, recipient, recipient_suspended=bool(MOD.account_block(recipient)))
+    if not _td.allowed:
+        await age_guard.record_denied(db, current, "wallet_transfer_denied")
+        if _td.reason == ENT.R_RECIPIENT:
+            raise HTTPException(status_code=403, detail={"code": "recipient_not_eligible"})
+        raise HTTPException(status_code=403, detail=_td.detail())
 
     # Cheia se STOCHEAZA prefixata cu user_id: indexul unic e global, deci fara prefix un user
     # putea "rezerva" cheia altuia si ii bloca transferurile cu 409.
@@ -3562,12 +3599,28 @@ api.include_router(make_consumer_router(get_current_user, db))
 
 api.include_router(make_age_router(
     get_current_user, db, client_ip=_client_ip,
-    notifier=_notify_email if psec.email_is_configured() else None,
+    notifier=(lambda to, subject, body: _notify_email(to, subject, body)) if psec.email_is_configured() else None,   # _notify_email e definit mai jos
     app_base_url=os.environ.get("ASTRAN_PUBLIC_APP_URL"),
     on_parent_approved=_claim_welcome_bonus,
     on_withdrawn=privacy.disconnect_user_sockets,
     erase_child=_erase_child,
 ))
+
+async def _after_email_changed(user_id: str) -> None:
+    """Dupa schimbarea/revenirea e-mailului: sesiunile existente cad (la fel ca la schimbarea parolei)."""
+    await db.users.update_one({"user_id": user_id}, {"$set": {"sessions_valid_after": _credentials_reset_marker()}})
+    await db.user_sessions.delete_many({"user_id": user_id})
+
+
+# GDPR Art. 16: /api/account/personal-data, /email-change/*, /dob-correction/* (reautentificarea refoloseste privacy.verify_reauth) - vezi personal_data_routes.py
+api.include_router(make_personal_data_router(
+    get_current_user, db, verify_pw=verify_pw_async, client_ip=_client_ip,
+    notifier=_notify_email if psec.email_is_configured() else None,
+    app_base_url=os.environ.get("ASTRAN_PUBLIC_APP_URL"), on_email_changed=_after_email_changed))
+# DSA Art. 30-32: /api/seller/status (onboarding) + /api/admin/merchants/* (verificare, personal autorizat)
+api.include_router(make_merchant_router(get_current_user, db))
+# GDPR Art. 33-34: /api/admin/incidents/* - DOAR personal autorizat (admin / responsabil juridic / responsabil securitate)
+api.include_router(make_incident_router(get_current_user, db))
 
 # DSA: /api/moderation/* (rapoarte, notificari Art. 16, decizii Art. 17, plangeri Art. 20, panou staff) si /api/contact/*
 api.include_router(make_moderation_router(get_current_user, db, target_exists=_moderation_target_exists))

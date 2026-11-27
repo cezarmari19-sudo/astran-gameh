@@ -1,0 +1,183 @@
+// Texte GDPR (Art. 16, 33-34) si DSA (Art. 27, 30-32): Date personale, recomandari, vanzatori si ecranele de administrare.
+// Statusurile si motivele vin de la server; aici doar le traducem. Alta limba decat ro/en cade pe engleza.
+type S = Record<string, string>;
+
+const EN = {
+  // --- Date personale (Setari)
+  pd_title: "Personal data", pd_email: "E-mail", pd_verified: "verified", pd_unverified: "not verified",
+  pd_change_email: "Change e-mail", pd_new_email: "New e-mail address", pd_password: "Current password",
+  pd_send_code: "Send me a confirmation code", pd_code: "Code sent to your current e-mail", pd_request_link: "Send confirmation link",
+  pd_link_sent: "If this address can be used, we sent a confirmation link to it. Your e-mail changes only after you open the link. We also notified your current address.",
+  pd_pending: "A change to {email} is waiting for confirmation.", pd_cancel: "Cancel the change",
+  pd_reauth_note: "To protect your account we ask you to confirm your identity first.",
+  pd_dob: "Date of birth", pd_dob_not_set: "Not set. Set it from Age and access.", pd_dob_correct: "Correct date of birth",
+  pd_new_dob: "Correct date (YYYY-MM-DD)", pd_reason: "Reason", pd_reason_text: "Describe the reason", pd_submit: "Submit correction",
+  reason_typo: "Typing mistake", reason_wrong_year_or_day: "Wrong year or day", reason_entered_by_someone_else: "Entered by someone else", reason_other: "Other",
+  pd_applied: "Date of birth corrected. Safety rules for your new age group apply now.",
+  pd_awaiting: "The correction is waiting for age verification ({age}+). Until then nothing changes and 18+ features stay blocked.",
+  pd_verify_now: "Verify my age", pd_provider_unavailable: "Age verification is not available yet, so this correction stays pending.",
+  pd_limit_reached: "The correction limit was reached. Contact support for a manual review.", pd_next_at: "Next correction possible after {date}.",
+  pd_cancel_request: "Cancel the pending correction",
+  pd_no_docs: "We never ask for or store copies of identity documents for this.", pd_limits_note: "Corrections are limited to prevent bypassing age rules.",
+  // --- confirmare / revenire e-mail
+  ce_title: "Confirm new e-mail", ce_working: "Confirming…", ce_done: "Your e-mail was changed. Sign in again with the new address.", ce_failed: "This link is invalid or expired.",
+  ce_missing: "The link is incomplete.", re_title: "Cancel e-mail change", re_working: "Reverting…", re_done: "Done. The change was cancelled or reverted. We recommend changing your password.",
+  go_signin: "Go to sign in",
+  // --- recomandari
+  rec_title: "Recommendations", rec_personalize: "Personalized recommendations",
+  rec_personalize_desc: "Off by default. When on, \"For you\" shows games from the categories of your recently played games first. Otherwise games are ordered by popularity for everyone.",
+  rec_clear: "Clear \"Recently played\" history", rec_cleared: "History cleared.", rec_terms: "How recommendations work (Terms, section 10)",
+  rec_saved: "Saved.",
+  // --- vanzator
+  sl_title: "Seller information", sl_intro: "Before selling items for a price you declare whether you act as a trader (for purposes related to a trade, business, craft or profession).",
+  sl_status_undeclared: "Not declared", sl_status_non_trader: "Not a trader (declared)", sl_status_trader: "Trader",
+  q_regular_sales: "I sell regularly or in large quantities", q_for_profit_or_business: "I sell to make a profit or as part of a business",
+  q_professional_or_company: "I act for a company, a professional activity or on someone else's behalf", q_hired_staff_or_resells_goods: "I resell goods or work with employees or partners",
+  sl_declare_non_trader: "Declare: I am not a trader", sl_declare_trader: "Declare: I am a trader", sl_choose: "Your declaration",
+  sl_trader_form: "Trader details", f_trader_type: "Type", tt_natural_person: "Natural person", tt_company: "Company", f_name: "Name / company name",
+  f_line1: "Address", f_line2: "Address (line 2, optional)", f_city: "City", f_postal: "Postal code", f_country: "Country code (e.g. RO)", f_phone: "Phone", f_email: "Contact e-mail",
+  f_reg_name: "Trade register", f_reg_number: "Registration number", f_reg_na: "Why registration does not apply (if you have no number)", f_vat: "VAT number (optional, not shown)",
+  f_statement: "I confirm that I will offer only products and services that comply with EU law.", sl_save: "Save", sl_saved: "Saved.",
+  sl_verification: "Verification", vs_unverified: "Unverified", vs_in_review: "In review", vs_verified: "Verified", vs_rejected: "Rejected",
+  sl_elig_ok: "You can sell items for a price.", sl_elig_seller_status_required: "Declare your seller status to sell items for a price.",
+  sl_elig_trader_details_required: "Complete the trader details to sell items for a price.", sl_elig_trader_verification_required: "Your details must be verified before you can sell.",
+  sl_adult_only: "Selling requires a verified adult account.", sl_preview: "What buyers see", sl_no_docs: "We do not request or store copies of identity documents.",
+  sl_open: "Seller information",
+  // --- afisare cumparator
+  si_title: "Seller", si_non_trader: "The seller declares they are not a trader. EU consumer protection law does not apply to the contract with this seller.",
+  si_undeclared: "Seller status not declared.", si_trader: "Trader", si_address: "Address", si_phone: "Phone", si_email: "E-mail", si_registry: "Registry",
+  si_statement: "The trader declares they offer only products compliant with EU law.", si_verification: "Verification",
+  // --- admin incidente
+  inc_title: "Security incidents", inc_new: "Report incident", inc_empty: "No incidents.", inc_back: "Back", inc_staff_only: "Authorized staff only.",
+  inc_f_title: "Title", inc_f_desc: "Description", inc_f_type: "Type", inc_f_discovered: "Discovered at (ISO, UTC)", inc_f_users: "Estimated affected users", inc_f_unknown: "Number unknown",
+  inc_f_categories: "Data categories", inc_create: "Create", inc_deadline: "72h deadline", inc_hours_left: "{h} h left", inc_overdue: "Overdue",
+  dl_not_assessed: "Not assessed", dl_not_required: "Not required", dl_pending: "Pending", dl_due_soon: "Due soon", dl_overdue: "Overdue", dl_met: "Met", dl_late: "Notified late",
+  inc_severity: "Severity", inc_risk: "Risk to people's rights and freedoms", rk_unlikely: "Unlikely", rk_risk: "Risk", rk_high_risk: "High risk",
+  sv_low: "Low", sv_medium: "Medium", sv_high: "High", sv_critical: "Critical", inc_reasoning: "Reasoning", inc_consequences: "Likely consequences", inc_assess: "Save assessment",
+  inc_authority: "Supervisory authority (Art. 33)", inc_decide_notify: "Decide: notify", inc_decide_not_notify: "Decide: do not notify", inc_reasons: "Reasons",
+  inc_approve: "Approve decision", inc_dpo: "DPO / contact point", inc_prepare: "Prepare draft", inc_draft: "Draft (never sent automatically)",
+  inc_record_sub: "Record submission made by the officer", inc_submitted_at: "Submitted at (ISO, UTC)", inc_auth_ref: "Authority reference", inc_late_reason: "Reasons for the delay",
+  inc_subjects: "People affected (Art. 34)", inc_subjects_required: "Communication required", inc_subjects_not_required: "Not required", inc_advice: "Advice for people", inc_exemption: "Art. 34(3) exemption (if not required)",
+  inc_record_comm: "Record communication", inc_channel: "Channel", inc_recipients: "Recipients", inc_close: "Close incident", inc_lessons: "Lessons learned",
+  inc_measure: "Add measure taken", inc_add: "Add", inc_audit: "Audit trail", inc_chain_ok: "Audit chain intact", inc_chain_broken: "Audit chain BROKEN",
+  inc_no_autosend: "The system never sends anything to authorities or users: it prepares and records.", inc_status: "Status",
+  // --- admin comercianti
+  mer_title: "Merchants", mer_empty: "No merchants.", mer_filter: "Verification state", mer_all: "All", mer_review: "Review", mer_verify: "Mark verified", mer_reject: "Reject",
+  mer_in_review: "Back to in review", mer_note: "Note (required to reject)", mer_reclassify: "Reclassify as trader", mer_reason: "Reason", mer_signals: "Signals (12 months)",
+  mer_sales: "Sales", mer_revenue: "Revenue (Astrans)", mer_suggested: "Review suggested", mer_history: "History", mer_policy: "Policy",
+  // --- erori
+  err_generic: "Something went wrong. Try again.", err_forbidden: "Not authorized.", err_reauth_failed: "Identity could not be confirmed.", err_reauth_required: "Confirm your identity to continue.",
+  err_invalid_email: "Invalid e-mail address.", err_same_email: "This is already your e-mail.", err_too_many_requests: "Too many attempts. Wait a bit and try again.",
+  err_email_not_configured: "E-mail service is not available.", err_email_send_failed: "Could not send the e-mail.", err_invalid_token: "This link is invalid or expired.",
+  err_email_unavailable: "This e-mail address cannot be used.", err_correction_limit_reached: "The correction limit was reached. Contact support.",
+  err_correction_cooldown: "Please wait before submitting another correction.", err_request_already_open: "A correction is already waiting for verification.",
+  err_no_change: "The date is identical to the current one.", err_reason_required: "Please describe the reason.", err_invalid_reason: "Invalid reason.",
+  err_date_of_birth_not_set: "Set your date of birth first.", err_request_stale: "Your data changed meanwhile. Reload and retry.", err_manual_review_required: "Contact support for a manual review.",
+  err_seller_status_required: "Declare your seller status first.", err_trader_details_required: "Complete the trader details first.", err_trader_verification_required: "Your trader details are not verified yet.",
+  err_seller_not_compliant: "This seller must complete the required seller information before this item can be sold.", err_likely_trader: "Your answers indicate that you act as a trader. Declare the trader status.",
+  err_reclassified_as_trader: "Your account was reclassified as a trader. Complete the trader details.", err_statement_required: "You must confirm the EU compliance statement.",
+  err_age_verification_required: "Selling requires a verified adult account.", err_missing_field: "A required field is missing.", err_invalid_field: "A field is not valid.",
+  err_assessment_required: "Assess the incident first.", err_notification_required: "Art. 33: notification is required unless the breach is unlikely to result in a risk.",
+  err_approval_required: "The decision must be approved first.", err_approver_role_required: "Only an admin or legal officer can do this.", err_separate_approver_required: "A different person must approve.",
+  err_draft_required: "Prepare the draft first.", err_communication_required: "High risk: communication is required unless an Art. 34(3) exemption applies.",
+  err_data_subject_decision_pending: "Record the Art. 34 decision first.", err_communication_pending: "Record the communication first.", err_notification_pending: "Record the submission first.",
+  err_decision_pending: "The notification decision must be recorded and approved.", err_version_conflict: "Someone else changed this. Reload and retry.", err_incident_closed: "Closed incidents cannot be changed.",
+  err_severity_too_low: "Incidents with children's data must be at least High.", err_risk_too_low: "Special category data cannot be 'unlikely' without review.",
+  err_manual_recovery_required: "The previous address is no longer available. Contact support to recover your account.",
+  err_too_short: "Text is too short.", err_invalid_datetime: "Invalid date/time (use ISO 8601, e.g. 2026-11-27T10:00:00Z).", err_self_review_forbidden: "You cannot review your own details.",
+} satisfies S;
+type K = keyof typeof EN;
+
+const RO: Record<K, string> = {
+  pd_title: "Date personale", pd_email: "E-mail", pd_verified: "verificat", pd_unverified: "neverificat",
+  pd_change_email: "Schimbă e-mailul", pd_new_email: "Noua adresă de e-mail", pd_password: "Parola actuală",
+  pd_send_code: "Trimite-mi un cod de confirmare", pd_code: "Codul trimis pe e-mailul actual", pd_request_link: "Trimite linkul de confirmare",
+  pd_link_sent: "Dacă adresa poate fi folosită, i-am trimis un link de confirmare. E-mailul se schimbă numai după ce deschizi linkul. Am anunțat și adresa actuală.",
+  pd_pending: "O schimbare spre {email} așteaptă confirmarea.", pd_cancel: "Anulează schimbarea",
+  pd_reauth_note: "Pentru siguranța contului îți cerem mai întâi să îți confirmi identitatea.",
+  pd_dob: "Data nașterii", pd_dob_not_set: "Nesetată. Seteaz-o din Vârstă și acces.", pd_dob_correct: "Corectează data nașterii",
+  pd_new_dob: "Data corectă (AAAA-LL-ZZ)", pd_reason: "Motiv", pd_reason_text: "Descrie motivul", pd_submit: "Trimite corectarea",
+  reason_typo: "Greșeală de tastare", reason_wrong_year_or_day: "An sau zi greșită", reason_entered_by_someone_else: "A introdus-o altcineva", reason_other: "Altul",
+  pd_applied: "Data nașterii a fost corectată. Regulile de siguranță pentru noua categorie de vârstă se aplică acum.",
+  pd_awaiting: "Corectarea așteaptă verificarea vârstei ({age}+). Până atunci nu se schimbă nimic, iar funcțiile 18+ rămân blocate.",
+  pd_verify_now: "Verifică-mi vârsta", pd_provider_unavailable: "Verificarea vârstei nu este disponibilă încă, deci corectarea rămâne în așteptare.",
+  pd_limit_reached: "Limita de corectări a fost atinsă. Contactează suportul pentru o verificare manuală.", pd_next_at: "Următoarea corectare este posibilă după {date}.",
+  pd_cancel_request: "Anulează corectarea în așteptare",
+  pd_no_docs: "Nu cerem și nu stocăm niciodată copii ale documentelor de identitate pentru aceasta.", pd_limits_note: "Corectările sunt limitate pentru a preveni ocolirea regulilor de vârstă.",
+  ce_title: "Confirmă noul e-mail", ce_working: "Se confirmă…", ce_done: "E-mailul a fost schimbat. Autentifică-te din nou cu noua adresă.", ce_failed: "Linkul este invalid sau a expirat.",
+  ce_missing: "Linkul este incomplet.", re_title: "Anulează schimbarea e-mailului", re_working: "Se anulează…", re_done: "Gata. Schimbarea a fost anulată sau revenită. Îți recomandăm să îți schimbi parola.",
+  go_signin: "Mergi la autentificare",
+  rec_title: "Recomandări", rec_personalize: "Recomandări personalizate",
+  rec_personalize_desc: "Dezactivat implicit. Când e activ, „Pentru tine” afișează mai întâi jocuri din categoriile jocurilor jucate recent. Altfel jocurile sunt ordonate după popularitate, la fel pentru toți.",
+  rec_clear: "Șterge istoricul „Jucate recent”", rec_cleared: "Istoric șters.", rec_terms: "Cum funcționează recomandările (Termeni, secțiunea 10)",
+  rec_saved: "Salvat.",
+  sl_title: "Informații vânzător", sl_intro: "Înainte să vinzi obiecte contra unui preț declari dacă acționezi ca profesionist (în scopuri legate de comerț, afacere, meșteșug sau profesie).",
+  sl_status_undeclared: "Nedeclarat", sl_status_non_trader: "Nu sunt comerciant (declarat)", sl_status_trader: "Comerciant",
+  q_regular_sales: "Vând regulat sau în cantități mari", q_for_profit_or_business: "Vând pentru profit sau ca parte dintr-o afacere",
+  q_professional_or_company: "Acționez pentru o firmă, o activitate profesională sau în numele altcuiva", q_hired_staff_or_resells_goods: "Revând bunuri sau lucrez cu angajați ori parteneri",
+  sl_declare_non_trader: "Declar: nu sunt comerciant", sl_declare_trader: "Declar: sunt comerciant", sl_choose: "Declarația ta",
+  sl_trader_form: "Datele comerciantului", f_trader_type: "Tip", tt_natural_person: "Persoană fizică", tt_company: "Societate", f_name: "Nume / denumirea firmei",
+  f_line1: "Adresă", f_line2: "Adresă (linia 2, opțional)", f_city: "Oraș", f_postal: "Cod poștal", f_country: "Cod țară (ex. RO)", f_phone: "Telefon", f_email: "E-mail de contact",
+  f_reg_name: "Registrul comerțului", f_reg_number: "Număr de înregistrare", f_reg_na: "De ce nu se aplică înregistrarea (dacă nu ai număr)", f_vat: "Cod TVA (opțional, nu se afișează)",
+  f_statement: "Confirm că voi oferi numai produse și servicii conforme cu dreptul UE.", sl_save: "Salvează", sl_saved: "Salvat.",
+  sl_verification: "Verificare", vs_unverified: "Neverificat", vs_in_review: "În verificare", vs_verified: "Verificat", vs_rejected: "Respins",
+  sl_elig_ok: "Poți vinde obiecte contra unui preț.", sl_elig_seller_status_required: "Declară-ți statutul de vânzător ca să vinzi obiecte contra unui preț.",
+  sl_elig_trader_details_required: "Completează datele comerciantului ca să vinzi obiecte contra unui preț.", sl_elig_trader_verification_required: "Datele tale trebuie verificate înainte să poți vinde.",
+  sl_adult_only: "Vânzarea cere un cont de adult verificat.", sl_preview: "Ce văd cumpărătorii", sl_no_docs: "Nu cerem și nu stocăm copii ale documentelor de identitate.",
+  sl_open: "Informații vânzător",
+  si_title: "Vânzător", si_non_trader: "Vânzătorul declară că nu este comerciant. Legislația UE de protecție a consumatorilor nu se aplică contractului cu acest vânzător.",
+  si_undeclared: "Statutul vânzătorului nu este declarat.", si_trader: "Comerciant", si_address: "Adresă", si_phone: "Telefon", si_email: "E-mail", si_registry: "Registru",
+  si_statement: "Comerciantul declară că oferă numai produse conforme cu dreptul UE.", si_verification: "Verificare",
+  inc_title: "Incidente de securitate", inc_new: "Raportează incident", inc_empty: "Niciun incident.", inc_back: "Înapoi", inc_staff_only: "Doar personal autorizat.",
+  inc_f_title: "Titlu", inc_f_desc: "Descriere", inc_f_type: "Tip", inc_f_discovered: "Descoperit la (ISO, UTC)", inc_f_users: "Utilizatori afectați (estimare)", inc_f_unknown: "Număr necunoscut",
+  inc_f_categories: "Categorii de date", inc_create: "Creează", inc_deadline: "Termen 72h", inc_hours_left: "{h} h rămase", inc_overdue: "Depășit",
+  dl_not_assessed: "Neevaluat", dl_not_required: "Nu e necesar", dl_pending: "În așteptare", dl_due_soon: "Termen apropiat", dl_overdue: "Depășit", dl_met: "Respectat", dl_late: "Notificat tardiv",
+  inc_severity: "Gravitate", inc_risk: "Risc pentru drepturile și libertățile persoanelor", rk_unlikely: "Improbabil", rk_risk: "Risc", rk_high_risk: "Risc ridicat",
+  sv_low: "Scăzută", sv_medium: "Medie", sv_high: "Ridicată", sv_critical: "Critică", inc_reasoning: "Motivare", inc_consequences: "Consecințe probabile", inc_assess: "Salvează evaluarea",
+  inc_authority: "Autoritatea de supraveghere (Art. 33)", inc_decide_notify: "Decide: se notifică", inc_decide_not_notify: "Decide: nu se notifică", inc_reasons: "Motive",
+  inc_approve: "Aprobă decizia", inc_dpo: "DPO / punct de contact", inc_prepare: "Pregătește proiectul", inc_draft: "Proiect (nu se trimite niciodată automat)",
+  inc_record_sub: "Înregistrează depunerea făcută de responsabil", inc_submitted_at: "Depus la (ISO, UTC)", inc_auth_ref: "Referința autorității", inc_late_reason: "Motivele întârzierii",
+  inc_subjects: "Persoane afectate (Art. 34)", inc_subjects_required: "Comunicare necesară", inc_subjects_not_required: "Nu e necesară", inc_advice: "Sfaturi pentru persoane", inc_exemption: "Excepție Art. 34(3) (dacă nu e necesară)",
+  inc_record_comm: "Înregistrează comunicarea", inc_channel: "Canal", inc_recipients: "Destinatari", inc_close: "Închide incidentul", inc_lessons: "Lecții învățate",
+  inc_measure: "Adaugă o măsură luată", inc_add: "Adaugă", inc_audit: "Istoric de audit", inc_chain_ok: "Lanț de audit intact", inc_chain_broken: "Lanț de audit ÎNTRERUPT",
+  inc_no_autosend: "Sistemul nu trimite nimic către autorități sau utilizatori: pregătește și înregistrează.", inc_status: "Stare",
+  mer_title: "Comercianți", mer_empty: "Niciun comerciant.", mer_filter: "Starea verificării", mer_all: "Toate", mer_review: "Verifică", mer_verify: "Marchează verificat", mer_reject: "Respinge",
+  mer_in_review: "Înapoi în verificare", mer_note: "Notă (obligatorie la respingere)", mer_reclassify: "Reclasifică drept comerciant", mer_reason: "Motiv", mer_signals: "Semnale (12 luni)",
+  mer_sales: "Vânzări", mer_revenue: "Venit (Astrans)", mer_suggested: "Verificare recomandată", mer_history: "Istoric", mer_policy: "Politică",
+  err_generic: "Ceva nu a mers. Încearcă din nou.", err_forbidden: "Neautorizat.", err_reauth_failed: "Identitatea nu a putut fi confirmată.", err_reauth_required: "Confirmă-ți identitatea ca să continui.",
+  err_invalid_email: "Adresă de e-mail invalidă.", err_same_email: "Aceasta este deja adresa ta.", err_too_many_requests: "Prea multe încercări. Așteaptă puțin și încearcă din nou.",
+  err_email_not_configured: "Serviciul de e-mail nu este disponibil.", err_email_send_failed: "Nu am putut trimite e-mailul.", err_invalid_token: "Linkul este invalid sau a expirat.",
+  err_email_unavailable: "Această adresă de e-mail nu poate fi folosită.", err_correction_limit_reached: "Limita de corectări a fost atinsă. Contactează suportul.",
+  err_correction_cooldown: "Așteaptă înainte de o nouă corectare.", err_request_already_open: "O corectare așteaptă deja verificarea.",
+  err_no_change: "Data este identică cu cea actuală.", err_reason_required: "Descrie motivul.", err_invalid_reason: "Motiv invalid.",
+  err_date_of_birth_not_set: "Setează mai întâi data nașterii.", err_request_stale: "Datele tale s-au schimbat între timp. Reîncarcă și încearcă din nou.", err_manual_review_required: "Contactează suportul pentru verificare manuală.",
+  err_seller_status_required: "Declară mai întâi statutul de vânzător.", err_trader_details_required: "Completează mai întâi datele comerciantului.", err_trader_verification_required: "Datele de comerciant nu sunt încă verificate.",
+  err_seller_not_compliant: "Acest vânzător trebuie să completeze informațiile cerute înainte ca obiectul să poată fi vândut.", err_likely_trader: "Răspunsurile tale arată că acționezi ca și comerciant. Declară statutul de comerciant.",
+  err_reclassified_as_trader: "Contul tău a fost reclasificat drept comerciant. Completează datele comerciantului.", err_statement_required: "Trebuie să confirmi declarația de conformitate cu dreptul UE.",
+  err_age_verification_required: "Vânzarea cere un cont de adult verificat.", err_missing_field: "Lipsește un câmp obligatoriu.", err_invalid_field: "Un câmp nu este valid.",
+  err_assessment_required: "Evaluează mai întâi incidentul.", err_notification_required: "Art. 33: notificarea e obligatorie dacă încălcarea nu este improbabil să genereze un risc.",
+  err_approval_required: "Decizia trebuie aprobată mai întâi.", err_approver_role_required: "Doar un admin sau un responsabil juridic poate face asta.", err_separate_approver_required: "Trebuie să aprobe o altă persoană.",
+  err_draft_required: "Pregătește mai întâi proiectul.", err_communication_required: "Risc ridicat: comunicarea e obligatorie, cu excepția cazului în care se aplică o excepție Art. 34(3).",
+  err_data_subject_decision_pending: "Înregistrează mai întâi decizia Art. 34.", err_communication_pending: "Înregistrează mai întâi comunicarea.", err_notification_pending: "Înregistrează mai întâi depunerea.",
+  err_decision_pending: "Decizia privind notificarea trebuie înregistrată și aprobată.", err_version_conflict: "Altcineva a modificat între timp. Reîncarcă și încearcă din nou.", err_incident_closed: "Incidentele închise nu mai pot fi modificate.",
+  err_severity_too_low: "Incidentele cu date de minori trebuie să fie cel puțin Ridicate.", err_risk_too_low: "Datele din categorii speciale nu pot fi „improbabile” fără revizuire.",
+  err_manual_recovery_required: "Adresa anterioară nu mai este disponibilă. Contactează suportul pentru recuperarea contului.",
+  err_too_short: "Textul este prea scurt.", err_invalid_datetime: "Dată/oră invalidă (folosește ISO 8601, ex. 2026-11-27T10:00:00Z).", err_self_review_forbidden: "Nu îți poți verifica propriile date.",
+};
+
+export type CsKey = K;
+export function cs(lang: string, key: CsKey, vars?: Record<string, string | number>): string {
+  const dict: S = lang === "ro" ? RO : EN;
+  let out = dict[key] ?? EN[key] ?? String(key);
+  if (vars) for (const [k, v] of Object.entries(vars)) out = out.split(`{${k}}`).join(String(v));
+  return out;
+}
+export function csErr(lang: string, e: any): string {
+  const code = e?.code as string | undefined;
+  const key = code ? (`err_${code}` as CsKey) : undefined;
+  if (key && key in EN) return cs(lang, key);
+  if (e?.status === 429) return cs(lang, "err_too_many_requests");
+  return cs(lang, "err_generic");
+}
+export const CS_EN_KEYS = Object.keys(EN);
+export const CS_RO_KEYS = Object.keys(RO);

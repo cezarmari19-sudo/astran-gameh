@@ -94,3 +94,26 @@ Rulare (din `backend/`): `python3 -m unittest astran_sandbox.test_age_system ast
 - Testele HTTP (`test_age_http.py`) și serverul FastAPI complet nu au putut rula în acest mediu (fără `fastapi`/`motor`/`httpx`, fără rețea): `server.py` și rutele au fost compilate (`py_compile`) și verificate static (teste de wiring), nu exercitate prin HTTP.
 - Suitele `test_real_jail`, `test_sandbox_security`, `test_scene_models` eșuează și pe arhiva originală (mediu: lipsă bwrap/dependențe) – nelegate de această modificare.
 - Preexistent: `legal/manifest.json` referă `privacy_policy/1.0.*.txt` care lipsesc, iar hash-urile `terms_of_service` nu se potrivesc → serverul real refuză pornirea (fail-closed) până la rezolvare.
+
+## 7. Serviciul central de entitlement-uri (`age_entitlement_service.py`)
+
+Decizia per funcție se ia într-un singur loc, pe server, peste `age_policy.evaluate_access` (vârstă declarată ≠ dovadă; atestare sigilată; stare parentală). Poarta `get_current_user` apelează `ENT.check_request(user, path, method)` la **fiecare** cerere autentificată; regula veche „cont limitat ⇒ funcții care cer consimțământ" rămâne ca plasă de siguranță pentru căi nemapate. Chat-ul din joc și `/ws/dm` reevaluă `F_DM` (la conectare și la fiecare mesaj). Transferul Wallet apelează `ENT.transfer_allowed` înainte de orice mișcare de sold.
+
+**Scopuri parentale separate** (`social`, `messaging`, `groups`, `purchases`, `publish`): date/retrase de părintele legat și verificat prin `POST /api/parental/children/{id}/scopes`; se păstrează data, scopul și versiunile politicii (`consents.scopes`, oglindit în `users.parental.scopes`). Sunt valide doar cât acordul curent e `APPROVED` și scopul poartă `consent_id`-ul curent → retragerea acordului le revocă automat (derivat la fiecare cerere, nu depinde de o ștergere).
+
+| Funcție | sub 16 (acord) | 16–17 verificat | 18+ verificat |
+|---|---|---|---|
+| joc potrivit vârstei, blocare, wallet (vizualizare), shop (răsfoire) | da | da | da |
+| friends/căutare · DM/chat · grupuri | scop `social` / `messaging` / `groups` | da | da |
+| shop: cumpărare cu Astrans | scop `purchases` | da | da |
+| bani reali (buy, Stripe, checkout) | scop `purchases` | **blocat implicit** (`ASTRAN_MINOR_REAL_MONEY_REQUIRES_PARENT=1`) | da |
+| transfer între utilizatori | nu | nu | da (destinatar adult verificat, ne-suspendat) |
+| publicare jocuri | scop `publish` | da | da |
+| vânzare în shop / monetizare creator | nu | nu | da |
+| conținut 18+ | nu | nu | da |
+
+Sub 16 fără acord rămâne **blocat total** implicit (`ASTRAN_UNDER16_BLOCK_UNTIL_PARENTAL=1`). Cu flag-ul oprit primește doar jocul potrivit vârstei, nu funcții sociale/comerciale. Decizia de a opri flag-ul e juridică (capacitate de exercițiu, art. 8 GDPR) și nu a fost luată în cod.
+
+`GET /api/age/entitlements` întoarce matricea (permis/motiv/pas următor) + starea UI (`not_verified`, `verification_pending`, `verified`, `verification_failed`, `parental_consent_required|pending|revoked`, `restricted`); ecranul `frontend/app/age-status.tsx` o afișează fără să calculeze nimic local.
+
+Teste: `python3 -m unittest astran_sandbox.test_age_entitlements` (34 teste).

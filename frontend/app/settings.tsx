@@ -6,9 +6,13 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAuth } from "@/src/context/AuthContext";
 import { useI18n } from "@/src/i18n";
 import { as } from "@/src/i18n/ageStrings";
+import { ass } from "@/src/i18n/ageStatusStrings";
 import { api } from "@/src/api/client";
 import { EmailVerifyCard } from "@/src/components/EmailVerifyCard";
 import PrivacyDataSection from "@/src/components/PrivacyDataSection";
+import PersonalDataSection from "@/src/components/PersonalDataSection";
+import RecommendationControls from "@/src/components/RecommendationControls";
+import { cs } from "@/src/i18n/complianceStrings";
 import LegalDocModal from "@/src/components/LegalDocModal";
 import ConsumerDocModal from "@/src/components/ConsumerDocModal";
 import { cr } from "@/src/i18n/consumerStrings";
@@ -55,6 +59,9 @@ export default function SettingsScreen() {
 
         <Text style={styles.section}>{as(lang, "av_title").toUpperCase()}</Text>
         <Text style={{ color: colors.onSurface2, fontSize: 14 }} testID="settings-age-status">{ageLabel}</Text>
+        <Pressable testID="settings-age-status-page" onPress={() => router.push("/age-status")} style={[styles.ageBtn, { marginTop: 8 }]}>
+          <Text style={styles.ageBtnText}>{ass(lang, "title")}</Text>
+        </Pressable>
         <Pressable testID="settings-age-verify" onPress={() => router.push("/(onboarding)/age-verify")} style={[styles.ageBtn, { marginTop: 8 }]}>
           <Text style={styles.ageBtnText}>{as(lang, "av_title")}</Text>
         </Pressable>
@@ -100,6 +107,15 @@ export default function SettingsScreen() {
         </Pressable>
         {refundPolicy ? <ConsumerDocModal visible onClose={() => setRefundPolicy(false)} /> : null}
         {terms ? <LegalDocModal visible docType="terms_of_service" lang={lang} onClose={() => setTerms(false)} /> : null}
+
+        <Text style={styles.section}>{cs(lang, "pd_title").toUpperCase()}</Text>
+        <PersonalDataSection />
+        <RecommendationControls onOpenTerms={() => setTerms(true)} />
+        <Pressable onPress={() => router.push("/seller")} style={[styles.row, { marginTop: 8 }]} testID="settings-seller">
+          <MaterialCommunityIcons name="storefront-outline" size={20} color={colors.brand} />
+          <Text style={styles.rowText}>{cs(lang, "sl_open")}</Text>
+          <MaterialCommunityIcons name="chevron-right" size={20} color={colors.onSurface3} />
+        </Pressable>
 
         <PrivacyDataSection />
       </ScrollView>

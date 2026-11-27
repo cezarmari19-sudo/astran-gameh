@@ -1,0 +1,144 @@
+ASTRAN GAME — TERMS OF SERVICE
+
+Version: 1.2
+Effective date: [DATE — REPLACE WHEN AVAILABLE]
+Operator: [LEGAL NAME OF THE COMPANY — REPLACE WHEN AVAILABLE]
+
+*** DRAFT — NOT LEGALLY REVIEWED ***
+This text is a working draft prepared by the development team. It has not been reviewed by a lawyer, and nothing in it
+should be read as a statement that the platform complies with any law. Items in [BRACKETS] must be completed or confirmed
+by the company before publication. Do not present this document as final until it has been reviewed.
+
+1. SUBJECT OF THIS AGREEMENT
+
+Astran Game ("Astran", "we" or the "platform") is a platform for creating, publishing and playing games and other
+user-generated content. By creating an account and using the platform, the user enters into a contract with Astran for the
+provision of the platform's services, under the terms below.
+
+2. THE ACCOUNT
+
+The user provides accurate information when creating the account, keeps the password safe and is responsible for activity
+carried out through the account.
+
+3. CONTENT AND CONDUCT
+
+3.1 The user is responsible for the content they publish (games, scripts, models, names, descriptions, chat messages, direct
+messages and anything else they upload or send).
+3.2 The following is not allowed on the platform: (a) content that is illegal under the law that applies to it; (b) sexual
+content involving minors, or any content that sexualises or endangers children; (c) harassment, threats, bullying or
+incitement to violence; (d) hate speech or discrimination; (e) scams, fraud, phishing or impersonation; (f) content that
+infringes someone else's intellectual property; (g) malicious code or attempts to attack the platform or other users;
+(h) content that is not suitable for the age category it is published under; (i) spam. [LIST OF RULES — TO BE COMPLETED AND
+CONFIRMED BY THE COMPANY]
+3.3 Each of the points of section 3.2 is a "rule of the platform" for the purposes of sections 5 to 9.
+
+4. VIRTUAL CURRENCY AND PAYMENTS
+
+[TERMS ON ASTRANS, PURCHASES AND REFUNDS — TO BE WRITTEN]
+
+5. HOW WE MODERATE CONTENT
+
+5.1 We may review content and accounts after a report, after a notice, or on our own initiative.
+5.2 Decisions are taken by people on the moderation team. [OPERATIONAL PROCEDURES, TRAINING AND RESPONSE TIMES — TO BE
+DEFINED BY THE COMPANY]
+5.3 Automated tools: the platform uses an automated word filter in chat that masks or blocks certain words according to the
+age category of the recipient. The filter does not decide on accounts. We do not take decisions to suspend or close an account
+or to remove a game solely through automated means. [CONFIRM WITH THE COMPANY IF OTHER AUTOMATED TOOLS ARE USED]
+5.4 Possible measures: a warning; removing or hiding content; restricting access to specific content; a temporary
+restriction of chat or of the account; permanent suspension of the account. We choose the measure according to the rule
+that was broken, the seriousness and the circumstances. [CRITERIA FOR PROPORTIONALITY — TO BE CONFIRMED]
+
+6. HOW TO REPORT CONTENT
+
+6.1 Reports of breaches of the rules of the platform: use the "Report" option available on games, profiles and messages.
+6.2 Notices of allegedly illegal content: use the notice form in the app. It asks for an explanation of why the content is
+allegedly illegal, the location of the content, the name and email of the person submitting it (except where the law does not
+require it) and a declaration of good faith. A notice that is not precise or substantiated enough may not allow us to
+assess the content; we record the reason.
+6.3 We confirm electronically that we received a notice, and we tell the person submitting it what we decided and how to
+challenge the decision.
+6.4 Deliberately false or abusive reports may lead to measures against the reporting account. [CONFIRM WITH THE COMPANY]
+
+7. STATEMENT OF REASONS
+
+When we remove or restrict content, or suspend or close an account, the affected user receives a statement of reasons in
+the app (Settings › Moderation decisions) that explains: the decision, the content concerned, the facts, whether it is based
+on illegality or on these terms and which provision, whether automated means were used, and how to challenge the decision.
+[WHETHER AND HOW STATEMENTS ARE ALSO SENT BY EMAIL — TO BE DEFINED]
+
+8. COMPLAINTS (APPEALS)
+
+8.1 The user (and a person whose notice was rejected) can submit a complaint against a moderation decision within six
+months of the decision, from the same screen. The complaint must explain why the person disagrees and may include
+additional evidence.
+8.2 Complaints are reviewed by a member of the moderation team other than the person who took the original decision. The
+result and its reasoning are shown in the app. The decision may be maintained or reversed.
+8.3 In addition to the internal complaint, the person may have the right to turn to an out-of-court dispute settlement body
+and to the courts. [OUT-OF-COURT BODIES, IF ANY — TO BE LISTED BY THE COMPANY]
+
+9. SUSPENSION AND ACCOUNT CLOSURE
+
+9.1 The user can delete the account at any time from Settings.
+9.2 Astran may temporarily restrict or permanently suspend an account that breaches these terms. [CONDITIONS, WARNINGS BEFORE
+SUSPENSION, DEADLINES AND TREATMENT OF PURCHASED ITEMS — TO BE DEFINED BY THE COMPANY AND CHECKED BY A LAWYER]
+9.3 A suspended user can still see their moderation decisions, submit complaints and exercise their data rights.
+
+10. HOW GAMES ARE ORDERED AND RECOMMENDED (RECOMMENDER SYSTEM)
+
+10.1 The "Discover" screen shows lists of public games. The user chooses the list: "For you", "Trending", "Popular" or "New". The
+list chosen decides the order in which games are shown.
+10.2 Main parameters, in the order in which they are applied:
+(a) Number of plays (parameter "total_plays"): how many times players started the game. Counted once per player per cooldown
+window, so repeated re-entries do not inflate it. It is the first criterion in "For you" and "Trending" and the second in "Popular".
+(b) Number of likes (parameter "likes"): the second criterion in "For you" and "Trending" and the first in "Popular".
+(c) Publication date (parameter "created_at"): the only criterion in "New" (newest first).
+(d) Age category of the game and of the account (parameter "age_category"): this is a safety filter, not a ranking criterion. An
+account without a verified 18+ age assurance is shown only games marked as suitable for all ages.
+(e) Recent play categories (parameter "recent_play_categories"): used ONLY in "For you" and ONLY if the user turns on
+personalization (see 10.4). It is off by default.
+10.3 By default the order is the same for every user with the same age access: it is based on how popular a game is, not on a
+profile of the user. We do not use data from other websites or apps, we do not infer personal characteristics, and we do not
+use payments or messages to rank games. [THE "RELATIVE IMPORTANCE" IS THE ORDER IN 10.2: THERE ARE NO NUMERIC WEIGHTS]
+10.4 Personalization (optional, off by default). If the user turns on "Personalized recommendations" in Settings, then in "For
+you" the games in the categories of the user's last played games (up to the 3 most frequent categories among the last 50 games
+in "Recently played") are shown before the other games; inside each group, the order stays the one described in 10.2(a)-(b).
+The user can turn this off at any time in Settings, and can clear "Recently played" history, which removes the signal. Turning
+personalization off, or choosing another list ("Trending", "Popular" or "New"), returns to the order that does not use the user's
+play history.
+10.5 If we change these parameters, we update this section and bring the change to the user's attention as described in section 13.
+
+11. SELLERS IN THE SHOP
+
+11.1 Users who offer items in the Shop or the Clothes Shop for a price must first declare whether they act as a trader (that is,
+for purposes related to a trade, business, craft or profession) or not. Astran does not assume that every creator is a trader; it
+checks the declaration as described below and may ask the seller to complete or correct it.
+11.2 For every seller the product page and the checkout show the seller's declared status. If the seller declares that they are
+not a trader, we show this and that EU consumer protection law does not apply to the contract with that seller. [LEGAL WORDING
+AND THE CONTRACTUAL ROLE OF ASTRAN IN SHOP PURCHASES — TO BE CONFIRMED BY THE COMPANY]
+11.3 If the seller is a trader, the seller must provide their name, address, phone number, e-mail, registration data (where
+applicable) and a statement that they will offer only products that comply with EU law. These details are shown on the product
+page and before the purchase. Personal data of sellers who are not traders is not shown. Each trader is marked as unverified, in
+review or verified, and a trader without the required details, or whose details were rejected, cannot sell.
+11.4 No copy of an identity document is requested or stored for this check. [VERIFICATION METHOD AND ANY ID CHECK — TO BE DEFINED]
+
+12. PERSONAL DATA
+
+How personal data is processed is described in the Privacy Policy, which is a separate document. Accepting these terms is not
+consent to processing that requires separate consent (for example marketing communications); such consent is requested
+separately and may be refused or withdrawn without affecting the account. Moderation records are kept as described in the
+Privacy Policy. [RETENTION PERIODS — TO BE DEFINED]
+The user can correct personal data from Settings › Personal data: a new e-mail address takes effect only after the user confirms it from
+that address, and a date of birth correction is subject to identity confirmation, limits on repeated changes and, for access to
+18+ features, age verification. [RETENTION AND LEGAL REVIEW — TO BE CONFIRMED]
+
+
+13. CHANGES TO THE TERMS
+
+We may publish new versions of these terms. For changes that alter the user's rights or obligations we will ask for a new
+acceptance; other changes will be brought to the user's attention. The version each user accepted is recorded.
+
+14. CONTACT
+
+Contact details are available in the app (Settings › Contact). [LEGAL ENTITY, ADDRESS AND EMAIL — REPLACE WHEN AVAILABLE]
+
+END OF TERMS OF SERVICE

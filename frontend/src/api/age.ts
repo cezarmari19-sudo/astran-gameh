@@ -26,10 +26,22 @@ export type AgeState = {
   age_assurance_available: boolean; parental_verification_available: boolean; email_delivery_available: boolean;
 };
 
+export type FeatureKey = "play" | "friends" | "block" | "dm" | "groups" | "wallet_view" | "shop_browse" | "shop_purchase"
+  | "real_money_purchase" | "transfer" | "game_publish" | "creator_monetization" | "adult_content";
+export type UiStatus = "not_verified" | "verification_pending" | "verified" | "verification_failed" | "parental_consent_required"
+  | "parental_consent_pending" | "parental_consent_revoked" | "restricted";
+export type FeatureDecision = { allowed: boolean; reason: string; next_action: string | null; scope: string | null };
+// Oglindeste GET /api/age/entitlements: matricea calculata de SERVER (age_entitlement_service). Doar afisare; serverul o reaplica la fiecare cerere.
+export type Entitlements = {
+  ui_status: UiStatus; valid_scopes: string[]; features: Record<FeatureKey, FeatureDecision>;
+  declared_age_band: AgeState["age_band"]; age_assurance_available: boolean; parental_verification_available: boolean;
+};
+
 const post = (path: string, body: unknown) => api(path, { method: "POST", body: JSON.stringify(body) });
 
 export const ageApi = {
   me: () => api<AgeState>("/age/me"),
+  entitlements: () => api<Entitlements>("/age/entitlements"),
   setDateOfBirth: (date_of_birth: string) => post("/age/date-of-birth", { date_of_birth }),
   requestParent: (parent_email: string, language: string) => post("/age/parental/request", { parent_email, language }),
   ownConsent: (language: string) => post("/age/own-consent", { language }),
@@ -47,6 +59,7 @@ export const parentalApi = {
   claim: (claim_token: string) => post("/parental/claim", { claim_token }),
   panelDecision: (id: string, decision: "approve" | "reject", acknowledgements: Acks) => post(`/parental/children/${encodeURIComponent(id)}/decision`, { decision, acknowledgements }),
   restartVerification: (id: string) => post(`/parental/children/${encodeURIComponent(id)}/verification/restart`, {}),
+  setScope: (id: string, scope: string, granted: boolean) => post(`/parental/children/${encodeURIComponent(id)}/scopes`, { scope, granted }),
   withdraw: (id: string) => post(`/parental/children/${encodeURIComponent(id)}/withdraw`, {}),
   dataRequest: (id: string, kind: "access" | "erasure", confirm = false) => post(`/parental/children/${encodeURIComponent(id)}/data-request`, { kind, confirm }),
 };

@@ -1,7 +1,7 @@
-// GENERAT din backend/legal/privacy_policy/1.1.en.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
+// GENERAT din backend/legal/privacy_policy/1.2.en.txt de backend/legal/sync_frontend_policy.py - NU edita manual.
 export const PRIVACY_POLICY_EN = `ASTRAN GAME — PRIVACY POLICY
 
-Version: 1.1
+Version: 1.2
 Status: DRAFT — NEEDS COMPLETION (see the markers [TO BE COMPLETED] below; this document must not be presented as final while any marker remains)
 Effective date: [TO BE COMPLETED: effective date]
 Controller: [TO BE COMPLETED: legal name, registration number and registered address of the operator]
@@ -22,16 +22,22 @@ Data: e-mail address, username, display name, password (stored only as a salted 
 Purpose: create and secure your account, authenticate you, deliver the service.
 Legal basis: performance of the contract (Art. 6(1)(b)); security of the service (Art. 6(1)(f)).
 
+E-mail change (since 1.2): when you change your e-mail address we keep the pending request (new address, hashes of the confirmation and cancellation links, dates) until it is completed or expires, and an audit record that contains only masked addresses. A confirmation link is sent to the new address and a notice to the old one. The address changes only after you confirm it. Legal basis: contract (Art. 6(1)(b)); security (Art. 6(1)(f)); correction of inaccurate data (Art. 16). [TO BE COMPLETED: retention period]
+
 2.2. Age and parental consent
 Data: date of birth (stored encrypted), age band/category, whether age assurance was completed; for users under 16, the e-mail address of the parent or guardian (stored encrypted), the parental decision, its date and technical records of the verification steps; single-use links sent to the parent are stored only as keyed hashes and expire. Records of age and parental-consent events are kept in a tamper-evident audit log using pseudonymised identifiers (no date of birth, e-mail or IP address).
 Purpose: apply age-appropriate protections, obtain and prove parental consent where required.
 Legal basis: legal obligation and protection of minors (Art. 6(1)(c)/(f)); consent of the holder of parental responsibility (Art. 8 GDPR).
 Optional providers: where an external provider is configured for 18+ age assurance or parental verification, you are redirected to it and we receive only a signed result. [TO BE COMPLETED: name of the provider(s) actually used, or confirmation that none is used]
 
+Date-of-birth correction (since 1.2): if you correct your date of birth we keep the old and the new date (encrypted), the time, the reason you gave, how you confirmed your identity (password or e-mail code) and the outcome. We do not ask for or store copies of identity documents for this; where age verification is needed, an external provider returns only a result. Repeated corrections are limited to prevent circumvention of age rules. Legal basis: protection of minors and legal obligations (Art. 6(1)(c)); legitimate interest in preventing abuse (Art. 6(1)(f)); correction of inaccurate data (Art. 16). [TO BE COMPLETED: retention period]
+
 2.3. Games, avatar and creations
 Data: games, scripts, assets, 3D models, avatar and clothing configuration, items you publish or buy, recently played games, collaborator/tester roles, and presence in a game session (expires automatically after about 60 seconds of inactivity). Movement and in-game events are relayed in real time to other players in the same session.
 Purpose: operate multiplayer games, Studio and the shop.
 Legal basis: contract (Art. 6(1)(b)).
+
+Recommendations (since 1.2): by default the order of games in Discover is based on popularity (plays, likes) and publication date, not on a profile of you. If you turn on "Personalized recommendations" in Settings (off by default), the categories of your last 50 played games are used to order the "For you" list; no separate profile is created. Legal basis: consent (Art. 6(1)(a)), which you can withdraw at any time in Settings; you can also clear your "Recently played" history.
 
 2.4. Chat and messages
 - In-game chat is relayed to players of the same session and kept only in a short in-memory buffer; it is stored only if it is reported.
@@ -55,10 +61,14 @@ Data: Astrans transactions (ledger), purchases of shop/clothing items, purchases
 Purpose: process payments, prevent fraud, accounting, refunds, consumer rights.
 Legal basis: contract (Art. 6(1)(b)); legal obligations such as accounting (Art. 6(1)(c)); fraud prevention (Art. 6(1)(f)).
 
+Sellers (since 1.2): if you sell items for a price, we keep your seller-status declaration and your answers to a short questionnaire. If you declare that you act as a trader, we also keep your name, address, phone number, contact e-mail, registration data, optional VAT number, the EU-compliance statement, the verification status and reviewer notes. For traders, the name, address, phone number, e-mail and registration data are shown to buyers on the product page and before purchase. For sellers who are not traders, only that status is shown. We do not store copies of identity documents for this. Legal basis: legal obligation (Digital Services Act, Art. 6(1)(c)); contract (Art. 6(1)(b)). [TO BE COMPLETED: retention period]
+
 2.8. Security, logs and abuse prevention
 Data: IP address in security-event records (for example password reset, project deletion or recovery) and for rate limiting; failed-attempt counters; revoked-token records; server logs with technical request data (access tokens are masked).
 Purpose: protect accounts, detect abuse and fraud.
 Legal basis: legitimate interest (Art. 6(1)(f)).
+
+Security incident records (since 1.2): we keep records of security incidents and personal data breaches (type, categories of data concerned, estimated number of people, measures taken, decisions on notifying the authority and the people concerned, audit trail). They contain counts and categories, not lists of people, and are accessible only to authorised staff. Legal basis: legal obligation (GDPR Art. 33-34, Art. 6(1)(c)); legitimate interest in security (Art. 6(1)(f)). [TO BE COMPLETED: retention period]
 
 2.9. Consent records and optional marketing consent
 We store proof of which version of the Terms and of this Policy you accepted or read (version, date, fingerprint of the text; no IP address or device data). Users aged 16 or over may give optional consent to marketing e-mails; it is not needed to use Astran and can be withdrawn in Settings at any time. Legal basis: legal obligation / legitimate interest in proving compliance (Art. 6(1)(c)/(f)); consent for marketing (Art. 6(1)(a)).

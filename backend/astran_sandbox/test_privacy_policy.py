@@ -120,7 +120,8 @@ class PlaceholdersAndPublication(unittest.TestCase):
         shutil.copytree(LEGAL / "privacy_policy", d / "privacy_policy")
         man = json.loads((LEGAL / "manifest.json").read_text(encoding="utf-8"))
         del man["documents"]["terms_of_service"]          # ToS 1.0 are un hash neconcordant (preexistent, vezi raport)
-        v = man["documents"]["privacy_policy"]["versions"][0]
+        pp = man["documents"]["privacy_policy"]
+        v = next(x for x in pp["versions"] if x["version"] == pp["current"])      # versiunea CURENTA (nu neaparat prima)
         v["status"], v["effective_date"] = status, effective
         if text_suffix:
             for l in ("ro", "en"):
@@ -131,7 +132,7 @@ class PlaceholdersAndPublication(unittest.TestCase):
         return LD.LegalRegistry(d)
 
     def test_real_policy_is_blocked_from_publication_until_completed(self):
-        reg = self._registry(MAN["versions"][0].get("status"), None)
+        reg = self._registry(next(x for x in MAN["versions"] if x["version"] == MAN["current"]).get("status"), None)
         self.assertTrue(reg.is_draft("privacy_policy"))
         if LD.PLACEHOLDER_RE.search(_text("en")):
             self.assertTrue(reg.publication_blockers())

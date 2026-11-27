@@ -1,0 +1,150 @@
+ASTRAN GAME — TERMENI ȘI CONDIȚII
+
+Versiunea: 1.2
+Data intrării în vigoare: [DATA — DE COMPLETAT]
+Operator: [DENUMIREA LEGALĂ A COMPANIEI — DE COMPLETAT]
+
+*** CIORNĂ — NEVERIFICATĂ JURIDIC ***
+Acest text este o ciornă de lucru pregătită de echipa de dezvoltare. Nu a fost verificat de un avocat și nimic din el nu
+trebuie înțeles ca o afirmație că platforma respectă o lege. Elementele din [PARANTEZE] trebuie completate sau confirmate de
+companie înainte de publicare. Documentul nu trebuie prezentat ca final până nu este verificat.
+
+1. OBIECTUL ACORDULUI
+
+Astran Game („Astran”, „noi” sau „platforma”) este o platformă pentru crearea, publicarea și jucarea de jocuri și alt conținut
+generat de utilizatori. Prin crearea unui cont și folosirea platformei, utilizatorul încheie cu Astran un contract pentru
+furnizarea serviciilor platformei, în condițiile de mai jos.
+
+2. CONTUL
+
+Utilizatorul furnizează informații corecte la crearea contului, își păstrează parola în siguranță și răspunde pentru
+activitatea desfășurată prin cont.
+
+3. CONȚINUT ȘI CONDUITĂ
+
+3.1 Utilizatorul răspunde pentru conținutul pe care îl publică (jocuri, scripturi, modele, nume, descrieri, mesaje de chat,
+mesaje directe și orice altceva încarcă sau trimite).
+3.2 Pe platformă nu sunt permise: (a) conținutul ilegal potrivit legii aplicabile; (b) conținutul sexual care implică minori
+sau care sexualizează ori pune în pericol copiii; (c) hărțuirea, amenințările, bullying-ul sau incitarea la violență;
+(d) discursul de ură sau discriminarea; (e) înșelăciunile, frauda, phishing-ul sau uzurparea identității; (f) conținutul care
+încalcă proprietatea intelectuală a altcuiva; (g) codul rău intenționat sau încercările de a ataca platforma ori alți
+utilizatori; (h) conținutul nepotrivit pentru categoria de vârstă sub care este publicat; (i) spamul. [LISTA DE REGULI — DE
+COMPLETAT ȘI CONFIRMAT DE COMPANIE]
+3.3 Fiecare punct din secțiunea 3.2 este o „regulă a platformei” în sensul secțiunilor 5–9.
+
+4. MONEDA VIRTUALĂ ȘI PLĂȚI
+
+[TERMENI PRIVIND ASTRANS, ACHIZIȚII ȘI RAMBURSĂRI — DE REDACTAT]
+
+5. CUM MODERĂM CONȚINUTUL
+
+5.1 Putem verifica conținutul și conturile în urma unui raport, a unei notificări sau din proprie inițiativă.
+5.2 Deciziile sunt luate de persoane din echipa de moderare. [PROCEDURI OPERAȚIONALE, INSTRUIRE ȘI TERMENE DE RĂSPUNS — DE
+DEFINIT DE COMPANIE]
+5.3 Instrumente automate: platforma folosește un filtru automat de cuvinte în chat, care maschează sau blochează anumite
+cuvinte în funcție de categoria de vârstă a destinatarului. Filtrul nu decide asupra conturilor. Nu luăm decizii de suspendare
+sau închidere a unui cont ori de eliminare a unui joc exclusiv prin mijloace automate. [CONFIRMAȚI CU COMPANIA DACĂ SE FOLOSESC ȘI
+ALTE INSTRUMENTE AUTOMATE]
+5.4 Măsuri posibile: avertisment; eliminarea sau ascunderea conținutului; restricționarea accesului la un conținut anume;
+restricționarea temporară a chatului sau a contului; suspendarea permanentă a contului. Alegem măsura în funcție de regula
+încălcată, gravitate și circumstanțe. [CRITERII DE PROPORȚIONALITATE — DE CONFIRMAT]
+
+6. CUM RAPORTEZI CONȚINUT
+
+6.1 Raportări privind încălcarea regulilor platformei: folosește opțiunea „Raportează” disponibilă pe jocuri, profiluri și
+mesaje.
+6.2 Notificări privind conținut presupus ilegal: folosește formularul de notificare din aplicație. El cere o explicație a
+motivului pentru care conținutul este presupus ilegal, locația conținutului, numele și emailul persoanei care notifică (cu
+excepția cazurilor în care legea nu le cere) și o declarație de bună-credință. O notificare insuficient de precisă sau
+fundamentată poate să nu ne permită evaluarea conținutului; consemnăm motivul.
+6.3 Confirmăm electronic primirea unei notificări și comunicăm persoanei care a notificat ce am decis și cum poate contesta
+decizia.
+6.4 Raportările false sau abuzive în mod deliberat pot duce la măsuri împotriva contului care raportează. [DE CONFIRMAT CU
+COMPANIA]
+
+7. EXPUNEREA DE MOTIVE
+
+Când eliminăm sau restricționăm conținut ori suspendăm sau închidem un cont, utilizatorul afectat primește în aplicație o
+expunere de motive (Setări › Decizii de moderare) care explică: decizia, conținutul vizat, faptele, dacă se bazează pe
+ilegalitate sau pe acești termeni și pe ce prevedere, dacă s-au folosit mijloace automate și cum poate fi contestată decizia.
+[DACĂ ȘI CUM SE TRIMIT EXPUNERILE ȘI PE EMAIL — DE DEFINIT]
+
+8. PLÂNGERI (CONTESTAȚII)
+
+8.1 Utilizatorul (și persoana a cărei notificare a fost respinsă) poate depune o plângere împotriva unei decizii de moderare
+în termen de șase luni de la decizie, din același ecran. Plângerea explică de ce persoana nu este de acord și poate include
+dovezi suplimentare.
+8.2 Plângerile sunt analizate de un membru al echipei de moderare diferit de cel care a luat decizia inițială. Rezultatul și
+motivarea sunt afișate în aplicație. Decizia poate fi menținută sau anulată.
+8.3 Pe lângă plângerea internă, persoana poate avea dreptul de a se adresa unui organism de soluționare extrajudiciară a
+litigiilor și instanțelor. [ORGANISMELE EXTRAJUDICIARE, DACĂ EXISTĂ — DE LISTAT DE COMPANIE]
+
+9. SUSPENDAREA ȘI ÎNCHIDEREA CONTULUI
+
+9.1 Utilizatorul poate șterge contul oricând din Setări.
+9.2 Astran poate restricționa temporar sau suspenda permanent un cont care încalcă acești termeni. [CONDIȚII, AVERTISMENTE
+ÎNAINTE DE SUSPENDARE, TERMENE ȘI TRATAREA ARTICOLELOR CUMPĂRATE — DE DEFINIT DE COMPANIE ȘI VERIFICAT DE UN AVOCAT]
+9.3 Un utilizator suspendat își poate vedea în continuare deciziile de moderare, poate depune plângeri și își poate exercita
+drepturile asupra datelor.
+
+10. CUM SUNT ORDONATE ȘI RECOMANDATE JOCURILE (SISTEMUL DE RECOMANDARE)
+
+10.1 Ecranul „Descoperă” afișează liste de jocuri publice. Utilizatorul alege lista: „Pentru tine”, „În trend”, „Populare” sau
+„Noi”. Lista aleasă stabilește ordinea în care sunt afișate jocurile.
+10.2 Principalii parametri, în ordinea în care sunt aplicați:
+(a) Numărul de porniri (parametrul „total_plays”): de câte ori jucătorii au pornit jocul. Se numără o dată per jucător pe
+fereastră de pauză, deci reintrările repetate nu îl umflă. Este primul criteriu în „Pentru tine” și „În trend” și al doilea în „Populare”.
+(b) Numărul de aprecieri (parametrul „likes”): al doilea criteriu în „Pentru tine” și „În trend” și primul în „Populare”.
+(c) Data publicării (parametrul „created_at”): singurul criteriu în „Noi” (cele mai noi primele).
+(d) Categoria de vârstă a jocului și a contului (parametrul „age_category”): este un filtru de siguranță, nu un criteriu de
+ordonare. Un cont fără atestare de vârstă 18+ verificată vede doar jocurile marcate ca potrivite pentru toate vârstele.
+(e) Categoriile jocurilor jucate recent (parametrul „recent_play_categories”): folosit DOAR în „Pentru tine” și DOAR dacă
+utilizatorul activează personalizarea (vezi 10.4). Este dezactivat implicit.
+10.3 Implicit, ordinea este aceeași pentru toți utilizatorii cu același acces de vârstă: se bazează pe cât de popular este un joc,
+nu pe un profil al utilizatorului. Nu folosim date de pe alte site-uri sau aplicații, nu deducem caracteristici personale și nu
+folosim plățile sau mesajele pentru ordonarea jocurilor. [„IMPORTANȚA RELATIVĂ” ESTE ORDINEA DIN 10.2: NU EXISTĂ PONDERI NUMERICE]
+10.4 Personalizarea (opțională, dezactivată implicit). Dacă utilizatorul activează „Recomandări personalizate” în Setări, în
+„Pentru tine” jocurile din categoriile ultimelor jocuri jucate de el (cel mult cele 3 categorii cele mai frecvente dintre ultimele
+50 de jocuri din „Jucate recent”) sunt afișate înaintea celorlalte; în fiecare grup rămâne ordinea descrisă la 10.2(a)-(b).
+Utilizatorul poate dezactiva personalizarea oricând în Setări și poate șterge istoricul „Jucate recent”, ceea ce elimină semnalul.
+Dezactivarea personalizării sau alegerea altei liste („În trend”, „Populare” sau „Noi”) readuce ordinea care nu folosește
+istoricul de joc al utilizatorului.
+10.5 Dacă modificăm acești parametri, actualizăm această secțiune și aducem modificarea la cunoștința utilizatorului, conform secțiunii 13.
+
+11. VÂNZĂTORII DIN SHOP
+
+11.1 Utilizatorii care oferă obiecte în Shop sau în Clothes Shop contra unui preț trebuie să declare mai întâi dacă acționează ca
+comerciant (adică în scopuri legate de comerț, afacere, meșteșug sau profesie) sau nu. Astran nu presupune că fiecare creator este
+comerciant; verifică declarația așa cum este descris mai jos și poate cere vânzătorului să o completeze sau să o corecteze.
+11.2 Pentru fiecare vânzător, pagina produsului și checkout-ul afișează statutul declarat. Dacă vânzătorul declară că nu este
+comerciant, afișăm acest lucru și faptul că legislația UE de protecție a consumatorilor nu se aplică contractului cu acel vânzător.
+[FORMULAREA JURIDICĂ ȘI ROLUL CONTRACTUAL AL ASTRAN ÎN ACHIZIȚIILE DIN SHOP — DE CONFIRMAT DE COMPANIE]
+11.3 Dacă vânzătorul este comerciant, trebuie să furnizeze numele, adresa, numărul de telefon, e-mailul, datele de înregistrare
+(după caz) și o declarație că va oferi numai produse conforme cu dreptul UE. Aceste date sunt afișate pe pagina produsului și
+înainte de achiziție. Datele personale ale vânzătorilor care nu sunt comercianți nu sunt afișate. Fiecare comerciant este marcat
+ca neverificat, în verificare sau verificat, iar un comerciant fără datele cerute sau ale cărui date au fost respinse nu poate vinde.
+11.4 Pentru această verificare nu se cere și nu se stochează nicio copie a unui document de identitate. [METODA DE VERIFICARE ȘI
+ORICE CONTROL AL IDENTITĂȚII — DE DEFINIT]
+
+12. DATE PERSONALE
+
+Modul de prelucrare a datelor personale este descris în Politica de Confidențialitate, document separat. Acceptarea acestor
+termeni nu reprezintă consimțământ pentru prelucrări care cer consimțământ separat (de exemplu comunicări de marketing);
+acesta se cere separat și poate fi refuzat sau retras fără a afecta contul. Evidențele de moderare se păstrează conform
+Politicii de Confidențialitate. [TERMENE DE PĂSTRARE — DE DEFINIT]
+
+Utilizatorul își poate corecta datele personale din Setări › Date personale: o adresă de e-mail nouă produce efecte numai după ce
+utilizatorul o confirmă de la acea adresă, iar corectarea datei nașterii este supusă confirmării identității, limitelor pentru
+modificări repetate și, pentru accesul la funcții 18+, verificării vârstei. [PĂSTRARE ȘI REVIZUIRE JURIDICĂ — DE CONFIRMAT]
+
+13. MODIFICAREA TERMENILOR
+
+Putem publica versiuni noi ale acestor termeni. Pentru modificările care schimbă drepturile sau obligațiile utilizatorului
+vom cere o nouă acceptare; celelalte modificări vor fi aduse la cunoștința utilizatorului. Versiunea acceptată de fiecare
+utilizator este înregistrată.
+
+14. CONTACT
+
+Datele de contact sunt disponibile în aplicație (Setări › Contact). [ENTITATE LEGALĂ, ADRESĂ ȘI EMAIL — DE COMPLETAT]
+
+SFÂRȘITUL TERMENILOR ȘI CONDIȚIILOR

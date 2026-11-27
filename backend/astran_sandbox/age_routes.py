@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import age_audit as AU
+from . import age_entitlement_service as ENT
 from . import age_policy as AP
 from . import age_service as AS
 from . import parental_consent as PC
@@ -72,6 +73,11 @@ class ClaimBody(_Strict):
     claim_token: str = Field(max_length=200)
 
 
+class ScopeBody(_Strict):
+    scope: str = Field(max_length=20)
+    granted: bool
+
+
 class DataRequestBody(_Strict):
     kind: str = Field(max_length=10)
     confirm: bool = False
@@ -110,6 +116,14 @@ def make_age_router(get_current_user, db, *, client_ip: Callable[[Request], str]
         return AS.public_state(current, await PC.child_status(db, current)) | {
             "age_assurance_available": prov().configured(), "parental_verification_available": ver().configured(),
             "email_delivery_available": notifier is not None and bool(app_base_url)}
+
+    @router.get("/age/entitlements")
+    async def age_entitlements(current=Depends(get_current_user)):
+        """Matricea de acces calculata de server pentru contul curent: ce functii sunt disponibile / restrictionate si de ce.
+        Doar informativ pentru UI; fiecare cerere reaplica aceleasi reguli pe backend (age_entitlement_service)."""
+        return ENT.entitlements(current) | {
+            "declared_age_band": AP.evaluate_access(current).band,
+            "age_assurance_available": prov().configured(), "parental_verification_available": ver().configured()}
 
     @router.post("/age/date-of-birth")
     async def age_set_dob(body: DobBody, current=Depends(get_current_user)):
@@ -242,6 +256,14 @@ def make_age_router(get_current_user, db, *, client_ip: Callable[[Request], str]
         _wait(_user_limiter, "pcw:" + current["user_id"])
         try:
             return await PC.panel_withdraw(db, current, consent_id, on_withdrawn=on_withdrawn)
+        except Exception as e:  # noqa: BLE001
+            raise _err(e)
+
+    @router.post("/parental/children/{consent_id}/scopes")
+    async def parental_scope(consent_id: str, body: ScopeBody, current=Depends(get_current_user)):
+        _wait(_user_limiter, "pcs:" + current["user_id"])
+        try:
+            return await PC.set_scope(db, current, consent_id, body.scope, body.granted)
         except Exception as e:  # noqa: BLE001
             raise _err(e)
 

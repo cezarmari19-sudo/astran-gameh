@@ -4,7 +4,7 @@ import { api } from "./client";
 export type ProductType = "astran_package" | "shop_item" | "clothes_item";
 export type Checkout = {
   checkout_id: string; status: string; expires_at: string;
-  product: { type: ProductType; id: string; name: string; description: string; price: string; currency: string; unit: string; additional_fees: string; delivery: string; seller?: { username?: string } | null };
+  product: { type: ProductType; id: string; name: string; description: string; price: string; currency: string; unit: string; additional_fees: string; delivery: string; seller?: { username?: string } | null; seller_info?: import("./compliance").SellerInfo | null };
   delivery_note: string; needs_consent: boolean;
   consent_texts: { A: { text: string; sha256: string }; B: { text: string; sha256: string } } | null;
   withdrawal: { days: number; info: string };

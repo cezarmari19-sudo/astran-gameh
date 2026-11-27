@@ -6,6 +6,7 @@ import { ms } from "@/src/i18n/modStrings";
 import { modApi } from "@/src/api/moderation";
 import { useAuth } from "@/src/context/AuthContext";
 import { cr } from "@/src/i18n/consumerStrings";
+import { cs } from "@/src/i18n/complianceStrings";
 import { Badge, Body, Btn, Card, Chips, Input, LoadState, Row, Screen, fmt, label, tone, useLoad } from "@/src/components/modUi";
 
 const CATS = ["", "illegal_content", "child_safety", "harassment", "hate_speech", "violence", "sexual_content", "self_harm", "scam_fraud", "ip_infringement", "spam", "other"];
@@ -41,6 +42,8 @@ export default function AdminDashboard() {
         <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_own")} onPress={() => router.push("/moderation/admin/own-initiative")} testID="admin-own-link" /></View>
         <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_transparency")} onPress={() => router.push("/moderation/admin/transparency")} testID="admin-transparency-link" /></View>
         {orders || user?.is_platform_admin ? <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_orders")} onPress={() => router.push("/moderation/admin/orders")} testID="admin-orders-link" /></View> : null}
+        {user?.is_platform_admin || (user as any)?.is_legal_officer || (user as any)?.is_security_officer ? <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={cs(lang, "inc_title")} onPress={() => router.push("/moderation/admin/incidents")} testID="admin-incidents-link" /></View> : null}
+        {user?.is_platform_admin || (user as any)?.is_legal_officer ? <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={cs(lang, "mer_title")} onPress={() => router.push("/moderation/admin/merchants")} testID="admin-merchants-link" /></View> : null}
         {user?.is_platform_admin ? <View style={{ flex: 1, minWidth: 140 }}><Btn kind="ghost" label={ms(lang, "adm_tdb")} onPress={() => router.push("/moderation/admin/tdb")} testID="admin-tdb-link" /></View> : null}
       </View>
       <Card>

@@ -81,6 +81,8 @@ SETTINGS_SCHEMA: list[tuple[str, Any, Any]] = [
     ("music_volume", 1.0, _float_range(0.0, 1.0)),
     ("sfx_volume", 1.0, _float_range(0.0, 1.0)),
     ("camera_sensitivity", 1.0, _float_range(0.2, 3.0)),
+    # DSA Art. 27: personalizarea recomandarilor din Discover e OPT-IN (implicit oprita) - vezi recommendations.py
+    ("personalized_recommendations", False, _bool()),
     ("shift_lock", True, _bool()),  # avatarul priveste mereu spre camera (ca in Roblox); off = priveste spre directia de mers
 ]
 

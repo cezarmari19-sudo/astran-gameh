@@ -1115,7 +1115,7 @@ async def set_moderator(db, actor: dict, user_id: str, enabled: bool) -> dict:
     return {"user_id": user_id, "is_moderator": bool(enabled)}
 
 
-STAFF_FLAGS = {"legal_officer": "is_legal_officer", "trusted_flagger": "is_trusted_flagger"}
+STAFF_FLAGS = {"legal_officer": "is_legal_officer", "trusted_flagger": "is_trusted_flagger", "security_officer": "is_security_officer"}
 
 
 async def set_flag(db, actor: dict, user_id: str, flag: str, enabled: bool) -> dict:

@@ -195,7 +195,8 @@ def public_checkout(c: dict, lang: Optional[str] = None) -> dict:
         "product": {"type": p["product_type"], "id": p["product_id"], "name": p["name"],
                     "description": p["description_en"] if lg == "en" else p["description"],
                     "price": p["price_display"], "currency": p["currency"], "unit": p["unit"],
-                    "additional_fees": "none", "delivery": p["delivery"], "seller": p.get("seller")},
+                    "additional_fees": "none", "delivery": p["delivery"], "seller": p.get("seller"),
+                    "seller_info": p.get("seller_info")},
         "delivery_note": c["delivery_note"][lg],
         "needs_consent": c["needs_consent"],
         "consent_texts": ({k: {"text": v["text"], "sha256": v["sha256"]} for k, v in c["consent_texts"].items()}
@@ -226,6 +227,14 @@ async def create_checkout(db, user: dict, product_type: str, product_id: str, la
         raise ConsumerError("free_product", 400, "Free products do not need a checkout")
     if product.get("seller") and product["seller"]["user_id"] == user["user_id"]:
         raise ConsumerError("own_product", 400, "You cannot buy your own item")
+    if product.get("seller"):
+        # DSA Art. 30-32 + informarea consumatorilor pe piete online: statutul vanzatorului (comerciant / nu) si, pentru comercianti,
+        # datele lor, afisate INAINTE de finalizarea achizitiei si pastrate in instantaneul comenzii.
+        from . import merchants as _M
+        elig = await _M.sale_eligibility(db, product["seller"]["user_id"])
+        if not elig["allowed"]:
+            raise ConsumerError("seller_not_compliant", 409, "The seller must complete the required seller information before this item can be sold")
+        product["seller_info"] = _M.public_seller_info(await _M.get_profile(db, product["seller"]["user_id"]))
     consent = needs_waiver(product)
     now = _now()
     instant_ro = ("Livrare instantă: Astranii sunt adăugați în portofel imediat după confirmarea plății." if product_type == "astran_package"

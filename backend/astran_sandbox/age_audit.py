@@ -39,6 +39,8 @@ UNAUTHORIZED_ACCESS = "unauthorized_access_attempt"
 AGE_CHANGE_IGNORED = "age_category_change_ignored"
 LEGACY_MIGRATED = "legacy_account_migrated"
 SELF_CONSENT = "self_consent_confirmed"
+PARENTAL_SCOPE_CHANGED = "parental_scope_changed"
+FEATURE_DENIED = "feature_denied"
 
 _ALLOWED_DETAIL_KEYS = {
     "band", "age_years", "source", "method", "provider", "state", "from_state", "to_state", "consent_id",

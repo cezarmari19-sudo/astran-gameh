@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from . import age_policy as _age_policy
+from . import age_entitlement_service as _ent
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
@@ -72,7 +73,7 @@ def make_dm_routers(
         epoch = None
         if isinstance(until, datetime):
             epoch = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).timestamp()
-        return {"age_category": _age_policy.effective_category(doc), "chat_muted_until": epoch}
+        return {"age_category": (_age_policy.effective_category(doc) if _ent.evaluate(doc, _ent.F_DM).allowed else None), "chat_muted_until": epoch}
 
     async def user_ages(ids: list) -> dict:
         rows = await db.users.find({"user_id": {"$in": ids}}, _age_policy.ACCESS_PROJECTION).to_list(len(ids))
@@ -224,7 +225,7 @@ def make_dm_routers(
             await websocket.close(code=4401)
             return
         _info = _age_policy.evaluate_access(user)
-        if _info.restricted or _info.limited:   # acord parental lipsa / varsta neverificata / fara varsta: mesageria cere consimtamant
+        if _info.restricted or _info.limited or not _ent.evaluate(user, _ent.F_DM).allowed:   # acord parental lipsa / varsta neverificata / fara varsta: mesageria cere consimtamant
             await websocket.close(code=4403)
             return
         uid = user["user_id"]

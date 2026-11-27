@@ -39,6 +39,7 @@ def isolated_tos_registry():
     del man["documents"]["privacy_policy"]
     tos = man["documents"]["terms_of_service"]
     tos["versions"] = [v for v in tos["versions"] if v["version"] == "1.1"]
+    tos["current"] = "1.1"      # manifestul real are 1.2 ca versiune curenta; acest test verifica continutul lui 1.1
     (tmp / "legal/manifest.json").write_text(json.dumps(man), encoding="utf-8")
     return L.LegalRegistry(tmp / "legal"), tmp
 

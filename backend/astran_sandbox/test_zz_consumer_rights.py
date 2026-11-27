@@ -105,6 +105,7 @@ class Base(unittest.TestCase):
             await db.users.insert_one(dict(u))
         await db.platform_config.insert_one({"key": "astran_packages", "currency": "RON", "packages": [
             {"package_id": "plus_300", "astrans": 300, "price": 11.99, "label": "Plus"}]})
+        await db.merchant_profiles.insert_one({"user_id": "seller", "seller_status": "non_trader"})   # DSA Art. 30: statut declarat (merchants.py)
         await db.shop_items.insert_one({"item_id": "i1", "kind": "model", "owner_id": "seller", "owner_username": "seller", "name": "Copac", "description": "",
                                         "price": 100, "is_public": True, "downloads": 0, "created_at": NOW, "model": {"parts": []}})
 

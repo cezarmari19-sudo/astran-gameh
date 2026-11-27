@@ -60,6 +60,15 @@ trebui interpolare intre ultimele doua pozitii primite - nu e inclusa in acest p
 from __future__ import annotations
 
 from astran_sandbox import age_policy as _age_policy
+from astran_sandbox import age_entitlement_service as _ent
+
+
+def _chat_category(user):
+    """Categoria folosita de chat-ul din joc: None (=> chat refuzat) daca contul nu are entitlement pentru mesagerie
+    (varsta neverificata, acord parental fara scopul `messaging`, acord retras). Reevaluat la fiecare mesaj."""
+    if not _ent.evaluate(user, _ent.F_DM).allowed:
+        return None
+    return _age_policy.effective_category(user)
 from astran_sandbox import age_guard as _age_guard
 from astran_sandbox import contact_policy as _cp
 import asyncio
@@ -329,7 +338,7 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
         if isinstance(until, datetime):
             epoch = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).timestamp()
         # categoria EFECTIVA (sigiliu verificat; None pentru cont limitat/neverificat => refuz in chat)
-        return {"age_category": _age_policy.effective_category(doc), "chat_muted_until": epoch}
+        return {"age_category": _chat_category(doc), "chat_muted_until": epoch}
 
     async def chat_recipient_ages(ids: list) -> dict:
         rows = await db.users.find({"user_id": {"$in": ids}}, _age_policy.ACCESS_PROJECTION).to_list(len(ids))
@@ -414,7 +423,7 @@ def make_realtime_router(resolve_user_from_token: Callable[[str], Awaitable[Opti
             ws=websocket, user_id=user_id, username=username,
             is_adult=_age_policy.effective_category(user) == ADULT,   # derivat din DB (sigiliu), nu de la client
             chat_limiter=ChatLimiter(),
-            age_category=_cp.category_of(_age_policy.effective_category(user)),   # strict; None = necunoscuta/limitat
+            age_category=_cp.category_of(_chat_category(user)),   # strict; None = necunoscuta/limitat/fara scopul `messaging`
         )
         previous = room.members.get(user_id)
         room.members[user_id] = member

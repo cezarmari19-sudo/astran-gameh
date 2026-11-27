@@ -205,7 +205,9 @@ async def _sync_user(db, consent: dict) -> None:
     # chei cu punct: nu suprascriem `parental.self_consent_at` (confirmarea proprie a unui utilizator de 16+)
     await db.users.update_one({"user_id": consent["child_user_id"]}, {"$set": {
         "parental.state": consent["state"], "parental.consent_id": consent["consent_id"],
-        "parental.updated_at": consent.get("updated_at")}})
+        "parental.updated_at": consent.get("updated_at"),
+        # scopurile se pastreaza DOAR cat acordul e APROBAT; la orice alta stare se golesc (si oricum valid_scopes le ignora)
+        "parental.scopes": consent.get("scopes", {}) if consent.get("state") == AP.PARENTAL_APPROVED else {}}})
 
 
 async def _transition(db, consent_id: str, from_states: tuple, to_state: str, fields: dict, now: datetime) -> dict:
@@ -518,6 +520,7 @@ def _public_consent(c: dict, child: Optional[dict] = None) -> dict:
         "approved_at": c.get("approved_at"), "withdrawn_at": c.get("withdrawn_at"), "expires_at": c.get("expires_at"),
         "notice_version": c.get("notice_version"), "terms_version": c.get("terms_version"), "privacy_version": c.get("privacy_version"),
         "verification_method": c.get("verification_method"), "verification_status": c.get("verification_status"),
+        "scopes": {k: bool(v.get("granted")) for k, v in (c.get("scopes") or {}).items() if isinstance(v, dict)},
         "child": {"username": (child or {}).get("username"), "display_name": (child or {}).get("display_name")} if child else None,
     }
 
@@ -619,3 +622,28 @@ async def child_status(db, child: dict) -> Optional[dict]:
     return {"consent_id": c["consent_id"], "state": c["state"], "requested_at": c["requested_at"], "expires_at": c.get("expires_at"),
             "approved_at": c.get("approved_at"), "parent_email_hint": c.get("parent_email_hint"), "delivery": c.get("delivery"),
             "verification_status": c.get("verification_status"), "verification_method": c.get("verification_method")}
+
+
+# ----------------------------------------------------------------------------- scopuri separate de consimtamant
+async def set_scope(db, parent_user: dict, consent_id: str, scope: Any, granted: Any, *, now: Optional[datetime] = None) -> dict:
+    """Parintele (verificat, legat de acord) acorda/retrage UN scop (social, messaging, groups, purchases, publish) pe un
+    acord APROBAT. Se pastreaza data, scopul si versiunile politicii. Retragerea unui scop are efect imediat (gate-ul
+    reciteste starea la fiecare cerere); retragerea acordului intreg le invalideaza pe toate."""
+    from . import age_entitlement_service as ENT
+    now = now or _now()
+    if scope not in ENT.CONSENT_SCOPES or not isinstance(granted, bool):
+        raise ParentalError("invalid_scope", 422)
+    c = await _authorize(db, parent_user, consent_id, now)
+    if c["state"] != AP.PARENTAL_APPROVED or c.get("superseded"):
+        raise ParentalError("consent_not_approved", 409)
+    rec = {"granted": granted, "consent_id": consent_id, "at": now, "terms_version": c.get("terms_version"),
+           "privacy_version": c.get("privacy_version"), "notice_version": c.get("notice_version")}
+    res = await db[C_CONSENTS].update_one({"consent_id": consent_id, "state": AP.PARENTAL_APPROVED}, {"$set": {f"scopes.{scope}": rec}})
+    if res.matched_count != 1:
+        raise ParentalError("consent_not_approved", 409)
+    c2 = await _get_consent(db, consent_id)
+    await _sync_user(db, c2)
+    await AU.record(db, AU.PARENTAL_SCOPE_CHANGED, subject_user_id=c["child_user_id"], actor="parent",
+                    details={"consent_id": consent_id, "kind": scope, "status": "granted" if granted else "revoked",
+                             "notice_version": c.get("notice_version")}, now=now)
+    return {"scope": scope, "granted": granted, "scopes": sorted(k for k, v in c2.get("scopes", {}).items() if v.get("granted"))}

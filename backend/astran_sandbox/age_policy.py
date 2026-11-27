@@ -410,6 +410,8 @@ def derive_category_doc(user: Optional[dict]) -> dict:
 RESTRICTED_ALLOWED_PREFIXES = (
     "/api/auth/me", "/api/auth/logout", "/api/age/", "/api/legal/", "/api/consent/", "/api/privacy/",
     "/api/account/data-export", "/api/parental/",
+    # GDPR Art. 16: un cont restrans (ex. data nasterii introdusa gresit) trebuie sa isi poata corecta datele personale
+    "/api/account/personal-data", "/api/account/email-change", "/api/account/dob-correction",
 )
 
 
