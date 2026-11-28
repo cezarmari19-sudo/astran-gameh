@@ -79,7 +79,10 @@ def purge_at(deleted_at, days: int | None = None):
 
 async def ensure_indexes(db) -> None:
     await db.games.create_index([("deleted", 1), ("deleted_at", 1)])
-    await db.game_instances.create_index("game_id")
+    try:
+        await db.game_instances.create_index("game_id")
+    except Exception:  # noqa: BLE001 - ex. IndexKeySpecsConflict (index unic existent cu acelasi nume): nu opreste pornirea
+        log.warning("trash purge: index game_id lipsa pe game_instances", exc_info=True)
     for coll in GAME_ID_COLLECTIONS:
         if coll != "recovery_tokens":  # recovery_tokens are deja TTL; game_id nu e critic acolo
             try:
