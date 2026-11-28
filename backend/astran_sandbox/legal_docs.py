@@ -51,6 +51,15 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def canonical_bytes(data: bytes) -> bytes:
+    """Forma canonica a unui text: sfarsituri de linie LF si exact UN newline final.
+
+    Editorii, clipboardul si Git pot pierde newline-ul final sau schimba LF<->CRLF fara sa schimbe textul.
+    Orice alta diferenta de continut ramane o nepotrivire.
+    """
+    return data.replace(b"\r\n", b"\n").rstrip(b"\r\n") + b"\n"
+
+
 class LegalRegistry:
     def __init__(self, legal_dir: Optional[Path] = None):
         self.dir = Path(legal_dir) if legal_dir else Path(os.environ.get("ASTRAN_LEGAL_DIR") or DEFAULT_LEGAL_DIR)
@@ -90,6 +99,13 @@ class LegalRegistry:
                     except OSError as e:
                         raise LegalDocsError(f"{doc_type} {ver} {lang}: file missing: {e}") from e
                     digest = sha256_bytes(raw)
+                    if digest != f.get("sha256"):
+                        canon = canonical_bytes(raw)
+                        canon_digest = sha256_bytes(canon)
+                        if canon_digest == f.get("sha256"):
+                            log.warning("%s %s %s: newline final / sfarsituri de linie normalizate pentru verificare",
+                                        doc_type, ver, lang)
+                            raw, digest = canon, canon_digest
                     if digest != f.get("sha256"):
                         raise LegalDocsError(
                             f"{doc_type} {ver} {lang}: content hash mismatch (a published version must never be edited; "
